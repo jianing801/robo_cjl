@@ -38,8 +38,8 @@ parser.add_argument("--eval-commands", type=str, default="1.0,0,0",
                     help="Semicolon-separated velocity commands for the BO objective. "
                          "Default: single 1.0 m/s forward command. Pass e.g. "
                          "'0.5,0,0;1.0,0,0;-0.5,0,0' to enable multi-speed evaluation.")
-parser.add_argument("--study-name", type=str, default="rpo_flat_leg_co_design")
-parser.add_argument("--db", type=str, default=None, help="Optuna DB path. Default: <HERE>/co_design_study.db")
+parser.add_argument("--study-name", type=str, default="rpo_flat_leg_co_design_sw")
+parser.add_argument("--db", type=str, default=None, help="Optuna DB path. Default: <HERE>/co_design_sw_study.db")
 parser.add_argument("--n-startup-trials", type=int, default=5)
 parser.add_argument("--train-timeout", type=int, default=86400, help="Timeout per training run (seconds).")
 parser.add_argument("--eval-timeout", type=int, default=7200, help="Timeout per eval run (seconds).")
@@ -48,7 +48,7 @@ parser.add_argument("--fail-value", type=float, default=-200.0,
                          "(infeasible design). -200 matches the fall-termination penalty floor.")
 args = parser.parse_args()
 
-db_path = args.db or os.path.join(HERE, "co_design_study.db")
+db_path = args.db or os.path.join(HERE, "co_design_sw_study.db")
 
 import optuna
 
@@ -58,6 +58,7 @@ def run_training(thigh: float, calf: float) -> tuple[str, str]:
     """Run co_design_train.py in subprocess. Returns (log_dir, ckpt_path)."""
     cmd = [
         sys.executable, TRAIN_SCRIPT,
+        "--urdf-model", "sw",
         "--thigh", str(thigh),
         "--calf", str(calf),
         "--task", "RPO-Flat",
@@ -109,6 +110,7 @@ def run_evaluation(ckpt_path: str, thigh: float, calf: float) -> float:
     cmd_returns = {}
     for cmd_str in args.eval_commands.split(";"):
         cmd_parts = [sys.executable, EVAL_SCRIPT,
+                     "--urdf-model", "sw",
                      "--checkpoint", ckpt_path,
                      "--thigh", str(thigh), "--calf", str(calf),
                      "--task", "RPO-Flat",
@@ -139,8 +141,8 @@ def run_evaluation(ckpt_path: str, thigh: float, calf: float) -> float:
 
 # ── Optuna objective ────────────────────────────────────────────────────
 def objective(trial: optuna.Trial) -> float:
-    thigh = trial.suggest_float("thigh_length", 0.20, 0.30)
-    calf  = trial.suggest_float("calf_length", 0.24, 0.36)
+    thigh = trial.suggest_float("thigh_length", 0.25, 0.40)
+    calf  = trial.suggest_float("calf_length", 0.30, 0.45)
 
     print(f"\n{'='*60}")
     print(f"[co_design] Trial {trial.number}: thigh={thigh:.4f}  calf={calf:.4f}")
@@ -201,6 +203,12 @@ if __name__ == "__main__":
         study_name=args.study_name,
         load_if_exists=True,
     )
+
+    model_protocol = {"urdf_model": "sw", "thigh_range": [0.25, 0.40],
+                      "calf_range": [0.30, 0.45]}
+    if study.trials and study.user_attrs.get("model_protocol") != model_protocol:
+        raise ValueError("URDF model/ranges differ or are unrecorded; use a new --db or --study-name.")
+    study.set_user_attr("model_protocol", model_protocol)
 
     completed = [trial for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE]
     remaining = max(0, args.trials - len(completed))

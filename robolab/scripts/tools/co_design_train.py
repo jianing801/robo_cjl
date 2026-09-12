@@ -26,6 +26,8 @@ sys.path.insert(0, os.path.abspath(_RSL_RL_SCRIPTS))
 import cli_args  # isort: skip
 
 parser = argparse.ArgumentParser(description="Co-design parameterized training.")
+parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
+                    help="URDF parameter model; SW fits are the default.")
 parser.add_argument("--thigh", type=float, required=True, help="Thigh length (m).")
 parser.add_argument("--calf", type=float, required=True, help="Calf length (m).")
 parser.add_argument("--task", type=str, default="RPO-Flat")
@@ -87,6 +89,8 @@ import robolab.tasks  # noqa: F401
 
 # ── Parameterized URDF ──────────────────────────────────────────────────
 from robolab.scripts.tools.generate_urdf import generate_urdf
+if args_cli.urdf_model == "sw":
+    from robolab.scripts.tools.generate_urdf_sw import generate_urdf
 from robolab.assets.robots import RPO_CFG
 
 logger = logging.getLogger(__name__)

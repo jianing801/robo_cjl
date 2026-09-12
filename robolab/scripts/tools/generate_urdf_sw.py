@@ -120,7 +120,6 @@ import json
 import math
 import os
 from pathlib import Path
-import warnings
 import xml.etree.ElementTree as ET
 import numpy as np
 
@@ -303,8 +302,6 @@ def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
         if not path.is_file():
             raise FileNotFoundError(f'Mesh missing: {path}; provide --mesh-dir')
         mesh.set('filename',str(path))
-    if properties['calf']['extrapolated']:
-        warnings.warn('Calf 0.30 <= length < 0.31 m is extrapolation, not independently validated.', stacklevel=2)
     output.parent.mkdir(parents=True,exist_ok=True)
     # 独占创建，禁止无意覆盖既有URDF。
     with output.open('xb') as f:
@@ -345,6 +342,7 @@ def main():
         module = types.ModuleType('robolab.scripts.tools.generate_urdf')
         module.generate_urdf = injected
         sys.modules[module.__name__] = module
+        sys.modules['robolab.scripts.tools.generate_urdf_sw'] = module
         sys.path.insert(0,str(Path(__file__).resolve().parents[3]))
         sys.argv = [str(script)] + forwarded
         runpy.run_path(str(script),run_name='__main__')

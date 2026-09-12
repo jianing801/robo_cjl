@@ -6,7 +6,7 @@
 
 `robolab/scripts/tools/generate_urdf_sw.py`
 
-新增生成器和本说明文档。现有generate_urdf.py、训练/评估脚本、BO脚本及URDF源文件不变。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。
+生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。电机执行器、扭矩/速度限制、PD参数及单目标优化方法保持原实现，暂不接入电机曲线或型号变量，也不增加消融实验。
 
 原代码参考：https://github.com/guagua1413028593-sketch/robo_cjl/blob/0a99617706f375a25efc88735256bb8bd7031f81/robolab/scripts/tools/generate_urdf.py
 
@@ -17,7 +17,7 @@
 | 大腿 | 一次 | 四次 | 0.25～0.40，16点 | 0.25～0.40 | (l−0.325)/0.075 |
 | 小腿 | 一次 | 五次 | 0.31～0.45，15点 | 0.30～0.45 | (l−0.38)/0.07 |
 
-小腿0.30m原始点被用户明确排除，未参与任何系数计算。0.30≤小腿长度<0.31m属于外推，调用时给出提示并记录在生成报告中。两条腿共用相同结构的拟合模型，通过显式坐标变换/镜像映射至左右link；若左右部件配置不同，不能用镜像替代另一侧CAD参数。
+小腿0.30m原始点被用户明确排除，未参与任何系数计算。整个0.30～0.45m范围正常使用，不输出外推警告；报告保留既有状态字段。两条腿共用相同结构的拟合模型，通过显式坐标变换/镜像映射至左右link；若左右部件配置不同，不能用镜像替代另一侧CAD参数。
 
 系数取自本次已验证的拟合结果。系数已经恢复为物理输出：质量kg、质心m、惯量kg·m²。按升幂存储，运行时用Horner法求值，不再进行训练输出标准化。代码中的MODELS记录完整系数、归一化中心及半宽。
 
@@ -83,9 +83,19 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 
 `--`后参数原样传给原训练脚本，可追加原有训练选项。评估时改成`--run co_design_eval`并追加原评估脚本所需参数。应在原Isaac Lab环境及其原有Python启动方式下运行。
 
-直接继续运行旧co_design_train.py仍然使用旧生成器；只有通过上述新入口启动，才会在该进程使用SW拟合。该注入不跨子进程继承。
+当前直接运行co_design_train.py或co_design_eval.py默认使用SW生成器，无需包装入口。上述包装方式仍支持自定义模板、网格与坐标映射。评估旧模型训练的检查点时，可显式传入`--urdf-model legacy`；训练和评估应选择相同模型。
 
-外层co_design.py没有自动改动：它仍使用旧搜索范围（大腿0.20～0.30、小腿0.24～0.36）及旧子进程启动方式。完整BO流水线接入时，需要同时将范围更新为大腿0.25～0.40、小腿0.30～0.45，并让训练和评估子进程通过新入口启动。本次只新增文件，不宣称现有BO会自动切换。
+外层co_design.py现在显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m。默认数据库改为`co_design_sw_study.db`、study名称改为`rpo_flat_leg_co_design_sw`，防止混用旧模型结果；指定已有study时检查模型协议，不兼容则要求换库或换名称。优化目标仍为原有平均回报，未加入CoT多目标优化。
+
+在原项目Isaac Lab环境、机器人资产齐全的前提下，从仓库根目录运行：
+
+```bash
+python robolab/scripts/tools/co_design_train.py --thigh 0.30 --calf 0.35 --headless
+python robolab/scripts/tools/co_design_eval.py --checkpoint /路径/model.pt --thigh 0.30 --calf 0.35 --headless
+python robolab/scripts/tools/co_design.py --trials 30 --max-iterations 12000 --num-envs 4096
+```
+
+本次接入仅作离线检查，没有在当前环境执行Isaac训练；以下初版生成器验证记录不代表新策略性能。
 
 也可以在新的调用程序中导入generate_urdf_sw.generate_urdf，保留旧函数前四个参数即可使用默认左腿映射；需要覆盖时再传frame_map或aligned_side。
 
@@ -112,4 +122,3 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 旧策略在旧URDF正常，不保证在新URDF保持同样表现。新大腿0.25m处主要惯量相较旧模型约降低24%，影响可能比两个小交叉项变号更明显。首次验证宜固定相同腿长、策略、指令和初始状态，只比较惯性参数更新造成的影响；尚无新URDF上的实测训练/评估结论。
 
 视觉网格不随腿长改变，碰撞盒与关节位置随长度更新。动力学采用inertial，接触采用collision；视觉模型可影响渲染和视觉传感器输入。Isaac导入后应实际核对质量/惯量被采用、碰撞几何正确，不能仅凭源配置未出现覆盖选项推断所有导入默认值。
-

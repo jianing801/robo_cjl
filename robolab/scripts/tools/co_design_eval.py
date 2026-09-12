@@ -17,6 +17,8 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
+                    help="Must match the URDF model used during training.")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--thigh", type=float, required=True)
 parser.add_argument("--calf", type=float, required=True)
@@ -104,6 +106,8 @@ import robolab.tasks  # noqa: F401
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
 from robolab.scripts.tools.generate_urdf import generate_urdf
+if args_cli.urdf_model == "sw":
+    from robolab.scripts.tools.generate_urdf_sw import generate_urdf
 from robolab.assets.robots import RPO_CFG
 from robolab.tasks.direct.base.scene_cfg import SceneCfg
 
