@@ -6,7 +6,7 @@
 
 `robolab/scripts/tools/generate_urdf_sw.py`
 
-生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。电机执行器、扭矩/速度限制、PD参数及单目标优化方法保持原实现，暂不接入电机曲线或型号变量，也不增加消融实验。
+生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。电机执行器、扭矩/速度限制和PD参数保持原实现，暂不接入电机曲线或型号变量，也不增加消融实验。外层BO已改为速度跟踪代价与机械CoT双目标优化。
 
 原代码参考：https://github.com/guagua1413028593-sketch/robo_cjl/blob/0a99617706f375a25efc88735256bb8bd7031f81/robolab/scripts/tools/generate_urdf.py
 
@@ -85,7 +85,20 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 
 当前直接运行co_design_train.py或co_design_eval.py默认使用SW生成器，无需包装入口。上述包装方式仍支持自定义模板、网格与坐标映射。评估旧模型训练的检查点时，可显式传入`--urdf-model legacy`；训练和评估应选择相同模型。
 
-外层co_design.py现在显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m。默认数据库改为`co_design_sw_study.db`、study名称改为`rpo_flat_leg_co_design_sw`，防止混用旧模型结果；指定已有study时检查模型协议，不兼容则要求换库或换名称。优化目标仍为原有平均回报，未加入CoT多目标优化。
+外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m。默认数据库为`co_design_track_cot.db`、study名称为`rpo_flat_track_cot_sw`，防止混用旧模型和单目标结果；指定已有study时检查模型协议，不兼容则要求换库或换名称。
+
+PPO训练奖励保持不变。结构评价不再使用episode return作为优化目标，而是同时最小化：
+
+```text
+tracking_cost = mean(||v_xy_cmd - v_xy||^2 + (wz_cmd - wz)^2)
+mechanical_CoT = sum(|tau * joint_velocity| * dt) / (mass * 9.81 * traveled_distance)
+```
+
+线速度在机器人yaw坐标系下比较，偏航角速度在世界坐标系下比较，与训练跟踪项的坐标定义一致。评价结果同时输出线速度和偏航角速度的MSE/RMSE。机械距离按逐步水平路径长度累计；仅允许含非零平移的BO评价指令。提前终止、距离不足或非有限指标作为不可行设计，赋予被正常解支配的惩罚值。训练reward和evaluation return仍记录为诊断数据，不参与外层优化。
+
+Optuna study使用两个`minimize`方向，并要求Optuna>=4.4，由`GPSampler`通过多目标logEHVI采集函数选择新腿长；依赖或版本不满足时明确报错，不在同一实验中替换优化算法。优化完成后终端列出可行帕累托前沿，并在数据库同目录写出`*_pareto.csv`。默认固定测试指令为`0.5,0,0`，即沿机器人前向以0.5m/s运动；CoT按总机械能与总路径距离计算。可通过`--eval-commands`显式增加其他平移工况。
+
+参考Du等人2025年论文表1，训练奖励中的平面线速度跟踪权重由1.0提高到2.0，偏航角速度跟踪权重由1.0提高到1.5，指数误差尺度`std=0.5`保持不变。这两个权重同时作用于使用`RPORewardCfg`的Flat及其派生任务；外层评价仍使用原始跟踪误差和机械CoT，不使用加权训练回报。
 
 在原项目Isaac Lab环境、机器人资产齐全的前提下，从仓库根目录运行：
 
