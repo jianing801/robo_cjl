@@ -58,8 +58,8 @@ from robolab.tasks.direct.base import (  # noqa:F401
 
 @configclass
 class RPORewardCfg(RewardCfg):
-    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=1.0, params={"std": 0.5})
-    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.0, params={"std": 0.5})
+    track_lin_vel_xy_exp = RewTerm(func=mdp.track_lin_vel_xy_yaw_frame_exp, weight=2.0, params={"std": 0.5})
+    track_ang_vel_z_exp = RewTerm(func=mdp.track_ang_vel_z_world_exp, weight=1.5, params={"std": 0.5})
     # Direction-aware one-sided underspeed penalty. It applies only when the
     # commanded planar speed is nonzero, and works for forward/backward/lateral
     # motion alike.

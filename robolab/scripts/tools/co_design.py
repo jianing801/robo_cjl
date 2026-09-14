@@ -35,9 +35,9 @@ parser.add_argument("--max-iterations", type=int, default=12000,
                     help="PPO updates per trial; 12000 writes final model_11999.pt.")
 parser.add_argument("--num-envs", type=int, default=4096, help="Number of parallel envs for training.")
 parser.add_argument("--eval-episodes", type=int, default=1, help="Evaluation episodes per trial.")
-parser.add_argument("--eval-commands", type=str, default="0.5,0,0;1.0,0,0",
+parser.add_argument("--eval-commands", type=str, default="0.5,0,0",
                     help="Semicolon-separated velocity commands for the BO objective. "
-                         "Default: 0.5 and 1.0 m/s forward. Pass e.g. "
+                         "Default: 0.5 m/s forward. Pass e.g. "
                          "'0.5,0,0;1.0,0,0;-0.5,0,0' to enable multi-speed evaluation.")
 parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_sw")
 parser.add_argument("--db", type=str, default=None, help="Optuna DB path. Default: <HERE>/co_design_track_cot.db")
