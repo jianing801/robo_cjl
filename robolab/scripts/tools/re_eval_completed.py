@@ -32,6 +32,8 @@ import optuna
 
 db_url = f"sqlite:///{db_path}"
 study = optuna.load_study(study_name=args.study_name, storage=db_url)
+if len(study.directions) != 1:
+    raise ValueError("This legacy utility only supports single-objective studies; it cannot rewrite tracking/CoT studies.")
 
 # ── Collect completed trials with checkpoints ────────────────────────────
 to_reeval = []

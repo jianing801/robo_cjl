@@ -4,6 +4,8 @@ The evaluator supports one or more semicolon-separated velocity commands and
 repeats each command for ``--num-episodes`` complete rollouts. It measures the
 pre-reset terminal state, so transport distance, mechanical power, CoT, and
 optional recordings never include the environment's automatic reset pose.
+The structural performance metric is the time-averaged squared command
+tracking error; episode return is retained only as a training diagnostic.
 """
 
 import argparse
@@ -99,6 +101,7 @@ import importlib.metadata as metadata
 from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
+from isaaclab.utils import math as math_utils
 
 import isaaclab_tasks  # noqa: F401
 import robolab.tasks  # noqa: F401
@@ -270,10 +273,15 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
         start_pos = robot_asset.data.root_pos_w[0].clone()
         ep_return = 0.0
         total_energy_j = 0.0
+        linear_tracking_sse = 0.0
+        yaw_tracking_sse = 0.0
+        path_distance_m = 0.0
         end_pos = start_pos
+        previous_pos = start_pos
         terminated_early = False
 
         for step in range(max_steps):
+            evaluated_command = env.unwrapped.command_generator.command[0, :3].clone()
             with torch.no_grad():
                 obs, rewards, dones, extras = env.step(policy(obs))
             reward = float(rewards[0])
@@ -290,6 +298,27 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
                 state["applied_torque"] * state["joint_vel"]
             )).item()) * step_dt
             end_pos = state["root_pos_w"].clone()
+            path_distance_m += float(torch.linalg.vector_norm(
+                (end_pos - previous_pos)[:2]
+            ).item())
+            previous_pos = end_pos
+
+            # The training reward compares planar velocity in the yaw frame
+            # and yaw rate in the world frame. Use the same physical errors,
+            # but report their raw squared values rather than shaped reward.
+            root_quat = state["root_quat_w"].unsqueeze(0)
+            root_lin_vel = state["root_lin_vel_w"].unsqueeze(0)
+            velocity_yaw = math_utils.quat_apply_inverse(
+                math_utils.yaw_quat(root_quat), root_lin_vel
+            )[0]
+            command_tensor = evaluated_command.to(device=velocity_yaw.device,
+                                                   dtype=velocity_yaw.dtype)
+            linear_tracking_sse += float(torch.sum(torch.square(
+                velocity_yaw[:2] - command_tensor[:2]
+            )).item())
+            yaw_tracking_sse += float(torch.square(
+                state["root_ang_vel_w"][2] - command_tensor[2]
+            ).item())
 
             if args_cli.record:
                 recorded_rows.append(_record_row(state, reward, step, step_dt, joint_names, done))
@@ -303,18 +332,22 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
 
         steps = step + 1
         elapsed_s = steps * step_dt
-        distance_m = float(torch.norm((end_pos - start_pos)[:2]).item())
+        displacement_m = float(torch.norm((end_pos - start_pos)[:2]).item())
         mean_power_w = total_energy_j / elapsed_s
-        v_actual_m_s = distance_m / elapsed_s
-        cot = mean_power_w / (total_mass * 9.81 * v_actual_m_s) if v_actual_m_s > 0.01 else float("nan")
+        v_actual_m_s = path_distance_m / elapsed_s
+        cot = total_energy_j / (total_mass * 9.81 * path_distance_m) if path_distance_m > 0.01 else float("nan")
         episode_metrics.append({
             "episode_return": ep_return,
             "elapsed_s": elapsed_s,
-            "distance_m": distance_m,
+            "displacement_m": displacement_m,
+            "distance_m": path_distance_m,
             "energy_j": total_energy_j,
             "mean_power_w": mean_power_w,
             "v_actual_m_s": v_actual_m_s,
             "cot": cot,
+            "linear_tracking_mse": linear_tracking_sse / steps,
+            "yaw_tracking_mse": yaw_tracking_sse / steps,
+            "tracking_cost": (linear_tracking_sse + yaw_tracking_sse) / steps,
             "terminated_early": terminated_early,
         })
 
@@ -326,6 +359,15 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
     cot = mean_power_w / (total_mass * 9.81 * v_actual_m_s) if v_actual_m_s > 0.01 else float("nan")
     returns = [metric["episode_return"] for metric in episode_metrics]
     avg_return = sum(returns) / len(returns)
+    total_steps = sum(round(metric["elapsed_s"] / step_dt) for metric in episode_metrics)
+    linear_tracking_mse = sum(
+        metric["linear_tracking_mse"] * round(metric["elapsed_s"] / step_dt)
+        for metric in episode_metrics
+    ) / total_steps
+    yaw_tracking_mse = sum(
+        metric["yaw_tracking_mse"] * round(metric["elapsed_s"] / step_dt)
+        for metric in episode_metrics
+    ) / total_steps
     aggregate = {
         "command": _command_key(command),
         "command_vector": list(command),
@@ -333,6 +375,11 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
         "avg_episode_return": avg_return,
         "episode_returns": returns,
         "std_episode_return": math.sqrt(sum((value - avg_return) ** 2 for value in returns) / len(returns)),
+        "tracking_cost": linear_tracking_mse + yaw_tracking_mse,
+        "linear_tracking_mse": linear_tracking_mse,
+        "linear_tracking_rmse_m_s": math.sqrt(linear_tracking_mse),
+        "yaw_tracking_mse": yaw_tracking_mse,
+        "yaw_tracking_rmse_rad_s": math.sqrt(yaw_tracking_mse),
         "cot": cot,
         "mass_kg": total_mass,
         "mean_power_w": mean_power_w,
@@ -408,7 +455,8 @@ try:
                 record_joint_names = list(env.unwrapped.scene["robot"].data.joint_names)
             print(
                 f"[eval] cmd={command_result['command']} return={command_result['avg_episode_return']:.3f} "
-                f"cot={command_result['cot']:.4f} v_h={command_result['v_actual_m_s']:.3f} m/s "
+                f"track={command_result['tracking_cost']:.4f} cot={command_result['cot']:.4f} "
+                f"v_path={command_result['v_actual_m_s']:.3f} m/s "
                 f"({args_cli.num_episodes} episode(s))",
                 flush=True,
             )
@@ -425,11 +473,21 @@ try:
     total_distance_m = sum(result["total_distance_m"] for result in command_results)
     total_mass = command_results[0]["mass_kg"]
     aggregate_cot = total_energy_j / (total_mass * 9.81 * total_distance_m) if total_distance_m > 0.01 else float("nan")
+    tracking_cost = sum(result["tracking_cost"] for result in command_results) / len(command_results)
+    linear_tracking_mse = sum(result["linear_tracking_mse"] for result in command_results) / len(command_results)
+    yaw_tracking_mse = sum(result["yaw_tracking_mse"] for result in command_results) / len(command_results)
     result = {
         "avg_episode_return": avg_episode_return,
         "avg_return": avg_episode_return,  # legacy alias for batch tooling
         "episode_returns": command_results[0]["episode_returns"] if len(command_results) == 1 else [],
         "cot": aggregate_cot,
+        "tracking_cost": tracking_cost,
+        "linear_tracking_mse": linear_tracking_mse,
+        "linear_tracking_rmse_m_s": math.sqrt(linear_tracking_mse),
+        "yaw_tracking_mse": yaw_tracking_mse,
+        "yaw_tracking_rmse_rad_s": math.sqrt(yaw_tracking_mse),
+        "terminated_early_episodes": sum(result["terminated_early_episodes"] for result in command_results),
+        "total_evaluated_episodes": len(command_results) * args_cli.num_episodes,
         "mass_kg": total_mass,
         "thigh": args_cli.thigh,
         "calf": args_cli.calf,
