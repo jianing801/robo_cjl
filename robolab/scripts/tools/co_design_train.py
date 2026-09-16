@@ -18,6 +18,17 @@ import re
 import logging
 from datetime import datetime
 
+_PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from robolab.assets.rpo_motor_catalog import (  # noqa: E402
+    ANKLE_MOTOR_CHOICES,
+    DEFAULT_ANKLE_MOTOR,
+    DEFAULT_KNEE_MOTOR,
+    KNEE_MOTOR_CHOICES,
+)
+
 from isaaclab.app import AppLauncher
 
 # local imports — add rsl_rl scripts dir to path for cli_args
@@ -30,6 +41,14 @@ parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
                     help="URDF parameter model; SW fits are the default.")
 parser.add_argument("--thigh", type=float, required=True, help="Thigh length (m).")
 parser.add_argument("--calf", type=float, required=True, help="Calf length (m).")
+parser.add_argument("--knee-motor", choices=KNEE_MOTOR_CHOICES, default=DEFAULT_KNEE_MOTOR,
+                    help="Knee motor ID; applied symmetrically to both knees.")
+parser.add_argument("--ankle-motor", choices=ANKLE_MOTOR_CHOICES, default=DEFAULT_ANKLE_MOTOR,
+                    help="Common motor ID for all four ankle pitch/roll joints.")
+parser.add_argument("--knee-envelope-csv", type=str, default=None,
+                    help="Optional MATLAB torque-speed CSV overriding the selected knee motor curve.")
+parser.add_argument("--ankle-envelope-csv", type=str, default=None,
+                    help="Optional MATLAB torque-speed CSV overriding the selected ankle motor curve.")
 parser.add_argument("--task", type=str, default="RPO-Flat")
 parser.add_argument("--agent", type=str, default="rsl_rl_cfg_entry_point")
 parser.add_argument("--num-envs", type=int, default=4096)
@@ -88,10 +107,10 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import robolab.tasks  # noqa: F401
 
 # ── Parameterized URDF ──────────────────────────────────────────────────
-from robolab.scripts.tools.generate_urdf import generate_urdf
+from generate_urdf import generate_urdf
 if args_cli.urdf_model == "sw":
-    from robolab.scripts.tools.generate_urdf_sw import generate_urdf
-from robolab.assets.robots import RPO_CFG
+    from generate_urdf_sw import generate_urdf
+from robolab.assets.robots import RPO_CFG, configure_rpo_motors
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +181,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
 
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if hasattr(env_cfg, "scene_context"):
+        env_cfg.scene_context.num_envs = env_cfg.scene.num_envs
     env_cfg.scene.env_spacing = 2.5
     agent_cfg.max_iterations = args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
 
@@ -173,6 +194,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
 
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.headless:
+        env_cfg.commands.debug_vis = False
 
     # Force tensorboard logger to avoid wandb auth issues in headless co-design
     agent_cfg.logger = "tensorboard"
@@ -207,7 +230,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
 
     custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     custom_robot_cfg.spawn.asset_path = urdf_path
+    custom_robot_cfg.spawn.usd_dir = os.path.join(tmp_dir, "usd")
     custom_robot_cfg.init_state.pos = (0.0, 0.0, base_z)
+    motor_selection = configure_rpo_motors(
+        custom_robot_cfg,
+        knee_motor=args_cli.knee_motor,
+        ankle_motor=args_cli.ankle_motor,
+        knee_envelope_csv=args_cli.knee_envelope_csv,
+        ankle_envelope_csv=args_cli.ankle_envelope_csv,
+    )
 
     if hasattr(env_cfg, "scene_context"):
         env_cfg.scene_context.robot = custom_robot_cfg
@@ -224,6 +255,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         )
 
     print(f"[co_design_train] thigh={args_cli.thigh:.4f}m  calf={args_cli.calf:.4f}m  base_z={base_z:.3f}m")
+    print(
+        f"[co_design_train] motors: knee={args_cli.knee_motor} "
+        f"({motor_selection['knee']['peak_torque_nm']:.3f} Nm, "
+        f"{motor_selection['knee']['max_speed_rad_s']:.3f} rad/s), "
+        f"ankle={args_cli.ankle_motor} "
+        f"({motor_selection['ankle']['peak_torque_nm']:.3f} Nm, "
+        f"{motor_selection['ankle']['max_speed_rad_s']:.3f} rad/s, "
+        f"dynamic_envelope={motor_selection['ankle']['dynamic_envelope']})"
+    )
     print(f"[co_design_train] URDF: {urdf_path}")
 
     # ── Create env ──────────────────────────────────────────────────────

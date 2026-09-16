@@ -35,6 +35,15 @@ from isaaclab.actuators import DelayedPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 from robolab.assets import ISAAC_DATA_DIR
+from robolab.assets.rpo_motor_catalog import (
+    ANKLE_MOTOR_CHOICES,
+    DEFAULT_ANKLE_MOTOR,
+    DEFAULT_KNEE_MOTOR,
+    KNEE_MOTOR_CHOICES,
+    get_motor_spec,
+    load_torque_speed_envelope,
+)
+from robolab.actuators import TorqueSpeedEnvelopeActuatorCfg
 
 RPO_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
@@ -85,7 +94,6 @@ RPO_CFG = ArticulationCfg(
                 ".*_thigh_yaw_joint",
                 ".*_thigh_roll_joint",
                 ".*_thigh_pitch_joint",
-                ".*_knee_joint",
                 ".*torso.*",
             ],
             effort_limit_sim=120.0,
@@ -94,16 +102,26 @@ RPO_CFG = ArticulationCfg(
                 ".*_thigh_yaw_joint": 100.0,
                 ".*_thigh_roll_joint": 100.0,
                 ".*_thigh_pitch_joint": 100.0,
-                ".*_knee_joint": 150.0,
                 ".*torso.*": 150.0,
             },
             damping={
                 ".*_thigh_yaw_joint": 3.3,
                 ".*_thigh_roll_joint": 3.3,
                 ".*_thigh_pitch_joint": 3.3,
-                ".*_knee_joint": 5.0,
                 ".*torso.*": 5.0,
             },
+            armature=0.01,
+            min_delay=0,
+            max_delay=2,
+        ),
+        "knees": DelayedPDActuatorCfg(
+            joint_names_expr=[".*_knee_joint"],
+            effort_limit_sim=120.0,
+            velocity_limit_sim=25.0,
+            stiffness=150.0,
+            damping=5.0,
+            # Rotor/gear inertias are not published for the candidates.  Keep
+            # the prior value; the catalog's rigid-body inertia is not armature.
             armature=0.01,
             min_delay=0,
             max_delay=2,
@@ -153,6 +171,64 @@ RPO_CFG = ArticulationCfg(
         ),
     },
 )
+
+
+def configure_rpo_motors(
+    robot_cfg: ArticulationCfg,
+    knee_motor: str = DEFAULT_KNEE_MOTOR,
+    ankle_motor: str = DEFAULT_ANKLE_MOTOR,
+    knee_envelope_csv: str | None = None,
+    ankle_envelope_csv: str | None = None,
+) -> dict[str, dict[str, object]]:
+    """Apply selected knee and common ankle actuator models to ``robot_cfg``.
+
+    If a selected motor has a torque-speed CSV (or an override CSV is passed),
+    its delayed PD output is clipped by that curve at every simulation step.
+    URDF geometry, mass, center of mass, rigid-body inertia, and armature remain
+    untouched.
+    """
+
+    knee = get_motor_spec(knee_motor, KNEE_MOTOR_CHOICES)
+    ankle = get_motor_spec(ankle_motor, ANKLE_MOTOR_CHOICES)
+    dynamic_envelope: dict[str, bool] = {}
+
+    for actuator_name, motor, legacy_id, csv_override in (
+        ("knees", knee, DEFAULT_KNEE_MOTOR, knee_envelope_csv),
+        ("feet", ankle, DEFAULT_ANKLE_MOTOR, ankle_envelope_csv),
+    ):
+        actuator_cfg = robot_cfg.actuators[actuator_name]
+        actuator_cfg.effort_limit_sim = motor.peak_torque_nm
+        actuator_cfg.velocity_limit_sim = motor.max_speed_rad_s
+        # DelayedPDActuator is explicit: effort_limit clips its computed torque,
+        # while effort_limit_sim only constrains the physics solver.  Set both
+        # for real candidates.  None preserves the old URDF-resolved behavior.
+        actuator_cfg.effort_limit = None if motor.motor_id == legacy_id else motor.peak_torque_nm
+        actuator_cfg.velocity_limit = None if motor.motor_id == legacy_id else motor.max_speed_rad_s
+
+        envelope = load_torque_speed_envelope(motor, csv_override)
+        dynamic_envelope[actuator_name] = envelope is not None
+        if envelope is not None:
+            robot_cfg.actuators[actuator_name] = TorqueSpeedEnvelopeActuatorCfg(
+                joint_names_expr=actuator_cfg.joint_names_expr,
+                effort_limit=motor.peak_torque_nm,
+                velocity_limit=motor.max_speed_rad_s,
+                effort_limit_sim=motor.peak_torque_nm,
+                velocity_limit_sim=motor.max_speed_rad_s,
+                stiffness=actuator_cfg.stiffness,
+                damping=actuator_cfg.damping,
+                armature=actuator_cfg.armature,
+                friction=actuator_cfg.friction,
+                dynamic_friction=actuator_cfg.dynamic_friction,
+                viscous_friction=actuator_cfg.viscous_friction,
+                min_delay=actuator_cfg.min_delay,
+                max_delay=actuator_cfg.max_delay,
+                torque_speed_lookup=envelope,
+            )
+
+    result = {"knee": knee.as_dict(), "ankle": ankle.as_dict()}
+    result["knee"]["dynamic_envelope"] = dynamic_envelope["knees"]
+    result["ankle"]["dynamic_envelope"] = dynamic_envelope["feet"]
+    return result
 
 
 RPO_LINKS = [

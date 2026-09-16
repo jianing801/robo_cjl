@@ -1,4 +1,4 @@
-"""Bi-level co-design: Bayesian Optimization over (thigh, calf) with RL inner loop.
+"""Bi-level co-design over leg lengths and knee/ankle motor choices.
 
 Outer loop: Optuna Gaussian-process multi-objective minimization of command-tracking error
 and mechanical cost of transport (CoT).
@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -27,8 +28,18 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRAIN_SCRIPT = os.path.join(HERE, "co_design_train.py")
 EVAL_SCRIPT  = os.path.join(HERE, "co_design_eval.py")
+PACKAGE_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+if PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, PACKAGE_ROOT)
 
-parser = argparse.ArgumentParser(description="Bi-level co-design BO over leg lengths.")
+from robolab.assets.rpo_motor_catalog import (  # noqa: E402
+    ANKLE_MOTOR_CANDIDATES,
+    KNEE_MOTOR_CANDIDATES,
+    get_motor_spec,
+    load_torque_speed_envelope,
+)
+
+parser = argparse.ArgumentParser(description="Bi-level co-design BO over leg lengths and motor choices.")
 parser.add_argument("--trials", type=int, default=30,
                     help="Target number of COMPLETE BO trials in the study.")
 parser.add_argument("--max-iterations", type=int, default=12000,
@@ -39,8 +50,17 @@ parser.add_argument("--eval-commands", type=str, default="0.5,0,0",
                     help="Semicolon-separated velocity commands for the BO objective. "
                          "Default: 0.5 m/s forward. Pass e.g. "
                          "'0.5,0,0;1.0,0,0;-0.5,0,0' to enable multi-speed evaluation.")
-parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_sw")
-parser.add_argument("--db", type=str, default=None, help="Optuna DB path. Default: <HERE>/co_design_track_cot.db")
+parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_sw_motors")
+parser.add_argument("--db", type=str, default=None,
+                    help="Optuna DB path. Default: <HERE>/co_design_track_cot_motors.db")
+parser.add_argument("--knee-motors", type=str, default=",".join(KNEE_MOTOR_CANDIDATES),
+                    help="Comma-separated knee motor IDs used as a categorical search space.")
+parser.add_argument("--ankle-motors", type=str, default=",".join(ANKLE_MOTOR_CANDIDATES),
+                    help="Comma-separated common ankle motor IDs used as a categorical search space.")
+parser.add_argument("--knee-envelope-csv", type=str, default=None,
+                    help="Optional MATLAB CSV override used for every selected knee motor.")
+parser.add_argument("--ankle-envelope-csv", type=str, default=None,
+                    help="Optional MATLAB CSV override used for every selected ankle motor.")
 parser.add_argument("--n-startup-trials", type=int, default=5)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--train-timeout", type=int, default=86400, help="Timeout per training run (seconds).")
@@ -50,6 +70,41 @@ parser.add_argument("--fail-tracking", type=float, default=1e6,
 parser.add_argument("--fail-cot", type=float, default=1e6,
                     help="CoT objective assigned to infeasible trials.")
 args = parser.parse_args()
+
+
+def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> tuple[str, ...]:
+    # dict.fromkeys removes accidental duplicates without changing user order.
+    candidates = tuple(dict.fromkeys(value.strip() for value in spec.split(",") if value.strip()))
+    if not candidates:
+        parser.error(f"{label} motor candidate list must not be empty.")
+    try:
+        for motor_id in candidates:
+            get_motor_spec(motor_id, allowed)
+    except ValueError as exc:
+        parser.error(str(exc))
+    return candidates
+
+
+def _envelope_signature(motor_id: str, csv_override: str | None) -> str | None:
+    """Fingerprint the actual curve values so an Optuna study cannot mix models."""
+
+    points = load_torque_speed_envelope(get_motor_spec(motor_id), csv_override)
+    if points is None:
+        return None
+    payload = json.dumps(points, separators=(",", ":"), allow_nan=False).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+knee_motor_candidates = _parse_motor_candidates(
+    args.knee_motors, KNEE_MOTOR_CANDIDATES, "Knee"
+)
+ankle_motor_candidates = _parse_motor_candidates(
+    args.ankle_motors, ANKLE_MOTOR_CANDIDATES, "Ankle"
+)
+if args.knee_envelope_csv and len(knee_motor_candidates) != 1:
+    parser.error("--knee-envelope-csv requires exactly one --knee-motors candidate.")
+if args.ankle_envelope_csv and len(ankle_motor_candidates) != 1:
+    parser.error("--ankle-envelope-csv requires exactly one --ankle-motors candidate.")
 if min(args.trials, args.max_iterations, args.num_envs, args.eval_episodes,
        args.n_startup_trials, args.train_timeout, args.eval_timeout) < 1:
     parser.error("Trial, training, evaluation, startup, and timeout counts must be positive.")
@@ -57,7 +112,7 @@ if not all(math.isfinite(value) and value > 0.0
            for value in (args.fail_tracking, args.fail_cot)):
     parser.error("Infeasible-design objective values must be positive and finite.")
 
-db_path = args.db or os.path.join(HERE, "co_design_track_cot.db")
+db_path = args.db or os.path.join(HERE, "co_design_track_cot_motors.db")
 db_parent = os.path.dirname(os.path.abspath(db_path))
 os.makedirs(db_parent, exist_ok=True)
 for command_text in args.eval_commands.split(";"):
@@ -74,20 +129,27 @@ import optuna
 
 
 # ── Subprocess runners ──────────────────────────────────────────────────
-def run_training(thigh: float, calf: float) -> tuple[str, str]:
+def run_training(thigh: float, calf: float, knee_motor: str, ankle_motor: str) -> tuple[str, str]:
     """Run co_design_train.py in subprocess. Returns (log_dir, ckpt_path)."""
     cmd = [
         sys.executable, TRAIN_SCRIPT,
         "--urdf-model", "sw",
         "--thigh", str(thigh),
         "--calf", str(calf),
+        "--knee-motor", knee_motor,
+        "--ankle-motor", ankle_motor,
         "--task", "RPO-Flat",
         "--max-iterations", str(args.max_iterations),
         "--num-envs", str(args.num_envs),
         "--seed", str(args.seed),
         "--headless",
     ]
-    print(f"[co_design] TRAIN start: thigh={thigh:.4f} calf={calf:.4f}")
+    if args.knee_envelope_csv:
+        cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
+    if args.ankle_envelope_csv:
+        cmd += ["--ankle-envelope-csv", args.ankle_envelope_csv]
+    print(f"[co_design] TRAIN start: thigh={thigh:.4f} calf={calf:.4f} "
+          f"knee={knee_motor} ankle={ankle_motor}")
     t0 = time.time()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=args.train_timeout)
     elapsed = time.time() - t0
@@ -126,14 +188,20 @@ def extract_train_reward(log_dir: str) -> float:
     return float("nan")
 
 
-def run_evaluation(ckpt_path: str, thigh: float, calf: float) -> dict:
+def run_evaluation(ckpt_path: str, thigh: float, calf: float,
+                   knee_motor: str, ankle_motor: str) -> dict:
     """Evaluate all fixed commands and return physical metrics."""
     cmd = [sys.executable, EVAL_SCRIPT,
            "--urdf-model", "sw", "--checkpoint", ckpt_path,
            "--thigh", str(thigh), "--calf", str(calf), "--task", "RPO-Flat",
+           "--knee-motor", knee_motor, "--ankle-motor", ankle_motor,
            "--num-episodes", str(args.eval_episodes), "--num-envs", "1",
            "--seed", str(args.seed),
            f"--command={args.eval_commands}", "--headless"]
+    if args.knee_envelope_csv:
+        cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
+    if args.ankle_envelope_csv:
+        cmd += ["--ankle-envelope-csv", args.ankle_envelope_csv]
     t0 = time.time()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=args.eval_timeout)
     elapsed = time.time() - t0
@@ -153,14 +221,17 @@ def run_evaluation(ckpt_path: str, thigh: float, calf: float) -> dict:
 def objective(trial: optuna.Trial) -> tuple[float, float]:
     thigh = trial.suggest_float("thigh_length", 0.25, 0.40)
     calf  = trial.suggest_float("calf_length", 0.30, 0.45)
+    knee_motor = trial.suggest_categorical("knee_motor", knee_motor_candidates)
+    ankle_motor = trial.suggest_categorical("ankle_motor", ankle_motor_candidates)
 
     print(f"\n{'='*60}")
-    print(f"[co_design] Trial {trial.number}: thigh={thigh:.4f}  calf={calf:.4f}")
+    print(f"[co_design] Trial {trial.number}: thigh={thigh:.4f} calf={calf:.4f} "
+          f"knee={knee_motor} ankle={ankle_motor}")
     print(f"{'='*60}")
 
     try:
-        log_dir, ckpt_path = run_training(thigh, calf)
-        evaluation = run_evaluation(ckpt_path, thigh, calf)
+        log_dir, ckpt_path = run_training(thigh, calf, knee_motor, ankle_motor)
+        evaluation = run_evaluation(ckpt_path, thigh, calf, knee_motor, ankle_motor)
         train_reward = extract_train_reward(log_dir)
     except Exception as e:
         # Infeasible design (training/eval crashed or timed out). Return the
@@ -170,6 +241,8 @@ def objective(trial: optuna.Trial) -> tuple[float, float]:
         print(f"[co_design] Trial {trial.number} INFEASIBLE: {type(e).__name__}: {e}")
         trial.set_user_attr("thigh_length", thigh)
         trial.set_user_attr("calf_length", calf)
+        trial.set_user_attr("knee_motor", knee_motor)
+        trial.set_user_attr("ankle_motor", ankle_motor)
         trial.set_user_attr("fail_reason", f"{type(e).__name__}: {str(e)[:300]}")
         return args.fail_tracking, args.fail_cot
 
@@ -184,6 +257,8 @@ def objective(trial: optuna.Trial) -> tuple[float, float]:
 
     trial.set_user_attr("thigh_length", thigh)
     trial.set_user_attr("calf_length", calf)
+    trial.set_user_attr("knee_motor", knee_motor)
+    trial.set_user_attr("ankle_motor", ankle_motor)
     trial.set_user_attr("ckpt_path", ckpt_path)
     trial.set_user_attr("log_dir", log_dir)
     trial.set_user_attr("evaluation_return_diagnostic", evaluation["avg_episode_return"])
@@ -208,6 +283,8 @@ if __name__ == "__main__":
     print(f"  study={args.study_name}")
     print(f"  db={db_path}")
     print(f"  n-startup-trials={args.n_startup_trials}")
+    print(f"  knee-motors={knee_motor_candidates}")
+    print(f"  ankle-motors={ankle_motor_candidates}")
     print(f"  objectives=minimize tracking cost, minimize mechanical CoT")
 
     from packaging.version import Version
@@ -228,6 +305,16 @@ if __name__ == "__main__":
 
     model_protocol = {"urdf_model": "sw", "thigh_range": [0.25, 0.40],
                       "calf_range": [0.30, 0.45],
+                      "knee_motors": list(knee_motor_candidates),
+                      "ankle_motors": list(ankle_motor_candidates),
+                      "knee_envelope_sha256": {
+                          motor_id: _envelope_signature(motor_id, args.knee_envelope_csv)
+                          for motor_id in knee_motor_candidates
+                      },
+                      "ankle_envelope_sha256": {
+                          motor_id: _envelope_signature(motor_id, args.ankle_envelope_csv)
+                          for motor_id in ankle_motor_candidates
+                      },
                       "objectives": ["tracking_cost_min", "mechanical_cot_min"],
                       "eval_commands": args.eval_commands,
                       "eval_episodes": args.eval_episodes,
@@ -263,14 +350,15 @@ if __name__ == "__main__":
     feasible_front.sort(key=lambda trial: trial.values[0])
     for trial in feasible_front:
         print(f"  trial={trial.number} thigh={trial.params['thigh_length']:.4f} "
-              f"calf={trial.params['calf_length']:.4f} tracking={trial.values[0]:.6f} "
+              f"calf={trial.params['calf_length']:.4f} knee={trial.params['knee_motor']} "
+              f"ankle={trial.params['ankle_motor']} tracking={trial.values[0]:.6f} "
               f"CoT={trial.values[1]:.6f}")
 
     import csv
     pareto_path = os.path.splitext(db_path)[0] + "_pareto.csv"
     with open(pareto_path, "w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=[
-            "trial", "thigh_length_m", "calf_length_m", "tracking_cost",
+            "trial", "thigh_length_m", "calf_length_m", "knee_motor", "ankle_motor", "tracking_cost",
             "mechanical_cot", "linear_tracking_rmse_m_s", "yaw_tracking_rmse_rad_s",
             "checkpoint",
         ])
@@ -280,6 +368,8 @@ if __name__ == "__main__":
                 "trial": trial.number,
                 "thigh_length_m": trial.params["thigh_length"],
                 "calf_length_m": trial.params["calf_length"],
+                "knee_motor": trial.params["knee_motor"],
+                "ankle_motor": trial.params["ankle_motor"],
                 "tracking_cost": trial.values[0], "mechanical_cot": trial.values[1],
                 "linear_tracking_rmse_m_s": trial.user_attrs.get("linear_tracking_rmse_m_s"),
                 "yaw_tracking_rmse_rad_s": trial.user_attrs.get("yaw_tracking_rmse_rad_s"),

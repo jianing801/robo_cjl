@@ -15,6 +15,17 @@ import os
 import sys
 import tempfile
 
+_PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from robolab.assets.rpo_motor_catalog import (  # noqa: E402
+    ANKLE_MOTOR_CHOICES,
+    DEFAULT_ANKLE_MOTOR,
+    DEFAULT_KNEE_MOTOR,
+    KNEE_MOTOR_CHOICES,
+)
+
 from isaaclab.app import AppLauncher
 
 
@@ -24,6 +35,14 @@ parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--thigh", type=float, required=True)
 parser.add_argument("--calf", type=float, required=True)
+parser.add_argument("--knee-motor", choices=KNEE_MOTOR_CHOICES, default=DEFAULT_KNEE_MOTOR,
+                    help="Knee motor ID used for training this checkpoint.")
+parser.add_argument("--ankle-motor", choices=ANKLE_MOTOR_CHOICES, default=DEFAULT_ANKLE_MOTOR,
+                    help="Common ankle pitch/roll motor ID used for training.")
+parser.add_argument("--knee-envelope-csv", type=str, default=None,
+                    help="MATLAB torque-speed CSV used during training, if overridden.")
+parser.add_argument("--ankle-envelope-csv", type=str, default=None,
+                    help="MATLAB torque-speed CSV used during training, if overridden.")
 parser.add_argument("--task", type=str, default="RPO-Flat")
 parser.add_argument("--num-episodes", type=int, default=1,
                     help="Complete rollouts to average for each command.")
@@ -108,10 +127,10 @@ import robolab.tasks  # noqa: F401
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 
-from robolab.scripts.tools.generate_urdf import generate_urdf
+from generate_urdf import generate_urdf
 if args_cli.urdf_model == "sw":
-    from robolab.scripts.tools.generate_urdf_sw import generate_urdf
-from robolab.assets.robots import RPO_CFG
+    from generate_urdf_sw import generate_urdf
+from robolab.assets.robots import RPO_CFG, configure_rpo_motors
 from robolab.tasks.direct.base.scene_cfg import SceneCfg
 
 
@@ -148,6 +167,8 @@ def _make_eval_env(command: tuple[float, float, float]):
     env_cfg.episode_length_s = 20.0
     env_cfg.capture_terminal_state = True
     env_cfg.commands.rel_standing_envs = 0.0
+    if args_cli.headless:
+        env_cfg.commands.debug_vis = False
     # Degenerate ranges ensure both the initial reset and every automatic reset
     # use the requested command. This is essential for multi-episode runs.
     env_cfg.commands.ranges.lin_vel_x = (lx, lx)
@@ -176,7 +197,15 @@ def _make_eval_env(command: tuple[float, float, float]):
 
     custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     custom_robot_cfg.spawn.asset_path = urdf_path
+    custom_robot_cfg.spawn.usd_dir = os.path.join(tmp_dir, "usd")
     custom_robot_cfg.init_state.pos = (0.0, 0.0, base_z)
+    motor_selection = configure_rpo_motors(
+        custom_robot_cfg,
+        knee_motor=args_cli.knee_motor,
+        ankle_motor=args_cli.ankle_motor,
+        knee_envelope_csv=args_cli.knee_envelope_csv,
+        ankle_envelope_csv=args_cli.ankle_envelope_csv,
+    )
     if hasattr(env_cfg, "scene_context"):
         env_cfg.scene_context.robot = custom_robot_cfg
         env_cfg.scene = SceneCfg(
@@ -195,7 +224,12 @@ def _make_eval_env(command: tuple[float, float, float]):
     agent_cfg.logger = "tensorboard"
 
     raw_env = gym.make(args_cli.task, cfg=env_cfg)
-    return RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions), agent_cfg, heading_tracking
+    return (
+        RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions),
+        agent_cfg,
+        heading_tracking,
+        motor_selection,
+    )
 
 
 def _terminal_or_live_state(robot_asset, terminal_state):
@@ -436,7 +470,7 @@ record_joint_names = []
 
 try:
     for command in commands:
-        env, agent_cfg, heading_tracking = _make_eval_env(command)
+        env, agent_cfg, heading_tracking, motor_selection = _make_eval_env(command)
         try:
             if runner is None:
                 print(f"[eval] Loading checkpoint: {args_cli.checkpoint}", flush=True)
@@ -491,6 +525,10 @@ try:
         "mass_kg": total_mass,
         "thigh": args_cli.thigh,
         "calf": args_cli.calf,
+        "knee_motor": args_cli.knee_motor,
+        "ankle_motor": args_cli.ankle_motor,
+        "knee_dynamic_envelope": motor_selection["knee"]["dynamic_envelope"],
+        "ankle_dynamic_envelope": motor_selection["ankle"]["dynamic_envelope"],
         "commands": command_results,
     }
     if len(command_results) == 1:
