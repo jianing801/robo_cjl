@@ -29,7 +29,7 @@ from rsl_rl.runners import OnPolicyRunner
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 import isaaclab_tasks; import robolab.tasks
-from robolab.scripts.tools.generate_urdf import generate_urdf
+from generate_urdf import generate_urdf
 from robolab.assets.robots import RPO_CFG
 from robolab.tasks.direct.base.scene_cfg import SceneCfg
 from packaging import version
@@ -47,6 +47,7 @@ base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
 
 custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 custom_robot_cfg.spawn.asset_path = urdf_path
+custom_robot_cfg.spawn.usd_dir = os.path.join(tmp_dir, "usd")
 custom_robot_cfg.init_state.pos = (0.0, 0.0, base_z)
 
 env_cfg.seed = args_cli.seed
@@ -58,6 +59,8 @@ env_cfg.events.push_robot = None
 env_cfg.episode_length_s = 20.0
 env_cfg.commands.heading_command = False
 env_cfg.commands.rel_standing_envs = 0.0
+if args_cli.headless:
+    env_cfg.commands.debug_vis = False
 env_cfg.scene_context.robot = custom_robot_cfg
 env_cfg.scene = SceneCfg(config=env_cfg.scene_context, physics_dt=env_cfg.sim.dt, step_dt=env_cfg.decimation * env_cfg.sim.dt)
 

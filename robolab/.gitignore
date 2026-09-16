@@ -7,3 +7,4 @@ run_bash.sh
 wandb
 *.png
 *.mp4
+/data/robots/roboparty/rpo/
