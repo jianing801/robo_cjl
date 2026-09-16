@@ -62,15 +62,18 @@ MOTOR_CATALOG: dict[str, MotorSpec] = {
     "RS04": MotorSpec(
         "RS04", 9.0, 35.0, 120.0, 200.0, 1.420, "diameter 120 x 52.2",
         (1.786e-3, 1.862e-3, 2.842e-3),
+        "motor_data/RS04_gp_envelope.csv",
     ),
     "DM-J10010L-2EC": MotorSpec(
         "DM-J10010L-2EC", 10.0, 40.0, 120.0, 200.0, 1.372,
         "diameter 120 x 53 (about 55.7 with protrusion)",
         (7.194e-4, 1.103e-3, 1.795e-3),
+        "motor_data/DM_J10010L_gp_envelope.csv",
     ),
     "RS06": MotorSpec(
         "RS06", 9.0, 11.0, 36.0, 480.0, 0.621, "diameter 88 x 49",
         (3.591e-4, 3.694e-4, 4.974e-4),
+        "motor_data/RS06_gp_envelope.csv",
     ),
     "DM-J4340P-2EC": MotorSpec(
         "DM-J4340P-2EC", 40.0, 9.0, 27.0, 100.0, 0.362,
@@ -149,4 +152,16 @@ def load_torque_speed_envelope(
     lookup = [[speed, points[speed]] for speed in sorted(points)]
     if len(lookup) < 2 or lookup[0][0] > 1.0e-9:
         raise ValueError(f"{path} must contain at least two points and start at zero speed.")
+    speed_tolerance = max(1.0e-6, motor.max_speed_rad_s * 1.0e-5)
+    torque_tolerance = max(1.0e-6, motor.peak_torque_nm * 1.0e-6)
+    if abs(lookup[-1][0] - motor.max_speed_rad_s) > speed_tolerance:
+        raise ValueError(
+            f"{path} must end at the catalog max speed "
+            f"({motor.max_speed_rad_s:.9g} rad/s)."
+        )
+    if lookup[-1][1] > torque_tolerance:
+        raise ValueError(f"{path} must end at zero torque at the no-load speed.")
+    if any(current[1] > previous[1] + torque_tolerance
+           for previous, current in zip(lookup, lookup[1:])):
+        raise ValueError(f"{path} torque envelope must be monotonically non-increasing.")
     return lookup

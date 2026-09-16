@@ -6,7 +6,7 @@
 
 `robolab/scripts/tools/generate_urdf_sw.py`
 
-生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。电机执行器、扭矩/速度限制和PD参数保持原实现，暂不接入电机曲线或型号变量，也不增加消融实验。外层BO已改为速度跟踪代价与机械CoT双目标优化。
+生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。膝电机型号和踝电机型号现已作为两个离散设计变量接入外层BO；型号变化会修改Isaac Lab执行器的峰值扭矩、最高转速和可用的转矩—转速动态包络。电机导致的质量、质心、刚体惯量和几何变化暂不写入URDF。外层BO采用速度跟踪代价与机械CoT双目标优化。
 
 原代码参考：https://github.com/guagua1413028593-sketch/robo_cjl/blob/0a99617706f375a25efc88735256bb8bd7031f81/robolab/scripts/tools/generate_urdf.py
 
@@ -85,7 +85,16 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 
 当前直接运行co_design_train.py或co_design_eval.py默认使用SW生成器，无需包装入口。上述包装方式仍支持自定义模板、网格与坐标映射。评估旧模型训练的检查点时，可显式传入`--urdf-model legacy`；训练和评估应选择相同模型。
 
-外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m。默认数据库为`co_design_track_cot.db`、study名称为`rpo_flat_track_cot_sw`，防止混用旧模型和单目标结果；指定已有study时检查模型协议，不兼容则要求换库或换名称。
+外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m，并离散选择一类膝电机和一类踝电机。左右膝使用同一膝电机；左右腿的踝俯仰和踝横滚共四个关节使用同一踝电机。默认膝候选为`RS04,DM-J10010L-2EC`，默认踝候选为`RS06,DM-J4340P-2EC,DM-J8006-2EC`。默认数据库为`co_design_track_cot_motors.db`、study名称为`rpo_flat_track_cot_sw_motors`；已有study还会核对候选列表和曲线哈希，避免混合不同执行器模型。
+
+当前电机变量只改变仿真执行器：
+
+- `effort_limit`与`effort_limit_sim`使用候选电机峰值输出扭矩；
+- `velocity_limit`与`velocity_limit_sim`使用候选电机输出端最高转速；
+- 有CSV包络的型号在每个仿真步按关节绝对转速插值，并动态裁剪正、反向输出扭矩；
+- 暂无完整曲线的DM-J8006-2EC先使用20 N·m和200 rpm的矩形限幅；
+- PD刚度、阻尼、延迟和`armature=0.01`保持原值，因为当前没有可靠的电机侧转子/减速器反射惯量；
+- URDF质量、质心、惯量和外形完全不随电机型号变化。
 
 PPO训练奖励保持不变。结构评价不再使用episode return作为优化目标，而是同时最小化：
 

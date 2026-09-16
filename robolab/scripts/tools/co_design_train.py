@@ -258,7 +258,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     print(
         f"[co_design_train] motors: knee={args_cli.knee_motor} "
         f"({motor_selection['knee']['peak_torque_nm']:.3f} Nm, "
-        f"{motor_selection['knee']['max_speed_rad_s']:.3f} rad/s), "
+        f"{motor_selection['knee']['max_speed_rad_s']:.3f} rad/s, "
+        f"dynamic_envelope={motor_selection['knee']['dynamic_envelope']}), "
         f"ankle={args_cli.ankle_motor} "
         f"({motor_selection['ankle']['peak_torque_nm']:.3f} Nm, "
         f"{motor_selection['ankle']['max_speed_rad_s']:.3f} rad/s, "
@@ -303,6 +304,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     if not args_cli.distributed or global_rank == 0:
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
         dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+        # Keep the selected motor IDs and the exact actuator-side limits next
+        # to the checkpoint.  URDF mass/inertia are intentionally unchanged.
+        dump_yaml(os.path.join(log_dir, "params", "motors.yaml"), motor_selection)
 
     # ── Train (with early stop) ───────────────────────────────────────
     early_check = args_cli.early_check

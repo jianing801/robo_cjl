@@ -3,11 +3,27 @@ import argparse, json, os, sys, tempfile
 import torch
 import gymnasium as gym
 
+_PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from robolab.assets.rpo_motor_catalog import (
+    ANKLE_MOTOR_CHOICES,
+    DEFAULT_ANKLE_MOTOR,
+    DEFAULT_KNEE_MOTOR,
+    KNEE_MOTOR_CHOICES,
+)
+
 from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--thigh", type=float, required=True)
 parser.add_argument("--calf", type=float, required=True)
+parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw")
+parser.add_argument("--knee-motor", choices=KNEE_MOTOR_CHOICES, default=DEFAULT_KNEE_MOTOR)
+parser.add_argument("--ankle-motor", choices=ANKLE_MOTOR_CHOICES, default=DEFAULT_ANKLE_MOTOR)
+parser.add_argument("--knee-envelope-csv", type=str, default=None)
+parser.add_argument("--ankle-envelope-csv", type=str, default=None)
 parser.add_argument("--seed", type=int, default=42)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -30,7 +46,9 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 import isaaclab_tasks; import robolab.tasks
 from generate_urdf import generate_urdf
-from robolab.assets.robots import RPO_CFG
+if args_cli.urdf_model == "sw":
+    from generate_urdf_sw import generate_urdf
+from robolab.assets.robots import RPO_CFG, configure_rpo_motors
 from robolab.tasks.direct.base.scene_cfg import SceneCfg
 from packaging import version
 iv = __import__('importlib').metadata.version("rsl-rl-lib")
@@ -49,6 +67,21 @@ custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 custom_robot_cfg.spawn.asset_path = urdf_path
 custom_robot_cfg.spawn.usd_dir = os.path.join(tmp_dir, "usd")
 custom_robot_cfg.init_state.pos = (0.0, 0.0, base_z)
+motor_selection = configure_rpo_motors(
+    custom_robot_cfg,
+    knee_motor=args_cli.knee_motor,
+    ankle_motor=args_cli.ankle_motor,
+    knee_envelope_csv=args_cli.knee_envelope_csv,
+    ankle_envelope_csv=args_cli.ankle_envelope_csv,
+)
+print(
+    f"[eval] motors: knee={args_cli.knee_motor} "
+    f"({motor_selection['knee']['peak_torque_nm']:.3f} Nm, "
+    f"dynamic={motor_selection['knee']['dynamic_envelope']}), "
+    f"ankle={args_cli.ankle_motor} "
+    f"({motor_selection['ankle']['peak_torque_nm']:.3f} Nm, "
+    f"dynamic={motor_selection['ankle']['dynamic_envelope']})"
+)
 
 env_cfg.seed = args_cli.seed
 env_cfg.scene.num_envs = 1
