@@ -120,8 +120,6 @@ RPO_CFG = ArticulationCfg(
             velocity_limit_sim=25.0,
             stiffness=150.0,
             damping=5.0,
-            # Rotor/gear inertias are not published for the candidates.  Keep
-            # the prior value; the catalog's rigid-body inertia is not armature.
             armature=0.01,
             min_delay=0,
             max_delay=2,
@@ -184,8 +182,8 @@ def configure_rpo_motors(
 
     If a selected motor has a torque-speed CSV (or an override CSV is passed),
     its delayed PD output is clipped by that curve at every simulation step.
-    URDF geometry, mass, center of mass, rigid-body inertia, and armature remain
-    untouched.
+    URDF geometry, mass, center of mass, and rigid-body inertia remain
+    untouched.  Joint-side armature follows the selected motor specification.
     """
 
     knee = get_motor_spec(knee_motor, KNEE_MOTOR_CHOICES)
@@ -199,6 +197,7 @@ def configure_rpo_motors(
         actuator_cfg = robot_cfg.actuators[actuator_name]
         actuator_cfg.effort_limit_sim = motor.peak_torque_nm
         actuator_cfg.velocity_limit_sim = motor.max_speed_rad_s
+        actuator_cfg.armature = motor.armature_kgm2
         # DelayedPDActuator is explicit: effort_limit clips its computed torque,
         # while effort_limit_sim only constrains the physics solver.  Set both
         # for real candidates.  None preserves the old URDF-resolved behavior.
@@ -216,7 +215,7 @@ def configure_rpo_motors(
                 velocity_limit_sim=motor.max_speed_rad_s,
                 stiffness=actuator_cfg.stiffness,
                 damping=actuator_cfg.damping,
-                armature=actuator_cfg.armature,
+                armature=motor.armature_kgm2,
                 friction=actuator_cfg.friction,
                 dynamic_friction=actuator_cfg.dynamic_friction,
                 viscous_friction=actuator_cfg.viscous_friction,

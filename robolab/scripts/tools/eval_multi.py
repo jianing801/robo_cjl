@@ -60,7 +60,15 @@ if version.parse(iv) < version.parse("5.0.0"):
         if hasattr(agent_cfg.algorithm, k): delattr(agent_cfg.algorithm, k)
 
 tmp_dir = tempfile.mkdtemp(prefix="eval_multi_")
-urdf_path = generate_urdf(args_cli.thigh, args_cli.calf, output_dir=tmp_dir)
+urdf_kwargs = {}
+if args_cli.urdf_model == "sw":
+    urdf_kwargs = {
+        "knee_motor": args_cli.knee_motor,
+        "ankle_motor": args_cli.ankle_motor,
+    }
+urdf_path = generate_urdf(
+    args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
+)
 base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
 
 custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
@@ -77,9 +85,11 @@ motor_selection = configure_rpo_motors(
 print(
     f"[eval] motors: knee={args_cli.knee_motor} "
     f"({motor_selection['knee']['peak_torque_nm']:.3f} Nm, "
+    f"armature={motor_selection['knee']['armature_kgm2']:.5f} kg*m^2, "
     f"dynamic={motor_selection['knee']['dynamic_envelope']}), "
     f"ankle={args_cli.ankle_motor} "
     f"({motor_selection['ankle']['peak_torque_nm']:.3f} Nm, "
+    f"armature={motor_selection['ankle']['armature_kgm2']:.5f} kg*m^2, "
     f"dynamic={motor_selection['ankle']['dynamic_envelope']})"
 )
 

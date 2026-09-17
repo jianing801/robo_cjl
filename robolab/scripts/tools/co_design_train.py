@@ -225,7 +225,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
 
     # ── Generate parameterized URDF + inject ────────────────────────────
     tmp_dir = tempfile.mkdtemp(prefix="rpo_train_")
-    urdf_path = generate_urdf(args_cli.thigh, args_cli.calf, output_dir=tmp_dir)
+    urdf_kwargs = {}
+    if args_cli.urdf_model == "sw":
+        urdf_kwargs = {
+            "knee_motor": args_cli.knee_motor,
+            "ankle_motor": args_cli.ankle_motor,
+        }
+    urdf_path = generate_urdf(
+        args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
+    )
     base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
 
     custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
@@ -259,10 +267,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         f"[co_design_train] motors: knee={args_cli.knee_motor} "
         f"({motor_selection['knee']['peak_torque_nm']:.3f} Nm, "
         f"{motor_selection['knee']['max_speed_rad_s']:.3f} rad/s, "
+        f"armature={motor_selection['knee']['armature_kgm2']:.5f} kg*m^2, "
         f"dynamic_envelope={motor_selection['knee']['dynamic_envelope']}), "
         f"ankle={args_cli.ankle_motor} "
         f"({motor_selection['ankle']['peak_torque_nm']:.3f} Nm, "
         f"{motor_selection['ankle']['max_speed_rad_s']:.3f} rad/s, "
+        f"armature={motor_selection['ankle']['armature_kgm2']:.5f} kg*m^2, "
         f"dynamic_envelope={motor_selection['ankle']['dynamic_envelope']})"
     )
     print(f"[co_design_train] URDF: {urdf_path}")
@@ -304,8 +314,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     if not args_cli.distributed or global_rank == 0:
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
         dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-        # Keep the selected motor IDs and the exact actuator-side limits next
-        # to the checkpoint.  URDF mass/inertia are intentionally unchanged.
+        # Keep the selected motor IDs, armature, and exact actuator-side limits
+        # next to the checkpoint; the generated URDF report stores mass/inertia.
         dump_yaml(os.path.join(log_dir, "params", "motors.yaml"), motor_selection)
 
     # ── Train (with early stop) ───────────────────────────────────────

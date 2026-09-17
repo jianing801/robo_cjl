@@ -136,7 +136,15 @@ from robolab.tasks.direct.base.scene_cfg import SceneCfg
 
 installed_version = metadata.version("rsl-rl-lib")
 tmp_dir = tempfile.mkdtemp(prefix="rpo_eval_")
-urdf_path = generate_urdf(args_cli.thigh, args_cli.calf, output_dir=tmp_dir)
+urdf_kwargs = {}
+if args_cli.urdf_model == "sw":
+    urdf_kwargs = {
+        "knee_motor": args_cli.knee_motor,
+        "ankle_motor": args_cli.ankle_motor,
+    }
+urdf_path = generate_urdf(
+    args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
+)
 base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
 
 
@@ -527,6 +535,8 @@ try:
         "calf": args_cli.calf,
         "knee_motor": args_cli.knee_motor,
         "ankle_motor": args_cli.ankle_motor,
+        "knee_armature_kgm2": motor_selection["knee"]["armature_kgm2"],
+        "ankle_armature_kgm2": motor_selection["ankle"]["armature_kgm2"],
         "knee_dynamic_envelope": motor_selection["knee"]["dynamic_envelope"],
         "ankle_dynamic_envelope": motor_selection["ankle"]["dynamic_envelope"],
         "commands": command_results,

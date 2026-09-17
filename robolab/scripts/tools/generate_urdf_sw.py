@@ -1,6 +1,8 @@
-"""SW拟合驱动的RPO URDF生成器。新增文件，不依赖或修改旧generate_urdf.py。
-大腿：质量一次、其余四次；小腿：质量一次、其余五次（排除0.30m训练点）。
-需要Python>=3.9和NumPy。用户确认数据来自左腿且坐标对齐，默认左侧直接映射、右侧y镜像。
+"""电机型号与腿长共同驱动的RPO URDF生成器。
+
+四套SolidWorks模型统一采用质量一次、其余属性四次多项式。模型先转换到
+左腿link坐标，再将右腿关于y=0镜像。RS04报告使用了随腿长移动的装配体
+坐标系，因此包含经过交叉验证的旋转和长度相关平移。
 使用说明：docs/基于SW拟合参数的URDF更新.md。
 """
 
@@ -123,6 +125,32 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 import numpy as np
 
+from robolab.assets.rpo_motor_catalog import get_motor_spec
+
+
+MODEL_FILE = (
+    Path(__file__).resolve().parents[2]
+    / "robolab/assets/motor_data/motor_urdf_models.json"
+)
+# 外部JSON是唯一运行时模型来源；上方旧常量暂留用于历史diff可读性。
+MODELS = json.loads(MODEL_FILE.read_text(encoding="utf-8"))
+
+# 旧命令仍可生成原先对应的达妙结构。优化命令总会传入实际电机型号。
+LEGACY_MODEL_KEYS = {
+    "legacy-knee": "DM10010L_thigh",
+    "legacy-ankle": "DM4340P_calf",
+}
+
+# 将各SW报告坐标统一到左腿link坐标。其余三套报告已经对齐。
+SOURCE_FRAME_TRANSFORMS = {
+    "RS04_thigh": {
+        "matrix": [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        "translation_constant_m": [0.51755062, -0.08250093, 0.52306493],
+        "translation_per_length": [0.0, 0.0, -1.0],
+        "validation_max_com_axis_error_m": 3.47e-4,
+    },
+}
+
 # 原模板几何长度；不用于缩放拟合得到的质量或惯量。
 DEFAULT_THIGH = 0.25
 DEFAULT_CALF = 0.30
@@ -133,19 +161,19 @@ LINKS = {'thigh': ('left_thigh_pitch_link', 'right_thigh_pitch_link'),
          'calf': ('left_knee_link', 'right_knee_link')}
 
 
-def predict_properties(segment, length):
-    """返回SW坐标下的mass_kg、com_m及标准质心惯性矩阵inertia_kg_m2。"""
-    if segment not in MODELS:
-        raise ValueError('segment must be thigh or calf')
+def predict_properties(model_id, length):
+    """返回左腿link坐标下的质量、质心和标准质心惯性矩阵。"""
+    if model_id not in MODELS:
+        raise ValueError(f'Unknown motor URDF model: {model_id}')
     length = float(length)
-    model = MODELS[segment]
-    lo, hi = model['prediction_range']
+    model = MODELS[model_id]
+    lo, hi = model['prediction_range_m']
     if not math.isfinite(length) or not lo <= length <= hi:
-        raise ValueError(f'{segment} length must be in [{lo}, {hi}] m')
-    x = (length - model['center']) / model['half_range']
+        raise ValueError(f'{model["segment"]} length must be in [{lo}, {hi}] m')
+    x = (length - model['center_m']) / model['half_range_m']
     def value(key):
         result = 0.0
-        for c in reversed(model['coefficients'][key]):
+        for c in reversed(model['coefficients_ascending_power'][key]):
             result = result*x + c
         return result
     mass = value('mass_kg')
@@ -155,9 +183,34 @@ def predict_properties(segment, length):
     inertia = np.array([[v['xx'], -v['xy'], -v['xz']],
                         [-v['xy'], v['yy'], -v['yz']],
                         [-v['xz'], -v['yz'], v['zz']]])
+    source_transform = SOURCE_FRAME_TRANSFORMS.get(model_id)
+    if source_transform is not None:
+        q = np.asarray(source_transform['matrix'], dtype=float)
+        t = (
+            np.asarray(source_transform['translation_constant_m'], dtype=float)
+            + length * np.asarray(source_transform['translation_per_length'], dtype=float)
+        )
+        com = q @ com + t
+        inertia = q @ inertia @ q.T
     _validate_physics(mass, com, inertia)
     return {'mass_kg': mass, 'com_m': com, 'inertia_kg_m2': inertia,
-            'extrapolated': length < model['training_range'][0]}
+            'model_id': model_id,
+            'extrapolated': length < model['training_range_m'][0]}
+
+
+def _motor_model_id(motor_id, segment):
+    model_id = LEGACY_MODEL_KEYS.get(motor_id)
+    if model_id is None:
+        model_id = get_motor_spec(motor_id).urdf_model_id
+    if model_id is None:
+        raise ValueError(
+            f"Motor '{motor_id}' has no validated {segment} URDF model and cannot "
+            "be used with --urdf-model sw."
+        )
+    model = MODELS.get(model_id)
+    if model is None or model.get('segment') != segment:
+        raise ValueError(f"Motor '{motor_id}' does not provide a valid {segment} URDF model.")
+    return model_id
 
 
 def _validate_physics(mass, com, inertia):
@@ -213,6 +266,7 @@ def _required(root, tag, name):
 
 
 def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
+                  knee_motor='legacy-knee', ankle_motor='legacy-ankle',
                   frame_map=None, aligned_side=None, mesh_dir=None):
     """兼容旧函数前四个参数；默认SW坐标与左侧link对齐，右侧沿y镜像。
 
@@ -226,7 +280,14 @@ def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
         raise ValueError('Provide frame_map or aligned_side, not both')
     frames = aligned_frame_map(aligned_side) if aligned_side is not None else frame_map
     mapped = {link: _frame(frames, link) for names in LINKS.values() for link in names}
-    properties = {seg: predict_properties(seg, length) for seg, length in [('thigh',thigh_length),('calf',calf_length)]}
+    model_ids = {
+        'thigh': _motor_model_id(knee_motor, 'thigh'),
+        'calf': _motor_model_id(ankle_motor, 'calf'),
+    }
+    properties = {
+        seg: predict_properties(model_ids[seg], length)
+        for seg, length in [('thigh', thigh_length), ('calf', calf_length)]
+    }
     template = Path(template_path or TEMPLATE_URDF).expanduser().resolve()
     output = Path(output_dir).expanduser().resolve() / 'urdf/rpo.urdf'
     if not template.is_file():
@@ -239,7 +300,10 @@ def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
     tree = ET.parse(template, parser=parser)
     root = tree.getroot()
     report = {'template': str(template), 'thigh_length_m':float(thigh_length), 'calf_length_m':float(calf_length),
+              'knee_motor': knee_motor, 'ankle_motor': ankle_motor,
+              'motor_urdf_models': model_ids,
               'frame_assumption': 'explicit transforms' if aligned_side is None else f'SW aligned with {aligned_side}; opposite side mirrored in y',
+              'thigh_extrapolated':properties['thigh']['extrapolated'],
               'calf_extrapolated':properties['calf']['extrapolated'], 'links':{}}
     for seg, length, base in [('thigh',float(thigh_length),DEFAULT_THIGH),('calf',float(calf_length),DEFAULT_CALF)]:
         p = properties[seg]
@@ -316,6 +380,8 @@ def main():
     parser.add_argument('--thigh',type=float)
     parser.add_argument('--calf',type=float)
     parser.add_argument('--output')
+    parser.add_argument('--knee-motor',default='legacy-knee')
+    parser.add_argument('--ankle-motor',default='legacy-ankle')
     parser.add_argument('--run',choices=['co_design_train','co_design_eval'],help='Run existing entry point with this generator injected in the current process')
     parser.add_argument('--template')
     parser.add_argument('--mesh-dir')
@@ -337,8 +403,11 @@ def main():
             parser.error('Place this file beside the existing co_design_train/eval.py scripts')
         if any(v is not None for v in (args.thigh,args.calf,args.output)):
             parser.error('For --run, pass training/evaluation arguments after --')
-        def injected(thigh_length,calf_length,output_dir,template_path=None):
-            return generate_urdf(thigh_length,calf_length,output_dir,template_path or args.template,frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
+        def injected(thigh_length,calf_length,output_dir,template_path=None,**kwargs):
+            return generate_urdf(thigh_length,calf_length,output_dir,template_path or args.template,
+                                 knee_motor=kwargs.get('knee_motor', args.knee_motor),
+                                 ankle_motor=kwargs.get('ankle_motor', args.ankle_motor),
+                                 frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
         module = types.ModuleType('robolab.scripts.tools.generate_urdf')
         module.generate_urdf = injected
         sys.modules[module.__name__] = module
@@ -349,7 +418,9 @@ def main():
         return
     if forwarded or any(v is None for v in (args.thigh,args.calf,args.output)):
         parser.error('Generation requires --thigh, --calf and --output; -- is reserved for --run')
-    path = generate_urdf(args.thigh,args.calf,args.output,args.template,frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
+    path = generate_urdf(args.thigh,args.calf,args.output,args.template,
+                         knee_motor=args.knee_motor,ankle_motor=args.ankle_motor,
+                         frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
     print(path)
 
 

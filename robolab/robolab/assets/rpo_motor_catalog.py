@@ -1,9 +1,7 @@
 """Motor choices used by the RPO leg co-design tools.
 
-Actuator torque/speed limits and optional torque-speed envelope files are
-applied to Isaac Lab.  Mass, rigid-body inertia, geometry, and URDF data are
-deliberately retained as metadata until the parameterized URDF model is
-extended separately.
+Actuator torque/speed limits, joint-side armature, optional torque-speed
+envelopes, and the matching motor-dependent URDF fit are selected together.
 """
 
 from __future__ import annotations
@@ -27,6 +25,15 @@ class MotorSpec:
     envelope_mm: str
     principal_inertia_kgm2: tuple[float, float, float] | None = None
     torque_speed_curve_csv: str | None = None
+    armature_kgm2: float = 0.01
+    armature_source: str = "legacy fixed value"
+    urdf_model_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.armature_kgm2) or self.armature_kgm2 <= 0.0:
+            raise ValueError(
+                f"Motor '{self.motor_id}' armature_kgm2 must be finite and positive."
+            )
 
     @property
     def max_speed_rad_s(self) -> float:
@@ -44,6 +51,9 @@ class MotorSpec:
             "envelope_mm": self.envelope_mm,
             "principal_inertia_kgm2": self.principal_inertia_kgm2,
             "torque_speed_curve_csv": self.torque_speed_curve_csv,
+            "armature_kgm2": self.armature_kgm2,
+            "armature_source": self.armature_source,
+            "urdf_model_id": self.urdf_model_id,
         }
 
 
@@ -63,23 +73,35 @@ MOTOR_CATALOG: dict[str, MotorSpec] = {
         "RS04", 9.0, 35.0, 120.0, 200.0, 1.420, "diameter 120 x 52.2",
         (1.786e-3, 1.862e-3, 2.842e-3),
         "motor_data/RS04_gp_envelope.csv",
+        armature_kgm2=0.04000,
+        armature_source="manufacturer low-speed equivalent inertia",
+        urdf_model_id="RS04_thigh",
     ),
     "DM-J10010L-2EC": MotorSpec(
         "DM-J10010L-2EC", 10.0, 40.0, 120.0, 200.0, 1.372,
         "diameter 120 x 53 (about 55.7 with protrusion)",
         (7.194e-4, 1.103e-3, 1.795e-3),
         "motor_data/DM_J10010L_gp_envelope.csv",
+        armature_kgm2=0.05556,
+        armature_source="0.0005556 kg*m^2 motor inertia reflected by 10^2",
+        urdf_model_id="DM10010L_thigh",
     ),
     "RS06": MotorSpec(
         "RS06", 9.0, 11.0, 36.0, 480.0, 0.621, "diameter 88 x 49",
         (3.591e-4, 3.694e-4, 4.974e-4),
         "motor_data/RS06_gp_envelope.csv",
+        armature_kgm2=0.01200,
+        armature_source="manufacturer low-speed equivalent inertia",
+        urdf_model_id="RS06_calf",
     ),
     "DM-J4340P-2EC": MotorSpec(
         "DM-J4340P-2EC", 40.0, 9.0, 27.0, 100.0, 0.362,
         "diameter 57 x 53.3",
         (1.444e-4, 1.446e-4, 1.496e-4),
         "motor_data/DM_J4340P_gp_envelope.csv",
+        armature_kgm2=0.03200,
+        armature_source="0.00002 kg*m^2 motor inertia reflected by 40^2",
+        urdf_model_id="DM4340P_calf",
     ),
     # Retained for reproducing studies made before the P-version curve was
     # added.  It intentionally keeps the former fixed rectangular limits.
@@ -87,20 +109,27 @@ MOTOR_CATALOG: dict[str, MotorSpec] = {
         "DM-J4340-2EC", 40.0, 9.0, 27.0, 100.0, 0.362,
         "diameter 57 x 53.3",
         (1.444e-4, 1.446e-4, 1.496e-4),
+        armature_source="legacy fallback; no validated inertia for this non-P model",
     ),
     "DM-J8006-2EC": MotorSpec(
         "DM-J8006-2EC", 6.0, 8.0, 20.0, 200.0, 0.550,
         "diameter 96 x 40",
         (3.680e-4, 3.684e-4, 6.405e-4),
+        armature_source="legacy fallback; no validated motor-side inertia",
     ),
 }
 
 DEFAULT_KNEE_MOTOR = "legacy-knee"
 DEFAULT_ANKLE_MOTOR = "legacy-ankle"
 KNEE_MOTOR_CANDIDATES = ("RS04", "DM-J10010L-2EC")
-ANKLE_MOTOR_CANDIDATES = ("RS06", "DM-J4340P-2EC", "DM-J8006-2EC")
+ANKLE_MOTOR_CANDIDATES = ("RS06", "DM-J4340P-2EC")
 KNEE_MOTOR_CHOICES = (DEFAULT_KNEE_MOTOR, *KNEE_MOTOR_CANDIDATES)
-ANKLE_MOTOR_CHOICES = (DEFAULT_ANKLE_MOTOR, *ANKLE_MOTOR_CANDIDATES, "DM-J4340-2EC")
+ANKLE_MOTOR_CHOICES = (
+    DEFAULT_ANKLE_MOTOR,
+    *ANKLE_MOTOR_CANDIDATES,
+    "DM-J4340-2EC",
+    "DM-J8006-2EC",
+)
 
 
 def get_motor_spec(motor_id: str, allowed: tuple[str, ...] | None = None) -> MotorSpec:

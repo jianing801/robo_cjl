@@ -6,20 +6,22 @@
 
 `robolab/scripts/tools/generate_urdf_sw.py`
 
-生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。拟合系数已内嵌于新生成器，运行不需要CSV或scikit-learn。膝电机型号和踝电机型号现已作为两个离散设计变量接入外层BO；型号变化会修改Isaac Lab执行器的峰值扭矩、最高转速和可用的转矩—转速动态包络。电机导致的质量、质心、刚体惯量和几何变化暂不写入URDF。外层BO采用速度跟踪代价与机械CoT双目标优化。
+生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。四套拟合系数保存在`robolab/robolab/assets/motor_data/motor_urdf_models.json`，运行不需要CSV或scikit-learn。膝电机型号和踝电机型号作为两个离散设计变量接入外层BO；型号变化会同时修改URDF质量、质心、刚体惯量，以及Isaac Lab执行器的峰值扭矩、最高转速、关节侧`armature`和可用的转矩—转速动态包络。外层BO采用速度跟踪代价与机械CoT双目标优化。
 
 原代码参考：https://github.com/guagua1413028593-sketch/robo_cjl/blob/0a99617706f375a25efc88735256bb8bd7031f81/robolab/scripts/tools/generate_urdf.py
 
 ## 已确认的最终模型
 
-| 部位 | 质量 | 质心及六个惯量分量 | 训练长度m | 允许预测m | 归一化输入 |
+| 型号与部位 | 质量 | 质心及六个惯量分量 | 训练长度m | 允许预测m | 归一化输入 |
 |---|---|---|---|---|---|
-| 大腿 | 一次 | 四次 | 0.25～0.40，16点 | 0.25～0.40 | (l−0.325)/0.075 |
-| 小腿 | 一次 | 五次 | 0.31～0.45，15点 | 0.30～0.45 | (l−0.38)/0.07 |
+| RS04大腿 | 一次 | 四次 | 0.26～0.40，15点 | 0.25～0.40 | (l−0.325)/0.075 |
+| DM-J10010L-2EC大腿 | 一次 | 四次 | 0.26～0.40，15点 | 0.25～0.40 | (l−0.325)/0.075 |
+| RS06小腿 | 一次 | 四次 | 0.31～0.45，15点 | 0.30～0.45 | (l−0.375)/0.075 |
+| DM-J4340P-2EC小腿 | 一次 | 四次 | 0.31～0.45，15点 | 0.30～0.45 | (l−0.375)/0.075 |
 
-小腿0.30m原始点被用户明确排除，未参与任何系数计算。整个0.30～0.45m范围正常使用，不输出外推警告；报告保留既有状态字段。两条腿共用相同结构的拟合模型，通过显式坐标变换/镜像映射至左右link；若左右部件配置不同，不能用镜像替代另一侧CAD参数。
+四套模型在各自训练点上拟合；0.25m大腿与0.30m小腿属于允许的一小段端点外推，生成报告会保留`extrapolated`状态。每个型号使用自己的结构模型，通过显式坐标变换/镜像映射至左右link；若左右部件配置不同，不能用镜像替代另一侧CAD参数。
 
-系数取自本次已验证的拟合结果。系数已经恢复为物理输出：质量kg、质心m、惯量kg·m²。按升幂存储，运行时用Horner法求值，不再进行训练输出标准化。代码中的MODELS记录完整系数、归一化中心及半宽。
+系数取自本次已验证的拟合结果。系数已经恢复为物理输出：质量kg、质心m、惯量kg·m²。按升幂存储，运行时用Horner法求值，不再进行训练输出标准化。JSON记录完整系数、归一化中心及半宽。
 
 ## 具体更新哪里
 
@@ -40,7 +42,7 @@
 
 ## 必须明确的坐标关系
 
-用户已明确确认：全部大腿、小腿数据来自左腿，SW输出坐标系的原点和轴方向分别与左侧 `thigh_pitch_link`、`knee_link` 对齐。这是默认映射的依据，不再根据质心正负号推断左右侧。左侧质心直接写入；右侧采用左右结构对称假设，沿y方向镜像。
+DM-J10010L-2EC、RS06和DM-J4340P-2EC报告坐标与左侧对应link对齐。RS04报告来自另一装配体坐标：先用固定旋转`Q=[[0,0,-1],[0,1,0],[1,0,0]]`，再使用`t=[0.51755062,-0.08250093,0.52306493-l] m`转到左大腿link坐标。该变换用相同大腿结构的质心轨迹交叉核对，三个轴的最大残差为0.347 mm。右侧继续采用左右结构对称假设，沿y方向镜像。
 
 支持两种方式：
 
@@ -60,6 +62,7 @@ SW输出Lxy、Lxz、Lyz采用正惯性积约定。构造标准惯性张量时非
 ```bash
 python robolab/scripts/tools/generate_urdf_sw.py \
   --thigh 0.30 --calf 0.35 \
+  --knee-motor RS04 --ankle-motor RS06 \
   --template /你的路径/rpo.urdf \
   --mesh-dir /你的路径/meshes \
   --output /tmp/rpo_sw_030_035
@@ -85,16 +88,18 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 
 当前直接运行co_design_train.py或co_design_eval.py默认使用SW生成器，无需包装入口。上述包装方式仍支持自定义模板、网格与坐标映射。评估旧模型训练的检查点时，可显式传入`--urdf-model legacy`；训练和评估应选择相同模型。
 
-外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m，并离散选择一类膝电机和一类踝电机。左右膝使用同一膝电机；左右腿的踝俯仰和踝横滚共四个关节使用同一踝电机。默认膝候选为`RS04,DM-J10010L-2EC`，默认踝候选为`RS06,DM-J4340P-2EC,DM-J8006-2EC`。默认数据库为`co_design_track_cot_motors.db`、study名称为`rpo_flat_track_cot_sw_motors`；已有study还会核对候选列表和曲线哈希，避免混合不同执行器模型。
+外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m，并离散选择一类膝电机和一类踝电机。左右膝使用同一膝电机；左右腿的踝俯仰和踝横滚共四个关节使用同一踝电机。默认膝候选为`RS04,DM-J10010L-2EC`，默认踝候选为`RS06,DM-J4340P-2EC`。DM-J8006-2EC因为没有经过验证的SW结构模型和关节侧惯量，保留在通用电机目录中，但不进入优化候选。默认数据库为`co_design_track_cot_motor_urdf_v1.db`、study名称为`rpo_flat_track_cot_motor_urdf_v1`，与旧的“只改执行器、不改URDF”的试验隔离；已有study还会核对候选列表、URDF模型与生成器文件哈希、型号映射和曲线哈希，避免混合不同模型。
 
-当前电机变量只改变仿真执行器：
+当前电机变量同时改变URDF结构参数和仿真执行器：
 
 - `effort_limit`与`effort_limit_sim`使用候选电机峰值输出扭矩；
 - `velocity_limit`与`velocity_limit_sim`使用候选电机输出端最高转速；
 - 有CSV包络的型号在每个仿真步按关节绝对转速插值，并动态裁剪正、反向输出扭矩；
-- 暂无完整曲线的DM-J8006-2EC先使用20 N·m和200 rpm的矩形限幅；
-- PD刚度、阻尼、延迟和`armature=0.01`保持原值，因为当前没有可靠的电机侧转子/减速器反射惯量；
-- URDF质量、质心、惯量和外形完全不随电机型号变化。
+- `armature`随型号变化：RS04为0.04000、DM-J10010L-2EC为0.05556、RS06为0.01200、DM-J4340P-2EC为0.03200 kg·m²；灵足使用厂家低速端等效惯量，达妙使用上位机电机转动惯量乘减速比平方；
+- 所选型号与腿长共同选择对应的SW多项式，覆盖大腿或小腿link的质量、三维质心和六个质心惯量分量；
+- 暂无可靠惯量和SW模型的DM-J8006-2EC以及兼容保留的DM-J4340-2EC不进入优化；
+- PD刚度、阻尼和延迟保持原值；
+- 关节位置与碰撞盒仍按腿长更新，视觉网格仍未针对每个电机和长度重新导出。
 
 PPO训练奖励保持不变。结构评价不再使用episode return作为优化目标，而是同时最小化：
 
@@ -112,8 +117,8 @@ Optuna study使用两个`minimize`方向，并要求Optuna>=4.4，由`GPSampler`
 在原项目Isaac Lab环境、机器人资产齐全的前提下，从仓库根目录运行：
 
 ```bash
-python robolab/scripts/tools/co_design_train.py --thigh 0.30 --calf 0.35 --headless
-python robolab/scripts/tools/co_design_eval.py --checkpoint /路径/model.pt --thigh 0.30 --calf 0.35 --headless
+python robolab/scripts/tools/co_design_train.py --thigh 0.30 --calf 0.35 --knee-motor RS04 --ankle-motor RS06 --headless
+python robolab/scripts/tools/co_design_eval.py --checkpoint /路径/model.pt --thigh 0.30 --calf 0.35 --knee-motor RS04 --ankle-motor RS06 --headless
 python robolab/scripts/tools/co_design.py --trials 30 --max-iterations 12000 --num-envs 4096
 ```
 
@@ -125,8 +130,8 @@ python robolab/scripts/tools/co_design.py --trials 30 --max-iterations 12000 --n
 
 已验证：
 
-- 大腿、小腿各301个长度点覆盖允许预测范围，质量为正，惯量正定且满足主惯量三角不等式。
-- 三组组合(0.25,0.30)、(0.40,0.45)、(0.325,0.375)生成完整URDF。
+- 四套型号模型覆盖各自允许预测范围，质量为正，惯量正定且满足主惯量三角不等式。
+- 四种膝/踝型号组合均可生成完整URDF。
 - 三维质心、SW非对角符号、旋转、镜像及平移的写入正确。
 - 关节z与碰撞盒缩放正确，非目标link/关节参数保持，源模板哈希不变。
 - 输入范围和已有输出保护生效。

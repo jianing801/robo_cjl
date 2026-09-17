@@ -29,6 +29,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TRAIN_SCRIPT = os.path.join(HERE, "co_design_train.py")
 EVAL_SCRIPT  = os.path.join(HERE, "co_design_eval.py")
 PACKAGE_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
+URDF_MODEL_FILE = os.path.join(
+    PACKAGE_ROOT, "robolab", "assets", "motor_data", "motor_urdf_models.json"
+)
+URDF_GENERATOR_FILE = os.path.join(HERE, "generate_urdf_sw.py")
 if PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, PACKAGE_ROOT)
 
@@ -50,9 +54,9 @@ parser.add_argument("--eval-commands", type=str, default="0.5,0,0",
                     help="Semicolon-separated velocity commands for the BO objective. "
                          "Default: 0.5 m/s forward. Pass e.g. "
                          "'0.5,0,0;1.0,0,0;-0.5,0,0' to enable multi-speed evaluation.")
-parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_sw_motors")
+parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_motor_urdf_v1")
 parser.add_argument("--db", type=str, default=None,
-                    help="Optuna DB path. Default: <HERE>/co_design_track_cot_motors.db")
+                    help="Optuna DB path. Default: <HERE>/co_design_track_cot_motor_urdf_v1.db")
 parser.add_argument("--knee-motors", type=str, default=",".join(KNEE_MOTOR_CANDIDATES),
                     help="Comma-separated knee motor IDs used as a categorical search space.")
 parser.add_argument("--ankle-motors", type=str, default=",".join(ANKLE_MOTOR_CANDIDATES),
@@ -95,6 +99,11 @@ def _envelope_signature(motor_id: str, csv_override: str | None) -> str | None:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _file_signature(path: str) -> str:
+    with open(path, "rb") as stream:
+        return hashlib.sha256(stream.read()).hexdigest()
+
+
 knee_motor_candidates = _parse_motor_candidates(
     args.knee_motors, KNEE_MOTOR_CANDIDATES, "Knee"
 )
@@ -112,7 +121,7 @@ if not all(math.isfinite(value) and value > 0.0
            for value in (args.fail_tracking, args.fail_cot)):
     parser.error("Infeasible-design objective values must be positive and finite.")
 
-db_path = args.db or os.path.join(HERE, "co_design_track_cot_motors.db")
+db_path = args.db or os.path.join(HERE, "co_design_track_cot_motor_urdf_v1.db")
 db_parent = os.path.dirname(os.path.abspath(db_path))
 os.makedirs(db_parent, exist_ok=True)
 for command_text in args.eval_commands.split(";"):
@@ -307,6 +316,24 @@ if __name__ == "__main__":
                       "calf_range": [0.30, 0.45],
                       "knee_motors": list(knee_motor_candidates),
                       "ankle_motors": list(ankle_motor_candidates),
+                      "motor_urdf_model_sha256": _file_signature(URDF_MODEL_FILE),
+                      "motor_urdf_generator_sha256": _file_signature(URDF_GENERATOR_FILE),
+                      "knee_urdf_models": {
+                          motor_id: get_motor_spec(motor_id).urdf_model_id
+                          for motor_id in knee_motor_candidates
+                      },
+                      "ankle_urdf_models": {
+                          motor_id: get_motor_spec(motor_id).urdf_model_id
+                          for motor_id in ankle_motor_candidates
+                      },
+                      "knee_armature_kgm2": {
+                          motor_id: get_motor_spec(motor_id).armature_kgm2
+                          for motor_id in knee_motor_candidates
+                      },
+                      "ankle_armature_kgm2": {
+                          motor_id: get_motor_spec(motor_id).armature_kgm2
+                          for motor_id in ankle_motor_candidates
+                      },
                       "knee_envelope_sha256": {
                           motor_id: _envelope_signature(motor_id, args.knee_envelope_csv)
                           for motor_id in knee_motor_candidates
@@ -320,7 +347,10 @@ if __name__ == "__main__":
                       "eval_episodes": args.eval_episodes,
                       "seed": args.seed}
     if study.trials and study.user_attrs.get("model_protocol") != model_protocol:
-        raise ValueError("URDF model/ranges differ or are unrecorded; use a new --db or --study-name.")
+        raise ValueError(
+            "URDF, motor armature, curve, or evaluation protocol differs or is unrecorded; "
+            "use a new --db or --study-name."
+        )
     study.set_user_attr("model_protocol", model_protocol)
 
     completed = [trial for trial in study.trials if trial.state == optuna.trial.TrialState.COMPLETE]
