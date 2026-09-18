@@ -141,7 +141,7 @@ import optuna
 def run_training(thigh: float, calf: float, knee_motor: str, ankle_motor: str) -> tuple[str, str]:
     """Run co_design_train.py in subprocess. Returns (log_dir, ckpt_path)."""
     cmd = [
-        sys.executable, TRAIN_SCRIPT,
+        sys.executable, "-u", TRAIN_SCRIPT,
         "--urdf-model", "sw",
         "--thigh", str(thigh),
         "--calf", str(calf),
@@ -176,6 +176,12 @@ def run_training(thigh: float, calf: float, knee_motor: str, ankle_motor: str) -
 
     ckpt = ckpt_match.group(1).strip() if ckpt_match else ""
     log_dir = log_match.group(1).strip() if log_match else ""
+    if not ckpt or not os.path.isfile(ckpt):
+        print("[co_design] TRAIN produced no usable checkpoint marker/path.")
+        print(f"[co_design] stdout tail: {stdout[-2000:]}")
+        raise RuntimeError(
+            f"Training returned success but no checkpoint was found for thigh={thigh} calf={calf}"
+        )
     print(f"[co_design] TRAIN done in {elapsed:.0f}s  ckpt={ckpt}")
     return log_dir, ckpt
 
@@ -200,7 +206,7 @@ def extract_train_reward(log_dir: str) -> float:
 def run_evaluation(ckpt_path: str, thigh: float, calf: float,
                    knee_motor: str, ankle_motor: str) -> dict:
     """Evaluate all fixed commands and return physical metrics."""
-    cmd = [sys.executable, EVAL_SCRIPT,
+    cmd = [sys.executable, "-u", EVAL_SCRIPT,
            "--urdf-model", "sw", "--checkpoint", ckpt_path,
            "--thigh", str(thigh), "--calf", str(calf), "--task", "RPO-Flat",
            "--knee-motor", knee_motor, "--ankle-motor", ankle_motor,

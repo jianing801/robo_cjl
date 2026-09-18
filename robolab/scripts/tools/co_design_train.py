@@ -18,6 +18,13 @@ import re
 import logging
 from datetime import datetime
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_RSL_RL_ROOT = os.path.join(_REPO_ROOT, "rsl_rl")
+if os.path.isdir(os.path.join(_RSL_RL_ROOT, "rsl_rl")) and _RSL_RL_ROOT not in sys.path:
+    # Use the repository dependency directly; an editable pip install is not
+    # required on offline training servers.
+    sys.path.insert(0, _RSL_RL_ROOT)
+
 _PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
@@ -352,8 +359,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         # fallback: scan parent for newest run's checkpoint
         final_ckpt = _get_resume_checkpoint_path(os.path.dirname(log_dir), ".*", r"model_.*\.pt")
     # Print special marker line for BO script to parse
-    print(f"CO_DESIGN_CKPT: {final_ckpt}")
-    print(f"CO_DESIGN_LOG_DIR: {log_dir}")
+    # stdout is captured by the outer BO process.  Flush explicitly because
+    # SimulationApp shutdown may otherwise discard buffered marker lines.
+    print(f"CO_DESIGN_CKPT: {final_ckpt}", flush=True)
+    print(f"CO_DESIGN_LOG_DIR: {log_dir}", flush=True)
 
 
 if __name__ == "__main__":

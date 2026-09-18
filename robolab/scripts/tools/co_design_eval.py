@@ -15,6 +15,13 @@ import os
 import sys
 import tempfile
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_RSL_RL_ROOT = os.path.join(_REPO_ROOT, "rsl_rl")
+if os.path.isdir(os.path.join(_RSL_RL_ROOT, "rsl_rl")) and _RSL_RL_ROOT not in sys.path:
+    # Use the repository dependency directly; an editable pip install is not
+    # required on offline evaluation servers.
+    sys.path.insert(0, _RSL_RL_ROOT)
+
 _PACKAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
@@ -87,7 +94,11 @@ print(f"[eval] {len(commands)} command(s): {commands}", flush=True)
 # Clear command-line arguments before Hydra/RSL-RL imports inspect sys.argv.
 sys.argv = [sys.argv[0]]
 
-# Compatibility workaround for the local rsl-rl installation.
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+# Compatibility workaround for the local rsl-rl installation.  Keep all
+# rsl_rl imports after AppLauncher so Isaac Sim/Carbonite is initialized first.
 import distutils.core
 import setuptools
 
@@ -107,10 +118,6 @@ if hasattr(opr, "resolve_callable"):
         return _orig_resolve(mapping.get(value, value))
 
     opr.resolve_callable = _smart_resolve
-
-
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
 
 import torch
 import gymnasium as gym
