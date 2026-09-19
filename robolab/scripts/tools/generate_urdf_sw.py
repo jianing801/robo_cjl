@@ -1,8 +1,8 @@
 """电机型号与腿长共同驱动的RPO URDF生成器。
 
 四套SolidWorks模型统一采用质量一次、其余属性四次多项式。模型先转换到
-左腿link坐标，再将右腿关于y=0镜像。RS04报告使用了随腿长移动的装配体
-坐标系，因此包含经过交叉验证的旋转和长度相关平移。
+左腿link坐标，再将右腿关于y=0镜像。四套当前报告均已按对应左腿
+link坐标导出，不再需要型号专用的源坐标修正。
 使用说明：docs/基于SW拟合参数的URDF更新.md。
 """
 
@@ -141,15 +141,9 @@ LEGACY_MODEL_KEYS = {
     "legacy-ankle": "DM4340P_calf",
 }
 
-# 将各SW报告坐标统一到左腿link坐标。其余三套报告已经对齐。
-SOURCE_FRAME_TRANSFORMS = {
-    "RS04_thigh": {
-        "matrix": [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
-        "translation_constant_m": [0.51755062, -0.08250093, 0.52306493],
-        "translation_per_length": [0.0, 0.0, -1.0],
-        "validation_max_com_axis_error_m": 3.47e-4,
-    },
-}
+# 四套当前SW报告都已经在对应左腿link坐标下导出。保留该映射入口，
+# 便于以后接入仍需坐标修正的其他CAD报告。
+SOURCE_FRAME_TRANSFORMS = {}
 
 # 原模板几何长度；不用于缩放拟合得到的质量或惯量。
 DEFAULT_THIGH = 0.25
