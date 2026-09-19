@@ -259,6 +259,47 @@ def _required(root, tag, name):
     return matches[0]
 
 
+def _resize_collision_box_z(collision, base_length, new_length, link_name):
+    """保持盒体两端相对关节的间隙，只改变中间连杆的z向长度。"""
+    box = collision.find('geometry/box')
+    if box is None:
+        raise ValueError(f'{link_name} has non-box collision; geometry adaptation is required')
+    origin = collision.find('origin')
+    if origin is None:
+        origin = ET.SubElement(collision, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+    if not np.allclose(_vec(origin, 'rpy', '0 0 0'), 0, rtol=0, atol=1e-10):
+        raise ValueError(f'{link_name} has rotated collision box')
+
+    xyz = _vec(origin, 'xyz', '0 0 0')
+    size = _vec(box, 'size')
+    if size[2] <= 0:
+        raise ValueError(f'{link_name} collision box must have positive z size')
+
+    # link原点是近端关节，远端关节位于z=-length。由原始模板计算并固定：
+    # 1) 盒体上端相对近端关节的位置；2) 盒体下端到远端关节的间隙。
+    top_z = xyz[2] + 0.5 * size[2]
+    old_bottom_z = xyz[2] - 0.5 * size[2]
+    distal_clearance = old_bottom_z + base_length
+    new_bottom_z = -new_length + distal_clearance
+    new_size_z = top_z - new_bottom_z
+    if new_size_z <= 0:
+        raise ValueError(
+            f'{link_name} collision box becomes non-positive for length={new_length}'
+        )
+
+    xyz[2] = 0.5 * (top_z + new_bottom_z)
+    size[2] = new_size_z
+    origin.set('xyz', _fmt(xyz))
+    box.set('size', _fmt(size))
+    return {
+        'top_z_m': float(top_z),
+        'bottom_z_m': float(new_bottom_z),
+        'distal_clearance_m': float(distal_clearance),
+        'size_m': size.tolist(),
+        'origin_m': xyz.tolist(),
+    }
+
+
 def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
                   knee_motor='legacy-knee', ankle_motor='legacy-ankle',
                   frame_map=None, aligned_side=None, mesh_dir=None):
@@ -329,19 +370,15 @@ def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
             inertial.find('mass').set('value',format(p['mass_kg'],'.17g'))
             for name,i,j in [('ixx',0,0),('ixy',0,1),('ixz',0,2),('iyy',1,1),('iyz',1,2),('izz',2,2)]:
                 inertial.find('inertia').set(name,format(float(inertia[i,j]),'.17g'))
-            # 沿用旧脚本的盒碰撞体近似；不按此比例再次缩放质量属性。
+            # 碰撞盒只代表中间连杆：固定两端安装区间隙，只改变z向中段长度。
+            collision_boxes = []
             for collision in link.findall('collision'):
-                box = collision.find('geometry/box')
-                if box is None:
-                    raise ValueError(f'{link_name} has non-box collision; geometry adaptation is required')
-                co = collision.find('origin')
-                if co is not None:
-                    if not np.allclose(_vec(co,'rpy','0 0 0'),0,rtol=0,atol=1e-10):
-                        raise ValueError(f'{link_name} has rotated collision box')
-                    xyz = _vec(co,'xyz','0 0 0');xyz[2] *= length/base;co.set('xyz',_fmt(xyz))
-                size = _vec(box,'size');size[2] *= length/base;box.set('size',_fmt(size))
+                collision_boxes.append(
+                    _resize_collision_box_z(collision, base, length, link_name)
+                )
             report['links'][link_name] = {'mass_kg':p['mass_kg'],'com_m':com.tolist(),
-                'inertia_kg_m2':inertia.tolist(),'matrix':q.tolist(),'translation_m':t.tolist()}
+                'inertia_kg_m2':inertia.tolist(),'matrix':q.tolist(),'translation_m':t.tolist(),
+                'collision_boxes':collision_boxes}
     # 相对路径改为实际绝对文件路径，输出目录改变后仍能加载原STL。
     # 不缩放visual mesh：保持旧脚本行为；它不是重新导出的参数化CAD网格。
     for mesh in root.findall('.//mesh'):

@@ -30,6 +30,7 @@
 - AMP、BeyondMimic 和 Parkour 工作流。
 - 用于策略迁移检查的 MuJoCo Sim2Sim 脚本。
 - 面向 [GMR](https://github.com/Roboparty/GMR) 数据集的动作重定向工具。
+- 支持腿长与膝/踝电机型号的结构控制联合优化：SW多项式更新质量属性，真实转矩—转速包络限制执行器，腿部碰撞盒固定两端安装区并只改变中间连杆长度。
 
 ## 环境要求
 
