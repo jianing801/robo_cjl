@@ -177,11 +177,12 @@ def configure_rpo_motors(
     ankle_motor: str = DEFAULT_ANKLE_MOTOR,
     knee_envelope_csv: str | None = None,
     ankle_envelope_csv: str | None = None,
+    use_torque_speed_curve: bool = True,
 ) -> dict[str, dict[str, object]]:
     """Apply selected knee and common ankle actuator models to ``robot_cfg``.
 
-    If a selected motor has a torque-speed CSV (or an override CSV is passed),
-    its delayed PD output is clipped by that curve at every simulation step.
+    If enabled and a selected motor has a torque-speed CSV (or an override CSV
+    is passed), its delayed PD output is clipped by that curve at every step.
     URDF geometry, mass, center of mass, and rigid-body inertia remain
     untouched.  Joint-side armature follows the selected motor specification.
     """
@@ -204,7 +205,7 @@ def configure_rpo_motors(
         actuator_cfg.effort_limit = None if motor.motor_id == legacy_id else motor.peak_torque_nm
         actuator_cfg.velocity_limit = None if motor.motor_id == legacy_id else motor.max_speed_rad_s
 
-        envelope = load_torque_speed_envelope(motor, csv_override)
+        envelope = load_torque_speed_envelope(motor, csv_override) if use_torque_speed_curve else None
         dynamic_envelope[actuator_name] = envelope is not None
         if envelope is not None:
             robot_cfg.actuators[actuator_name] = TorqueSpeedEnvelopeActuatorCfg(

@@ -37,7 +37,7 @@ from collections.abc import Sequence
 from isaaclab.envs import DirectRLEnv
 from isaaclab.assets.articulation import Articulation
 from isaaclab.envs.mdp.commands import UniformVelocityCommand, UniformVelocityCommandCfg
-from isaaclab.managers import EventManager, RewardManager
+from isaaclab.managers import RewardManager
 from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.buffers import CircularBuffer
@@ -76,9 +76,6 @@ class BaseEnv(DirectRLEnv):
         self.init_buffers()
 
         env_ids = torch.arange(self.num_envs, device=self.device)
-        self.event_manager = EventManager(self.cfg.events, self)
-        if "startup" in self.event_manager.available_modes:
-            self.event_manager.apply(mode="startup")
         self._reset_idx(env_ids)
 
     def init_buffers(self):
@@ -358,6 +355,7 @@ class BaseEnv(DirectRLEnv):
         self.extras["time_outs"] = self.reset_time_outs
 
         self.command_generator.reset(env_ids)
+        self.event_manager.reset(env_ids)
         self.actor_obs_buffer.reset(env_ids)
         self.critic_obs_buffer.reset(env_ids)
         self.action_buffer.reset(env_ids)

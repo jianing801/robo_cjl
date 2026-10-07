@@ -1,7 +1,7 @@
-"""Parameterized training script for RPO co-design BO inner loop.
+"""RPO training entry point with optional co-design model changes.
 
-Accepts thigh/calf length parameters, generates a custom URDF, injects
-it into the RPO_CFG, then runs full RSL-RL training.
+The original URDF and static legacy actuator limits are used by default.
+Explicit switches enable a generated URDF and selected torque-speed curves.
 
 STANDALONE — does NOT modify train.py or any existing source file.
 
@@ -44,10 +44,18 @@ sys.path.insert(0, os.path.abspath(_RSL_RL_SCRIPTS))
 import cli_args  # isort: skip
 
 parser = argparse.ArgumentParser(description="Co-design parameterized training.")
+parser.add_argument("--enable-urdf-update", action="store_true",
+                    help="Generate a parameterized URDF; default uses the original URDF unchanged.")
+parser.add_argument("--enable-motor-curve", action="store_true",
+                    help="Apply the selected motors' torque-speed curves; default uses static actuator limits.")
 parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
-                    help="URDF parameter model; SW fits are the default.")
-parser.add_argument("--thigh", type=float, required=True, help="Thigh length (m).")
-parser.add_argument("--calf", type=float, required=True, help="Calf length (m).")
+                    help="URDF parameter model when --enable-urdf-update is set.")
+parser.add_argument("--template", type=str, default=None,
+                    help="Original RPO URDF template when it is outside this checkout.")
+parser.add_argument("--mesh-dir", type=str, default=None,
+                    help="Directory containing STL meshes referenced by the URDF template.")
+parser.add_argument("--thigh", type=float, default=0.25, help="Thigh length (m); original is 0.25 m.")
+parser.add_argument("--calf", type=float, default=0.30, help="Calf length (m); original is 0.30 m.")
 parser.add_argument("--knee-motor", choices=KNEE_MOTOR_CHOICES, default=DEFAULT_KNEE_MOTOR,
                     help="Knee motor ID; applied symmetrically to both knees.")
 parser.add_argument("--ankle-motor", choices=ANKLE_MOTOR_CHOICES, default=DEFAULT_ANKLE_MOTOR,
@@ -62,6 +70,8 @@ parser.add_argument("--num-envs", type=int, default=4096)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--max-iterations", type=int, default=12000,
                     help="Number of PPO updates; 12000 writes final model_11999.pt.")
+parser.add_argument("--save-interval", type=int, default=None,
+                    help="Checkpoint interval in PPO updates (defaults to the task configuration).")
 parser.add_argument("--video", action="store_true", default=False)
 parser.add_argument("--video-length", type=int, default=200)
 parser.add_argument("--video-interval", type=int, default=2000)
@@ -71,6 +81,12 @@ parser.add_argument("--early-threshold", type=float, default=0.0, help="Fail thr
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+if not args_cli.enable_urdf_update and (
+    abs(args_cli.thigh - 0.25) > 1e-9 or abs(args_cli.calf - 0.30) > 1e-9
+):
+    parser.error("Non-original leg lengths require --enable-urdf-update.")
+if not args_cli.enable_motor_curve and (args_cli.knee_envelope_csv or args_cli.ankle_envelope_csv):
+    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 # Auto-enable distributed for torchrun
 if int(os.getenv("WORLD_SIZE", "1")) > 1:
@@ -184,7 +200,7 @@ def _read_mean_reward(log_dir: str, n_last: int = 10) -> float:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
          agent_cfg: RslRlBaseRunnerCfg):
-    """Train with parameterized URDF."""
+    """Train with the original robot unless optional model updates are enabled."""
 
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
@@ -192,6 +208,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         env_cfg.scene_context.num_envs = env_cfg.scene.num_envs
     env_cfg.scene.env_spacing = 2.5
     agent_cfg.max_iterations = args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
+    if args_cli.save_interval is not None:
+        if args_cli.save_interval < 1:
+            raise ValueError("--save-interval must be positive")
+        agent_cfg.save_interval = args_cli.save_interval
 
     # rsl-rl compat
     if version.parse(installed_version) < version.parse("5.0.0"):
@@ -230,18 +250,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     )
     env_cfg.log_dir = log_dir
 
-    # ── Generate parameterized URDF + inject ────────────────────────────
+    # ── Select the unchanged template or generate a parameterized URDF ──
     tmp_dir = tempfile.mkdtemp(prefix="rpo_train_")
-    urdf_kwargs = {}
-    if args_cli.urdf_model == "sw":
-        urdf_kwargs = {
-            "knee_motor": args_cli.knee_motor,
-            "ankle_motor": args_cli.ankle_motor,
-        }
-    urdf_path = generate_urdf(
-        args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
-    )
-    base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
+    template_path = os.path.abspath(os.path.expanduser(args_cli.template or RPO_CFG.spawn.asset_path))
+    if not os.path.isfile(template_path):
+        raise FileNotFoundError(f"Original RPO URDF not found: {template_path}. Pass --template with its path.")
+    if args_cli.enable_urdf_update:
+        urdf_kwargs = {"template_path": template_path}
+        if args_cli.urdf_model == "sw":
+            urdf_kwargs.update({
+                "knee_motor": args_cli.knee_motor,
+                "ankle_motor": args_cli.ankle_motor,
+                "mesh_dir": args_cli.mesh_dir,
+            })
+        urdf_path = generate_urdf(
+            args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
+        )
+        base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
+    else:
+        urdf_path = template_path
+        base_z = RPO_CFG.init_state.pos[2]
 
     custom_robot_cfg = RPO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
     custom_robot_cfg.spawn.asset_path = urdf_path
@@ -253,6 +281,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         ankle_motor=args_cli.ankle_motor,
         knee_envelope_csv=args_cli.knee_envelope_csv,
         ankle_envelope_csv=args_cli.ankle_envelope_csv,
+        use_torque_speed_curve=args_cli.enable_motor_curve,
     )
 
     if hasattr(env_cfg, "scene_context"):
@@ -282,7 +311,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         f"armature={motor_selection['ankle']['armature_kgm2']:.5f} kg*m^2, "
         f"dynamic_envelope={motor_selection['ankle']['dynamic_envelope']})"
     )
-    print(f"[co_design_train] URDF: {urdf_path}")
+    print(
+        f"[co_design_train] URDF update={args_cli.enable_urdf_update}, "
+        f"motor curve={args_cli.enable_motor_curve}, URDF: {urdf_path}"
+    )
 
     # ── Create env ──────────────────────────────────────────────────────
     env = gym.make(args_cli.task, cfg=env_cfg,
@@ -324,6 +356,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
         # Keep the selected motor IDs, armature, and exact actuator-side limits
         # next to the checkpoint; the generated URDF report stores mass/inertia.
         dump_yaml(os.path.join(log_dir, "params", "motors.yaml"), motor_selection)
+        dump_yaml(os.path.join(log_dir, "params", "model_options.yaml"), {
+            "enable_urdf_update": args_cli.enable_urdf_update,
+            "enable_motor_curve": args_cli.enable_motor_curve,
+            "urdf_model": args_cli.urdf_model if args_cli.enable_urdf_update else None,
+            "urdf_path": urdf_path,
+            "template_path": template_path,
+            "thigh_m": args_cli.thigh,
+            "calf_m": args_cli.calf,
+        })
 
     # ── Train (with early stop) ───────────────────────────────────────
     early_check = args_cli.early_check

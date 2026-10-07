@@ -44,6 +44,14 @@ from robolab.assets.rpo_motor_catalog import (  # noqa: E402
 )
 
 parser = argparse.ArgumentParser(description="Bi-level co-design BO over leg lengths and motor choices.")
+parser.add_argument("--enable-urdf-update", action="store_true",
+                    help="Required for BO because it searches non-original leg lengths.")
+parser.add_argument("--enable-motor-curve", action="store_true",
+                    help="Apply motor torque-speed curves during training and evaluation; default is off.")
+parser.add_argument("--template", type=str, default=None,
+                    help="Original RPO URDF template when it is outside this checkout.")
+parser.add_argument("--mesh-dir", type=str, default=None,
+                    help="STL mesh directory for generated URDF files.")
 parser.add_argument("--trials", type=int, default=30,
                     help="Target number of COMPLETE BO trials in the study.")
 parser.add_argument("--max-iterations", type=int, default=12000,
@@ -74,6 +82,10 @@ parser.add_argument("--fail-tracking", type=float, default=1e6,
 parser.add_argument("--fail-cot", type=float, default=1e6,
                     help="CoT objective assigned to infeasible trials.")
 args = parser.parse_args()
+if not args.enable_urdf_update:
+    parser.error("BO searches leg lengths; pass --enable-urdf-update to run it.")
+if not args.enable_motor_curve and (args.knee_envelope_csv or args.ankle_envelope_csv):
+    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 
 def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> tuple[str, ...]:
@@ -92,6 +104,8 @@ def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> 
 def _envelope_signature(motor_id: str, csv_override: str | None) -> str | None:
     """Fingerprint the actual curve values so an Optuna study cannot mix models."""
 
+    if not args.enable_motor_curve:
+        return None
     points = load_torque_speed_envelope(get_motor_spec(motor_id), csv_override)
     if points is None:
         return None
@@ -153,6 +167,14 @@ def run_training(thigh: float, calf: float, knee_motor: str, ankle_motor: str) -
         "--seed", str(args.seed),
         "--headless",
     ]
+    if args.enable_urdf_update:
+        cmd.append("--enable-urdf-update")
+    if args.enable_motor_curve:
+        cmd.append("--enable-motor-curve")
+    if args.template:
+        cmd += ["--template", args.template]
+    if args.mesh_dir:
+        cmd += ["--mesh-dir", args.mesh_dir]
     if args.knee_envelope_csv:
         cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
     if args.ankle_envelope_csv:
@@ -213,6 +235,14 @@ def run_evaluation(ckpt_path: str, thigh: float, calf: float,
            "--num-episodes", str(args.eval_episodes), "--num-envs", "1",
            "--seed", str(args.seed),
            f"--command={args.eval_commands}", "--headless"]
+    if args.enable_urdf_update:
+        cmd.append("--enable-urdf-update")
+    if args.enable_motor_curve:
+        cmd.append("--enable-motor-curve")
+    if args.template:
+        cmd += ["--template", args.template]
+    if args.mesh_dir:
+        cmd += ["--mesh-dir", args.mesh_dir]
     if args.knee_envelope_csv:
         cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
     if args.ankle_envelope_csv:
@@ -318,7 +348,9 @@ if __name__ == "__main__":
         load_if_exists=True,
     )
 
-    model_protocol = {"urdf_model": "sw", "thigh_range": [0.25, 0.40],
+    model_protocol = {"urdf_model": "sw", "enable_urdf_update": args.enable_urdf_update,
+                      "enable_motor_curve": args.enable_motor_curve,
+                      "thigh_range": [0.25, 0.40],
                       "calf_range": [0.30, 0.45],
                       "knee_motors": list(knee_motor_candidates),
                       "ankle_motors": list(ankle_motor_candidates),
