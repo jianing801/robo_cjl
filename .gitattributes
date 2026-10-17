@@ -1,0 +1,2 @@
+# Keep source-data byte hashes stable across Windows and Unix checkouts.
+robolab/robolab/assets/motor_data/**/*.csv text eol=lf

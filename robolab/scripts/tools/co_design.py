@@ -88,10 +88,6 @@ parser.add_argument("--fail-tracking", type=float, default=1e6,
 parser.add_argument("--fail-cot", type=float, default=1e6,
                     help="CoT objective assigned to infeasible trials.")
 args = parser.parse_args()
-if not args.enable_urdf_update:
-    parser.error("BO searches leg lengths; pass --enable-urdf-update to run it.")
-if not args.enable_motor_curve and (args.knee_envelope_csv or args.ankle_envelope_csv):
-    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 if args.list_motor_candidates:
     for label, candidates in (("knee", KNEE_MOTOR_DESIGN_CANDIDATES),
@@ -109,6 +105,11 @@ if args.list_motor_candidates:
                 status = "STAGED: " + "; ".join(bo_missing)
             print(f"  {motor_id} [{motor.display_name}]: {status}")
     sys.exit(0)
+
+if not args.enable_urdf_update:
+    parser.error("BO searches leg lengths; pass --enable-urdf-update to run it.")
+if not args.enable_motor_curve and (args.knee_envelope_csv or args.ankle_envelope_csv):
+    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 
 def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> tuple[str, ...]:
