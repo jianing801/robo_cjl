@@ -37,11 +37,13 @@ from isaaclab.assets.articulation import ArticulationCfg
 from robolab.assets import ISAAC_DATA_DIR
 from robolab.assets.rpo_motor_catalog import (
     ANKLE_MOTOR_CHOICES,
+    STAGED_MOTOR_IDS,
     DEFAULT_ANKLE_MOTOR,
     DEFAULT_KNEE_MOTOR,
     KNEE_MOTOR_CHOICES,
     get_motor_spec,
     load_torque_speed_envelope,
+    require_motor_actuator_ready,
 )
 from robolab.actuators import TorqueSpeedEnvelopeActuatorCfg
 
@@ -189,6 +191,9 @@ def configure_rpo_motors(
 
     knee = get_motor_spec(knee_motor, KNEE_MOTOR_CHOICES)
     ankle = get_motor_spec(ankle_motor, ANKLE_MOTOR_CHOICES)
+    for motor in (knee, ankle):
+        if motor.motor_id in STAGED_MOTOR_IDS:
+            require_motor_actuator_ready(motor)
     dynamic_envelope: dict[str, bool] = {}
 
     for actuator_name, motor, legacy_id, csv_override in (

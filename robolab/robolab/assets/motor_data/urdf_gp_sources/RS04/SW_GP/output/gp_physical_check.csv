@@ -1,0 +1,2 @@
+﻿model_id,dense_points,physically_valid_points,minimum_eigenvalue_kg_m2,minimum_triangle_margin_kg_m2,all_valid
+RS04_thigh_URDF_GP,301,301,0.002904842278843305,0.0011288888160023748,True

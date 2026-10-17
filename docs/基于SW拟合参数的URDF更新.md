@@ -6,7 +6,7 @@
 
 `robolab/scripts/tools/generate_urdf_sw.py`
 
-生成器初版采用新增文件方式。当前已将训练、评估和BO入口接入SW模型，原generate_urdf.py及URDF源模板保留。四套拟合系数保存在`robolab/robolab/assets/motor_data/motor_urdf_models.json`，运行不需要CSV或scikit-learn。膝电机型号和踝电机型号作为两个离散设计变量接入外层BO；型号变化会同时修改URDF质量、质心、刚体惯量，以及Isaac Lab执行器的峰值扭矩、最高转速、关节侧`armature`和可用的转矩—转速动态包络。外层BO采用速度跟踪代价与机械CoT双目标优化。
+生成器初版采用新增文件方式。当前训练、评估和BO入口统一使用SW-GP模型；GP注册表为`robolab/robolab/assets/motor_data/motor_urdf_gp_registry.json`，模型文件位于同目录的`urdf_gp_models/`。旧多项式索引、回退逻辑与拟合脚本已移除，不存在多项式回退。膝电机型号和踝电机型号作为两个离散设计变量接入外层BO；型号变化会同时修改URDF质量、质心、刚体惯量，以及Isaac Lab执行器的峰值扭矩、最高转速、关节侧`armature`和可用的转矩—转速动态包络。外层BO采用速度跟踪代价与机械CoT双目标优化。
 
 原代码参考：https://github.com/guagua1413028593-sketch/robo_cjl/blob/0a99617706f375a25efc88735256bb8bd7031f81/robolab/scripts/tools/generate_urdf.py
 
@@ -98,7 +98,7 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 
 当前直接运行co_design_train.py或co_design_eval.py默认使用SW生成器，无需包装入口。上述包装方式仍支持自定义模板、网格与坐标映射。评估旧模型训练的检查点时，可显式传入`--urdf-model legacy`；训练和评估应选择相同模型。
 
-外层co_design.py显式向训练和评估传入`--urdf-model sw`，搜索范围为大腿0.25～0.40m、小腿0.30～0.45m，并离散选择一类膝电机和一类踝电机。左右膝使用同一膝电机；左右腿的踝俯仰和踝横滚共四个关节使用同一踝电机。默认膝候选为`RS04,DM-J10010L-2EC`，默认踝候选为`RS06,DM-J4340P-2EC`。DM-J8006-2EC因为没有经过验证的SW结构模型和关节侧惯量，保留在通用电机目录中，但不进入优化候选。默认数据库为`co_design_track_cot_motor_urdf_v1.db`、study名称为`rpo_flat_track_cot_motor_urdf_v1`，与旧的“只改执行器、不改URDF”的试验隔离；已有study还会核对候选列表、URDF模型与生成器文件哈希、型号映射和曲线哈希，避免混合不同模型。
+外层`co_design.py`显式向训练和评估传入`--urdf-model sw`，并从`motor_urdf_gp_registry.json`读取型号—腿段对应的GP。搜索范围为大腿0.25～0.40 m、小腿0.30～0.45 m；膝与踝分别作为离散设计变量。当前候选数量、型号绑定和每款 GP 文件以[电机 BO 候选池与 GP 映射](电机BO候选池与GP映射_2026-10-17.md)为准。原RoboParty的legacy-knee/legacy-ankle默认配置不变；在联合优化入口中，legacy别名映射到相应的GP结构模型。模型协议会核对候选列表、GP注册表/模型与生成器文件哈希、型号映射和曲线哈希，避免混合不同模型。
 
 当前电机变量同时改变URDF结构参数和仿真执行器：
 
@@ -106,8 +106,8 @@ python robolab/scripts/tools/generate_urdf_sw.py \
 - `velocity_limit`与`velocity_limit_sim`使用候选电机输出端最高转速；
 - 有CSV包络的型号在每个仿真步按关节绝对转速插值，并动态裁剪正、反向输出扭矩；
 - `armature`随型号变化：RS04为0.04000、DM-J10010L-2EC为0.05556、RS06为0.01200、DM-J4340P-2EC为0.03200 kg·m²；灵足使用厂家低速端等效惯量，达妙使用上位机电机转动惯量乘减速比平方；
-- 所选型号与腿长共同选择对应的SW多项式，覆盖大腿或小腿link的质量、三维质心和六个质心惯量分量；
-- 暂无可靠惯量和SW模型的DM-J8006-2EC以及兼容保留的DM-J4340-2EC不进入优化；
+- 所选型号与腿长共同选择该型号、该腿段独立拟合的SW-GP，覆盖大腿或小腿link的质量、三维质心和六个质心惯量分量；
+- 不再保留后来新增的DM-J8006-2EC和DM-J4340-2EC矩形入口。新版DM-J8006-2EC-V1.1与DM-J4340P-2EC-V1.1-48V现已绑定独立SW-GP；当前逐型号状态见`电机BO候选池与GP映射_2026-10-17.md`。非P替代和参数未完整型号仍归入“不加入选型”，不出现在候选入口。原始legacy膝/踝配置保持不变；
 - PD刚度、阻尼和延迟保持原值；
 - 关节位置随腿长更新；碰撞盒固定两端安装间隙，只改变中间连杆长度；视觉网格仍未针对每个电机和长度重新导出。
 
@@ -145,7 +145,7 @@ python robolab/scripts/tools/co_design.py --trials 30 --max-iterations 12000 --n
 - 三维质心、SW非对角符号、旋转、镜像及平移的写入正确。
 - 关节z正确，碰撞盒两端间隙保持且中间长度更新，非目标link/关节参数保持，源模板哈希不变。
 - 输入范围和已有输出保护生效。
-- 嵌入系数在原验证点上的预测与已记录多项式预测一致（绝对差<1e-14）。
+- GP注册表逐项指定型号、腿段、预测范围和模型文件；运行时对越界长度、缺失模型及不满足物理约束的惯量显式报错，不回退到旧多项式。
 - --run入口通过模拟训练脚本检验，正确转发参数并注入新生成器。
 
 未在当前环境执行Isaac Sim导入、PPO训练或真实运动验证。602点物理一致性检查不能替代CAD预测精度或动力学验证，也不能证明外推精度。

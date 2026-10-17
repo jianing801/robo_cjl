@@ -1,0 +1,12 @@
+Motor: DM-J4340P-2EC
+Generated: 2026-09-16 19:28:38
+MATLAB: 24.1.0.2537033 (R2024a)
+Vdc: 48.000000 V
+Peak phase current: 9.000000 A
+Gear ratio: 40.000000
+Peak cap: 27.000000 N*m
+No-load: 100.000000 rpm
+MCB natural no-load: 97.425000 rpm
+Speed-axis scale: 1.026430588
+Points: 65
+Field weakening: disabled
