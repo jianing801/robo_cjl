@@ -1,2 +1,5 @@
 # Keep source-data byte hashes stable across Windows and Unix checkouts.
 robolab/robolab/assets/motor_data/**/*.csv text eol=lf
+
+# Preserve byte-exact CAD exchange geometry in the checked-in example.
+docs/examples/DM-J6216P_calf_SW/*.step -text -diff
