@@ -173,7 +173,7 @@ robo_cjl/
 
 扫描宏的输出位置随宏而异，通常在装配体工作副本目录；J10422P 宏输出在装配体目录的上一级。核实后将 CSV 归入 Git 的 `urdf_gp_sources/<motor_id>/SW_GP/data/`，记录原始输出位置和来源；不要只保留复制件而忘记说明来源。本仓库只纳入一套 DM-J6216P CAD/宏样例，其他逐型号 CAD、宏和截图是否入库仍需遵循项目体积/保密约定；未纳入时，至少在 README 中写出工作站路径和文件名。不要把临时 STEP 导出、宏调试日志或其他型号的 GP 文件塞进新型号正式目录。
 
-仓库入口见 [`电机 BO 候选池与 GP 映射`](电机BO候选池与GP映射_2026-10-17.md)、[`基于 SW 拟合参数的 URDF 更新`](基于SW拟合参数的URDF更新.md) 和 `robolab/robolab/assets/motor_data/README.md`。总流程解决跨型号共性；型号 GP README 记录该型号的确切训练数据、预测域、校验结果和特殊风险。
+仓库入口见 [`电机 BO 候选池与 GP 映射`](电机候选池与模型映射.md)、[`基于 SW 拟合参数的 URDF 更新`](基于SW拟合参数的URDF更新.md) 和 `robolab/robolab/assets/motor_data/README.md`。总流程解决跨型号共性；型号 GP README 记录该型号的确切训练数据、预测域、校验结果和特殊风险。
 
 ## 9. 常见错误及处理
 
