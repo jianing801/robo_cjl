@@ -2,4 +2,4 @@
 robolab/robolab/assets/motor_data/**/*.csv text eol=lf
 
 # Preserve byte-exact CAD exchange geometry in the checked-in example.
-docs/examples/DM-J6216P_calf_SW/*.step -text -diff
+docs/examples/**/*.step -text -diff
