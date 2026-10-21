@@ -1,0 +1,384 @@
+"""Generate RPO URDFs from per-motor SolidWorks Gaussian-process models.
+
+Each motor and segment has its own GP model registered in
+motor_urdf_gp_registry.json. No polynomial coefficients or fallback are used.
+See docs/基于SW拟合参数的URDF更新.md for details.
+"""
+
+import argparse
+from functools import lru_cache
+import json
+import math
+import os
+from pathlib import Path
+import xml.etree.ElementTree as ET
+import numpy as np
+
+from robolab.assets.rpo_motor_catalog import get_motor_spec
+
+
+GP_MODEL_REGISTRY_FILE = (
+    Path(__file__).resolve().parents[2]
+    / "robolab/assets/motor_data/motor_urdf_gp_registry.json"
+)
+MODELS = json.loads(GP_MODEL_REGISTRY_FILE.read_text(encoding="utf-8"))
+MODEL_ASSET_DIR = GP_MODEL_REGISTRY_FILE.parent
+
+# 旧命令仍可生成原先对应的达妙结构。优化命令总会传入实际电机型号。
+LEGACY_MODEL_KEYS = {
+    "legacy-knee": "DM10010L_thigh",
+    "legacy-ankle": "DM4340P_calf",
+}
+
+# 四套当前SW报告都已经在对应左腿link坐标下导出。保留该映射入口，
+# 便于以后接入仍需坐标修正的其他CAD报告。
+SOURCE_FRAME_TRANSFORMS = {}
+
+# 原模板几何长度；不用于缩放拟合得到的质量或惯量。
+DEFAULT_THIGH = 0.25
+DEFAULT_CALF = 0.30
+TEMPLATE_URDF = Path(__file__).resolve().parents[2] / 'data/robots/roboparty/rpo/urdf/rpo.urdf'
+JOINTS = {'thigh': ('left_knee_joint', 'right_knee_joint'),
+          'calf': ('left_ankle_pitch_joint', 'right_ankle_pitch_joint')}
+LINKS = {'thigh': ('left_thigh_pitch_link', 'right_thigh_pitch_link'),
+         'calf': ('left_knee_link', 'right_knee_link')}
+
+
+def predict_properties(model_id, length):
+    """返回左腿link坐标下的质量、质心和标准质心惯性矩阵。"""
+    if model_id not in MODELS:
+        raise ValueError(f'Unknown motor URDF model: {model_id}')
+    length = float(length)
+    model = MODELS[model_id]
+    lo, hi = model['prediction_range_m']
+    if not math.isfinite(length) or not lo <= length <= hi:
+        raise ValueError(f'{model["segment"]} length must be in [{lo}, {hi}] m')
+    gp_model_file = model.get('gp_model_file')
+    if not gp_model_file:
+        raise ValueError(f'URDF model {model_id} is missing its GP model file')
+    gp_model = _load_gp_model(gp_model_file)
+    if gp_model.get('segment') != model['segment']:
+        raise ValueError(f'GP model {gp_model_file} segment does not match {model["segment"]}')
+    outputs = gp_model['outputs']
+    value = lambda key: _predict_gp_output(outputs[key], length)
+    mass = value('mass_kg')
+    com = np.array([value('com_'+axis+'_m') for axis in 'xyz'])
+    v = {axis: value('L'+axis) for axis in ('xx','xy','xz','yy','yz','zz')}
+    # SW正惯性积的非对角项取负；不对质心惯量再做平行轴平移。
+    inertia = np.array([[v['xx'], -v['xy'], -v['xz']],
+                        [-v['xy'], v['yy'], -v['yz']],
+                        [-v['xz'], -v['yz'], v['zz']]])
+    source_transform = SOURCE_FRAME_TRANSFORMS.get(model_id)
+    if source_transform is not None:
+        q = np.asarray(source_transform['matrix'], dtype=float)
+        t = (
+            np.asarray(source_transform['translation_constant_m'], dtype=float)
+            + length * np.asarray(source_transform['translation_per_length'], dtype=float)
+        )
+        com = q @ com + t
+        inertia = q @ inertia @ q.T
+    _validate_physics(mass, com, inertia)
+    return {'mass_kg': mass, 'com_m': com, 'inertia_kg_m2': inertia,
+            'model_id': model_id,
+            'extrapolated': length < model['training_range_m'][0]}
+
+
+@lru_cache(maxsize=None)
+def _load_gp_model(relative_path):
+    path = (MODEL_ASSET_DIR / relative_path).resolve()
+    if not path.is_relative_to(MODEL_ASSET_DIR.resolve()):
+        raise ValueError(f'GP model path must be inside motor_data: {relative_path}')
+    data = json.loads(path.read_text(encoding='utf-8'))
+    required = {'mass_kg', 'com_x_m', 'com_y_m', 'com_z_m',
+                'Lxx', 'Lxy', 'Lxz', 'Lyy', 'Lyz', 'Lzz'}
+    if not required.issubset(data.get('outputs', {})):
+        raise ValueError(f'GP model is missing URDF outputs: {path}')
+    return data
+
+
+def _predict_gp_output(model, length):
+    if model.get('constant', False):
+        return float(model['constant_value'])
+    x_mean = float(model['x_mean'])
+    x_scale = float(model['x_scale'])
+    length_scale = float(model['length_scale_standardized'])
+    if x_scale <= 0.0 or length_scale <= 0.0:
+        raise ValueError('GP model has non-positive input scaling or kernel length scale')
+    train = (np.asarray(model['x_train_m'], dtype=float) - x_mean) / x_scale
+    query = (float(length) - x_mean) / x_scale
+    r = np.abs(query - train) / length_scale
+    sqrt5r = math.sqrt(5.0) * r
+    signal = float(model.get('signal_std_standardized', 1.0))
+    kernel = signal**2 * (1.0 + sqrt5r + (5.0 / 3.0) * r**2) * np.exp(-sqrt5r)
+    alpha = np.asarray(model['alpha_standardized'], dtype=float)
+    if kernel.shape != alpha.shape:
+        raise ValueError('GP model training inputs and alpha coefficients do not match')
+    standardized_mean = float(model['beta_standardized']) + float(kernel @ alpha)
+    return float(model['y_mean']) + float(model['y_scale']) * standardized_mean
+
+
+def _motor_model_id(motor_id, segment):
+    model_id = LEGACY_MODEL_KEYS.get(motor_id)
+    if model_id is None:
+        model_id = get_motor_spec(motor_id).urdf_model_id
+    if model_id is None:
+        raise ValueError(
+            f"Motor '{motor_id}' has no validated {segment} URDF model and cannot "
+            "be used with --urdf-model sw."
+        )
+    model = MODELS.get(model_id)
+    if model is None or model.get('segment') != segment:
+        raise ValueError(f"Motor '{motor_id}' does not provide a valid {segment} URDF model.")
+    return model_id
+
+
+def _validate_physics(mass, com, inertia):
+    if not math.isfinite(mass) or mass <= 0 or not np.isfinite(com).all() or not np.isfinite(inertia).all():
+        raise ValueError('Non-finite or non-positive predicted mass/property')
+    eig = np.linalg.eigvalsh(inertia)
+    if eig[0] <= 0 or eig[0]+eig[1] < eig[2]-1e-12:
+        raise ValueError(f'Unphysical inertia principal moments: {eig}')
+
+
+def aligned_frame_map(side):
+    """显式假设：两段SW坐标与指定侧link完全重合，另一侧关于y=0镜像。"""
+    if side not in ('left', 'right'):
+        raise ValueError('aligned side must be left or right')
+    return {link: {'matrix': (np.eye(3) if link.startswith(side+'_') else np.diag([1,-1,1])).tolist(),
+                   'translation_m': [0,0,0]}
+            for names in LINKS.values() for link in names}
+
+
+def _frame(frame_map, link):
+    if link not in frame_map:
+        raise ValueError(f'Missing SW-to-link frame transform for {link}')
+    f = frame_map[link]
+    q = np.asarray(f['matrix'], dtype=float)
+    t = np.asarray(f['translation_m'], dtype=float)
+    if q.shape != (3,3) or t.shape != (3,) or not np.isfinite(q).all() or not np.isfinite(t).all():
+        raise ValueError(f'Invalid frame shape or values: {link}')
+    if not np.allclose(q @ q.T, np.eye(3), rtol=0, atol=1e-9):
+        raise ValueError(f'Frame matrix must be orthogonal: {link}')
+    # det=-1仅表示用户明确选择的左右结构镜像，不是刚体旋转。
+    return q, t
+
+
+def _vec(element, attribute, default=None):
+    text = element.get(attribute, default)
+    if text is None:
+        raise ValueError(f'Missing {element.tag}.{attribute}')
+    v = np.asarray([float(s) for s in text.split()])
+    if v.shape != (3,) or not np.isfinite(v).all():
+        raise ValueError(f'Invalid vector {text}')
+    return v
+
+
+def _fmt(v):
+    return ' '.join(format(float(x), '.17g') for x in v)
+
+
+def _required(root, tag, name):
+    matches = [e for e in root.findall(tag) if e.get('name') == name]
+    if len(matches) != 1:
+        raise ValueError(f'Expected exactly one {tag}: {name}')
+    return matches[0]
+
+
+def _resize_collision_box_z(collision, base_length, new_length, link_name):
+    """保持盒体两端相对关节的间隙，只改变中间连杆的z向长度。"""
+    box = collision.find('geometry/box')
+    if box is None:
+        raise ValueError(f'{link_name} has non-box collision; geometry adaptation is required')
+    origin = collision.find('origin')
+    if origin is None:
+        origin = ET.SubElement(collision, 'origin', {'xyz': '0 0 0', 'rpy': '0 0 0'})
+    if not np.allclose(_vec(origin, 'rpy', '0 0 0'), 0, rtol=0, atol=1e-10):
+        raise ValueError(f'{link_name} has rotated collision box')
+
+    xyz = _vec(origin, 'xyz', '0 0 0')
+    size = _vec(box, 'size')
+    if size[2] <= 0:
+        raise ValueError(f'{link_name} collision box must have positive z size')
+
+    # link原点是近端关节，远端关节位于z=-length。由原始模板计算并固定：
+    # 1) 盒体上端相对近端关节的位置；2) 盒体下端到远端关节的间隙。
+    top_z = xyz[2] + 0.5 * size[2]
+    old_bottom_z = xyz[2] - 0.5 * size[2]
+    distal_clearance = old_bottom_z + base_length
+    new_bottom_z = -new_length + distal_clearance
+    new_size_z = top_z - new_bottom_z
+    if new_size_z <= 0:
+        raise ValueError(
+            f'{link_name} collision box becomes non-positive for length={new_length}'
+        )
+
+    xyz[2] = 0.5 * (top_z + new_bottom_z)
+    size[2] = new_size_z
+    origin.set('xyz', _fmt(xyz))
+    box.set('size', _fmt(size))
+    return {
+        'top_z_m': float(top_z),
+        'bottom_z_m': float(new_bottom_z),
+        'distal_clearance_m': float(distal_clearance),
+        'size_m': size.tolist(),
+        'origin_m': xyz.tolist(),
+    }
+
+
+def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
+                  knee_motor='legacy-knee', ankle_motor='legacy-ankle',
+                  frame_map=None, aligned_side=None, mesh_dir=None):
+    """兼容旧函数前四个参数；默认SW坐标与左侧link对齐，右侧沿y镜像。
+
+    坐标关系：c_link=Q*c_SW+t；I_link=Q*I_SW*Q.T。
+    输出 output_dir/urdf/rpo.urdf；拒绝覆盖输入模板或已有输出。
+    若使用镜像，须确认左右部件组成/几何对称且link轴定义支持该镜像。
+    """
+    if frame_map is None and aligned_side is None:
+        aligned_side = "left"
+    elif frame_map is not None and aligned_side is not None:
+        raise ValueError('Provide frame_map or aligned_side, not both')
+    frames = aligned_frame_map(aligned_side) if aligned_side is not None else frame_map
+    mapped = {link: _frame(frames, link) for names in LINKS.values() for link in names}
+    model_ids = {
+        'thigh': _motor_model_id(knee_motor, 'thigh'),
+        'calf': _motor_model_id(ankle_motor, 'calf'),
+    }
+    properties = {
+        seg: predict_properties(model_ids[seg], length)
+        for seg, length in [('thigh', thigh_length), ('calf', calf_length)]
+    }
+    template = Path(template_path or TEMPLATE_URDF).expanduser().resolve()
+    output = Path(output_dir).expanduser().resolve() / 'urdf/rpo.urdf'
+    if not template.is_file():
+        raise FileNotFoundError(f'Template not found: {template}; provide --template')
+    if output == template:
+        raise ValueError('Output must not overwrite the input template')
+    if output.exists():
+        raise FileExistsError(f'Output already exists; choose a new output directory: {output}')
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    tree = ET.parse(template, parser=parser)
+    root = tree.getroot()
+    report = {'template': str(template), 'thigh_length_m':float(thigh_length), 'calf_length_m':float(calf_length),
+              'knee_motor': knee_motor, 'ankle_motor': ankle_motor,
+              'motor_urdf_gp_models': model_ids,
+              'frame_assumption': 'explicit transforms' if aligned_side is None else f'SW aligned with {aligned_side}; opposite side mirrored in y',
+              'thigh_extrapolated':properties['thigh']['extrapolated'],
+              'calf_extrapolated':properties['calf']['extrapolated'], 'links':{}}
+    for seg, length, base in [('thigh',float(thigh_length),DEFAULT_THIGH),('calf',float(calf_length),DEFAULT_CALF)]:
+        p = properties[seg]
+        for joint_name, link_name in zip(JOINTS[seg], LINKS[seg]):
+            joint = _required(root, 'joint', joint_name)
+            parent, origin = joint.find('parent'), joint.find('origin')
+            if parent is None or parent.get('link') != link_name or origin is None:
+                raise ValueError(f'Unexpected topology or missing origin: {joint_name}')
+            old = _vec(origin, 'xyz')
+            # 从原始几何模板生成，防止二次缩放已生成的URDF。
+            if not math.isclose(old[2], -base, rel_tol=0, abs_tol=1e-6):
+                raise ValueError(f'{joint_name} must have baseline z={-base}; supply original template')
+            old[2] = -length
+            origin.set('xyz', _fmt(old))
+            link = _required(root, 'link', link_name)
+            inertial = link.find('inertial')
+            if inertial is None:
+                raise ValueError(f'Missing inertial: {link_name}')
+            q,t = mapped[link_name]
+            com = q @ p['com_m'] + t
+            inertia = q @ p['inertia_kg_m2'] @ q.T
+            _validate_physics(p['mass_kg'], com, inertia)
+            for tag in ('origin','mass','inertia'):
+                if inertial.find(tag) is None:
+                    ET.SubElement(inertial,tag)
+            inertial.find('origin').set('xyz',_fmt(com))
+            # 张量已经变换到link坐标，故惯性坐标轴与link对齐。
+            inertial.find('origin').set('rpy','0 0 0')
+            inertial.find('mass').set('value',format(p['mass_kg'],'.17g'))
+            for name,i,j in [('ixx',0,0),('ixy',0,1),('ixz',0,2),('iyy',1,1),('iyz',1,2),('izz',2,2)]:
+                inertial.find('inertia').set(name,format(float(inertia[i,j]),'.17g'))
+            # 碰撞盒只代表中间连杆：固定两端安装区间隙，只改变z向中段长度。
+            collision_boxes = []
+            for collision in link.findall('collision'):
+                collision_boxes.append(
+                    _resize_collision_box_z(collision, base, length, link_name)
+                )
+            report['links'][link_name] = {'mass_kg':p['mass_kg'],'com_m':com.tolist(),
+                'inertia_kg_m2':inertia.tolist(),'matrix':q.tolist(),'translation_m':t.tolist(),
+                'collision_boxes':collision_boxes}
+    # 相对路径改为实际绝对文件路径，输出目录改变后仍能加载原STL。
+    # 不缩放visual mesh：保持旧脚本行为；它不是重新导出的参数化CAD网格。
+    for mesh in root.findall('.//mesh'):
+        name = mesh.get('filename','')
+        if mesh_dir is not None:
+            path = Path(mesh_dir).expanduser().resolve() / name.replace('\\','/').split('/')[-1]
+        elif name.startswith('package://'):
+            raise ValueError('package:// meshes require --mesh-dir')
+        elif name.startswith('file://'):
+            path = Path(name[7:])
+        else:
+            path = Path(name)
+            if not path.is_absolute():
+                path = template.parent/path
+        path = path.resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f'Mesh missing: {path}; provide --mesh-dir')
+        mesh.set('filename',str(path))
+    output.parent.mkdir(parents=True,exist_ok=True)
+    # 独占创建，禁止无意覆盖既有URDF。
+    with output.open('xb') as f:
+        tree.write(f,encoding='utf-8',xml_declaration=True)
+    report_path = output.with_suffix('.report.json')
+    report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    return str(output)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--thigh',type=float)
+    parser.add_argument('--calf',type=float)
+    parser.add_argument('--output')
+    parser.add_argument('--knee-motor',default='legacy-knee')
+    parser.add_argument('--ankle-motor',default='legacy-ankle')
+    parser.add_argument('--run',choices=['co_design_train','co_design_eval'],help='Run existing entry point with this generator injected in the current process')
+    parser.add_argument('--template')
+    parser.add_argument('--mesh-dir')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--frame-map',help='JSON: four link names -> matrix and translation_m')
+    group.add_argument('--aligned-side',choices=['left','right'],default='left',help='SW frame aligned side; default left. Opposite side is mirrored in y')
+    import sys
+    argv = sys.argv[1:]
+    divider = argv.index('--') if '--' in argv else len(argv)
+    forwarded = argv[divider+1:]
+    args = parser.parse_args(argv[:divider])
+    frames = json.loads(Path(args.frame_map).read_text(encoding='utf-8')) if args.frame_map else None
+    aligned_side = None if frames is not None else args.aligned_side
+    if args.run:
+        import runpy
+        import types
+        script = Path(__file__).resolve().with_name(args.run+'.py')
+        if not script.is_file():
+            parser.error('Place this file beside the existing co_design_train/eval.py scripts')
+        if any(v is not None for v in (args.thigh,args.calf,args.output)):
+            parser.error('For --run, pass training/evaluation arguments after --')
+        def injected(thigh_length,calf_length,output_dir,template_path=None,**kwargs):
+            return generate_urdf(thigh_length,calf_length,output_dir,template_path or args.template,
+                                 knee_motor=kwargs.get('knee_motor', args.knee_motor),
+                                 ankle_motor=kwargs.get('ankle_motor', args.ankle_motor),
+                                 frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
+        module = types.ModuleType('robolab.scripts.tools.generate_urdf')
+        module.generate_urdf = injected
+        sys.modules[module.__name__] = module
+        sys.modules['robolab.scripts.tools.generate_urdf_sw'] = module
+        sys.path.insert(0,str(Path(__file__).resolve().parents[3]))
+        sys.argv = [str(script)] + forwarded
+        runpy.run_path(str(script),run_name='__main__')
+        return
+    if forwarded or any(v is None for v in (args.thigh,args.calf,args.output)):
+        parser.error('Generation requires --thigh, --calf and --output; -- is reserved for --run')
+    path = generate_urdf(args.thigh,args.calf,args.output,args.template,
+                         knee_motor=args.knee_motor,ankle_motor=args.ankle_motor,
+                         frame_map=frames,aligned_side=aligned_side,mesh_dir=args.mesh_dir)
+    print(path)
+
+
+if __name__ == '__main__':
+    main()

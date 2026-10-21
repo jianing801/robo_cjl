@@ -1,0 +1,86 @@
+{
+  "RS04_thigh": {
+    "segment": "thigh",
+    "training_range_m": [0.26, 0.40],
+    "prediction_range_m": [0.25, 0.40],
+    "gp_model_file": "urdf_gp_models/RS04_thigh.json",
+    "coordinate_system": "coordinate_system_1"
+  },
+  "DM10010L_thigh": {
+    "segment": "thigh",
+    "training_range_m": [0.26, 0.40],
+    "prediction_range_m": [0.25, 0.40],
+    "gp_model_file": "urdf_gp_models/DM10010L_thigh.json",
+    "coordinate_system": "coordinate_system_1"
+  },
+  "RS06_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/RS06_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM4340P_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM4340P_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM10010_thigh": {
+    "segment": "thigh",
+    "training_range_m": [0.25, 0.40],
+    "prediction_range_m": [0.25, 0.40],
+    "gp_model_file": "urdf_gp_models/DM10010_thigh.json",
+    "coordinate_system": "coordinate_system_1"
+  },
+  "DM6248P_thigh": {
+    "segment": "thigh",
+    "training_range_m": [0.25, 0.40],
+    "prediction_range_m": [0.25, 0.40],
+    "gp_model_file": "urdf_gp_models/DM6248P_thigh.json",
+    "coordinate_system": "coordinate_system_1"
+  },
+  "DM10422P_thigh": {
+    "segment": "thigh",
+    "training_range_m": [0.25, 0.40],
+    "prediction_range_m": [0.25, 0.40],
+    "gp_model_file": "urdf_gp_models/DM10422P_thigh.json",
+    "coordinate_system": "coordinate_system_1"
+  },
+  "DM8009P_V11_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM8009P_V11_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM4340P_V11_48V_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM4340P_V11_48V_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM8006_V11_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM8006_V11_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM4310P_48V_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM4310P_48V_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  },
+  "DM6216P_calf": {
+    "segment": "calf",
+    "training_range_m": [0.31, 0.45],
+    "prediction_range_m": [0.30, 0.45],
+    "gp_model_file": "urdf_gp_models/DM6216P_calf.json",
+    "coordinate_system": "coordinate_system_2"
+  }
+}

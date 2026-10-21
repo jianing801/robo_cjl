@@ -1,0 +1,134 @@
+{
+  "repository": "jianing801/robo_cjl",
+  "commit": "1450a51c46a8b26e95a5aaee4bc850bba9e35115",
+  "files": [
+    {
+      "path": "robolab/robolab/assets/rpo_motor_catalog.py",
+      "git_blob_sha": "e74cb89c6a0cea9e512594fdf1d204c77d5abbe2"
+    },
+    {
+      "path": "robolab/robolab/assets/robots/roboparty.py",
+      "git_blob_sha": "8fcdc4e9b0193ac478f176b0fb16b1cb47c3651a"
+    },
+    {
+      "path": "robolab/scripts/tools/generate_urdf_sw.py",
+      "git_blob_sha": "d8848511e2de28a3b2399d3c4934f4b69df5b482"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/motor_urdf_gp_registry.json",
+      "git_blob_sha": "044e207c3a941b1e818215e27c52ddb2c3447ae2"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/selected/DM_parameter_models_2026_10_09.csv",
+      "git_blob_sha": "201821984ece36254bb618704fed20d41e79681e"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/selected/DM_selection_2026_09_23.csv",
+      "git_blob_sha": "fdeda5a58934d090c11467662900aea3f3d360df"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/selected/bo_ready_candidates.csv",
+      "git_blob_sha": "25a69d44a56976c6696e20c3c9b2b594b903867d"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/selected/电机清单.csv",
+      "git_blob_sha": "1fcb1b1e7dd3f4fe106ee90ec70a937b4abd6fcf"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J10010-2EC.csv",
+      "git_blob_sha": "373ba6772eabde650dc6df0b3285e9fa32a7747e"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J10422P-2EC.csv",
+      "git_blob_sha": "32434a25bb2d29f7a834fda3de67c7a3fa601b31"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J4310P-2EC-48V.csv",
+      "git_blob_sha": "e06b3258c58bedc38e127348f60c8d70e636a119"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J4340P-2EC-V1.1-48V.csv",
+      "git_blob_sha": "7766611a85e3c2167f7f0296d3eac90faa2d228e"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J6216P-2EC.csv",
+      "git_blob_sha": "cc624f596744fc65e752e06653acc977f945978b"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J6248P-2EC.csv",
+      "git_blob_sha": "03aa88770a9d26ae6c0920ff6bd304e9009c75b2"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J8006-2EC-V1.1.csv",
+      "git_blob_sha": "5ffacd67130d697b496fab85a5bc9376ac755023"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM-J8009P-2EC-V1.1.csv",
+      "git_blob_sha": "32c202a05535c4c6ca55824fd07309d3b87ca676"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM_J10010L_gp_envelope.csv",
+      "git_blob_sha": "2443dc1af3f5e71327756e8ea82c3b81366635cb"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/DM_J4340P_gp_envelope.csv",
+      "git_blob_sha": "62aee3fe9d5460afb1f272035eb20a0477d32bea"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/RS04_gp_envelope.csv",
+      "git_blob_sha": "963af63dc08fe100975237e86e7b2b9fcc635a31"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/torque_speed_curves/RS06_gp_envelope.csv",
+      "git_blob_sha": "68afcaeba8367294560cad92f98cdd2d41846235"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM10010L_thigh.json",
+      "git_blob_sha": "824b58f48c6bbb04053c4feb07da4617b08176ba"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM10010_thigh.json",
+      "git_blob_sha": "de2dfbc7d3a8f4213abb65105c66056f9ec2d07d"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM10422P_thigh.json",
+      "git_blob_sha": "fd8108b0465c533aa83e420481014f3cc5791e1d"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM4310P_48V_calf.json",
+      "git_blob_sha": "18084aee3a790ee8c545cade480f8d3810b69435"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM4340P_V11_48V_calf.json",
+      "git_blob_sha": "f33d032c0b96d91c3beb0bf137a7bc972c8d6bf8"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM4340P_calf.json",
+      "git_blob_sha": "ad8d94ab8fb47a770f90bd4e64a39d46dc99ad6f"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM6216P_calf.json",
+      "git_blob_sha": "582495f39d1df80d2f9808505022f02d38e3ccfc"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM6248P_thigh.json",
+      "git_blob_sha": "b0438e1fc32935023c77602601d00fd22a688dc1"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM8006_V11_calf.json",
+      "git_blob_sha": "3488297ea8356541069c9aa794bab7386e035f63"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/DM8009P_V11_calf.json",
+      "git_blob_sha": "e8c7a3e19123698090e455ff58286755befe844d"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/RS04_thigh.json",
+      "git_blob_sha": "d5ea8aa9ecc161984b68659162b2e841064e49d3"
+    },
+    {
+      "path": "robolab/robolab/assets/motor_data/urdf_gp_models/RS06_calf.json",
+      "git_blob_sha": "a4775d0a548bb45492da7a4ff473baf1d052f0b2"
+    }
+  ]
+}
