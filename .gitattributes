@@ -3,3 +3,6 @@ robolab/robolab/assets/motor_data/**/*.csv text eol=lf
 
 # Preserve byte-exact CAD exchange geometry in the checked-in example.
 docs/examples/**/*.step -text -diff
+
+# These vendored bytes are verified against upstream Git blob hashes.
+vendor/physical_1450a51/** -text

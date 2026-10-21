@@ -1,0 +1,13 @@
+motor_id,joint,urdf_model_id,torque_speed_curve_csv,armature_kgm2,gp_model_file,segment,bo_status
+RS04,knee,RS04_thigh,motor_data/torque_speed_curves/RS04_gp_envelope.csv,0.04,urdf_gp_models/RS04_thigh.json,thigh,BO_READY
+DM-J10010L-2EC,knee,DM10010L_thigh,motor_data/torque_speed_curves/DM_J10010L_gp_envelope.csv,0.05556,urdf_gp_models/DM10010L_thigh.json,thigh,BO_READY
+DM-J10010-2EC,knee,DM10010_thigh,motor_data/torque_speed_curves/DM-J10010-2EC.csv,0.055,urdf_gp_models/DM10010_thigh.json,thigh,BO_READY
+DM-J6248P-2EC,knee,DM6248P_thigh,motor_data/torque_speed_curves/DM-J6248P-2EC.csv,0.124416,urdf_gp_models/DM6248P_thigh.json,thigh,BO_READY
+DM-J10422P-2EC,knee,DM10422P_thigh,motor_data/torque_speed_curves/DM-J10422P-2EC.csv,0.272976,urdf_gp_models/DM10422P_thigh.json,thigh,BO_READY
+RS06,ankle,RS06_calf,motor_data/torque_speed_curves/RS06_gp_envelope.csv,0.012,urdf_gp_models/RS06_calf.json,calf,BO_READY
+DM-J4340P-2EC,ankle,DM4340P_calf,motor_data/torque_speed_curves/DM_J4340P_gp_envelope.csv,0.032,urdf_gp_models/DM4340P_calf.json,calf,BO_READY
+DM-J8009P-2EC-V1.1,ankle,DM8009P_V11_calf,motor_data/torque_speed_curves/DM-J8009P-2EC-V1.1.csv,0.015795,urdf_gp_models/DM8009P_V11_calf.json,calf,BO_READY
+DM-J4340P-2EC-V1.1-48V,ankle,DM4340P_V11_48V_calf,motor_data/torque_speed_curves/DM-J4340P-2EC-V1.1-48V.csv,0.03152,urdf_gp_models/DM4340P_V11_48V_calf.json,calf,BO_READY
+DM-J8006-2EC-V1.1,ankle,DM8006_V11_calf,motor_data/torque_speed_curves/DM-J8006-2EC-V1.1.csv,0.00414,urdf_gp_models/DM8006_V11_calf.json,calf,BO_READY
+DM-J4310P-2EC-48V,ankle,DM4310P_48V_calf,motor_data/torque_speed_curves/DM-J4310P-2EC-48V.csv,0.0019,urdf_gp_models/DM4310P_48V_calf.json,calf,BO_READY
+DM-J6216P-2EC,ankle,DM6216P_calf,motor_data/torque_speed_curves/DM-J6216P-2EC.csv,0.0125696,urdf_gp_models/DM6216P_calf.json,calf,BO_READY
