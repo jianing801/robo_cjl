@@ -1,0 +1,9 @@
+{
+  "num_envs": 4096,
+  "length_count": 10,
+  "thigh_range_m": [0.25, 0.40],
+  "calf_range_m": [0.30, 0.45],
+  "knee_motor_count": 2,
+  "ankle_motor_count": 2,
+  "motor_seed": 42
+}
