@@ -27,6 +27,19 @@
 
 ## 服务器准备
 
+背包代码已整合到仓库 `main`。在服务器已有仓库根目录更新，无需重新克隆或使用实验分支：
+
+```bash
+# 仓库未被运行中的任务使用时再更新；如有本地修改，先保存。
+git stash push -u -m "server-backup-before-backpack-update"
+git fetch origin
+git switch main
+git pull --ff-only origin main
+```
+
+stash 保留服务器自己的修改，不会删除被 Git 忽略的模型、日志和数据。
+如果 pull 提示分支分叉，先停止并检查，不要强制 reset 或删除文件。
+
 使用已能运行该项目的 Isaac Lab / Isaac Sim + Python 环境（同本机兼容版本，
 Python 3.11、RSL-RL 使用本仓库版本），安装本项目及 `rsl_rl`：
 

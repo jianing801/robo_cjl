@@ -29,21 +29,33 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TRAIN_SCRIPT = os.path.join(HERE, "co_design_train.py")
 EVAL_SCRIPT  = os.path.join(HERE, "co_design_eval.py")
 PACKAGE_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-URDF_MODEL_FILE = os.path.join(
-    PACKAGE_ROOT, "robolab", "assets", "motor_data", "motor_urdf_models.json"
+URDF_GP_MODEL_REGISTRY_FILE = os.path.join(
+    PACKAGE_ROOT, "robolab", "assets", "motor_data", "motor_urdf_gp_registry.json"
 )
+MOTOR_DATA_DIR = os.path.dirname(URDF_GP_MODEL_REGISTRY_FILE)
 URDF_GENERATOR_FILE = os.path.join(HERE, "generate_urdf_sw.py")
 if PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, PACKAGE_ROOT)
 
 from robolab.assets.rpo_motor_catalog import (  # noqa: E402
-    ANKLE_MOTOR_CANDIDATES,
-    KNEE_MOTOR_CANDIDATES,
+    ANKLE_MOTOR_BO_CANDIDATES,
+    ANKLE_MOTOR_DESIGN_CANDIDATES,
+    KNEE_MOTOR_BO_CANDIDATES,
+    KNEE_MOTOR_DESIGN_CANDIDATES,
     get_motor_spec,
     load_torque_speed_envelope,
+    require_motor_ready,
 )
 
 parser = argparse.ArgumentParser(description="Bi-level co-design BO over leg lengths and motor choices.")
+parser.add_argument("--enable-urdf-update", action="store_true",
+                    help="Required for BO because it searches non-original leg lengths.")
+parser.add_argument("--enable-motor-curve", action="store_true",
+                    help="Apply motor torque-speed curves during training and evaluation; default is off.")
+parser.add_argument("--template", type=str, default=None,
+                    help="Original RPO URDF template when it is outside this checkout.")
+parser.add_argument("--mesh-dir", type=str, default=None,
+                    help="STL mesh directory for generated URDF files.")
 parser.add_argument("--trials", type=int, default=30,
                     help="Target number of COMPLETE BO trials in the study.")
 parser.add_argument("--max-iterations", type=int, default=12000,
@@ -57,10 +69,12 @@ parser.add_argument("--eval-commands", type=str, default="0.5,0,0",
 parser.add_argument("--study-name", type=str, default="rpo_flat_track_cot_motor_urdf_v1")
 parser.add_argument("--db", type=str, default=None,
                     help="Optuna DB path. Default: <HERE>/co_design_track_cot_motor_urdf_v1.db")
-parser.add_argument("--knee-motors", type=str, default=",".join(KNEE_MOTOR_CANDIDATES),
+parser.add_argument("--knee-motors", type=str, default=",".join(KNEE_MOTOR_BO_CANDIDATES),
                     help="Comma-separated knee motor IDs used as a categorical search space.")
-parser.add_argument("--ankle-motors", type=str, default=",".join(ANKLE_MOTOR_CANDIDATES),
+parser.add_argument("--ankle-motors", type=str, default=",".join(ANKLE_MOTOR_BO_CANDIDATES),
                     help="Comma-separated common ankle motor IDs used as a categorical search space.")
+parser.add_argument("--list-motor-candidates", action="store_true",
+                    help="List validated and staged motor design-variable IDs, then exit.")
 parser.add_argument("--knee-envelope-csv", type=str, default=None,
                     help="Optional MATLAB CSV override used for every selected knee motor.")
 parser.add_argument("--ankle-envelope-csv", type=str, default=None,
@@ -74,6 +88,28 @@ parser.add_argument("--fail-tracking", type=float, default=1e6,
 parser.add_argument("--fail-cot", type=float, default=1e6,
                     help="CoT objective assigned to infeasible trials.")
 args = parser.parse_args()
+
+if args.list_motor_candidates:
+    for label, candidates in (("knee", KNEE_MOTOR_DESIGN_CANDIDATES),
+                              ("ankle", ANKLE_MOTOR_DESIGN_CANDIDATES)):
+        print(f"{label} design-variable candidates:")
+        for motor_id in candidates:
+            motor = get_motor_spec(motor_id)
+            actuator_missing = motor.missing_actuator_inputs()
+            bo_missing = motor.missing_co_design_inputs()
+            if not bo_missing:
+                status = "BO READY"
+            elif not actuator_missing:
+                status = "ACTUATOR READY / BO STAGED: " + "; ".join(bo_missing)
+            else:
+                status = "STAGED: " + "; ".join(bo_missing)
+            print(f"  {motor_id} [{motor.display_name}]: {status}")
+    sys.exit(0)
+
+if not args.enable_urdf_update:
+    parser.error("BO searches leg lengths; pass --enable-urdf-update to run it.")
+if not args.enable_motor_curve and (args.knee_envelope_csv or args.ankle_envelope_csv):
+    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 
 def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> tuple[str, ...]:
@@ -92,6 +128,8 @@ def _parse_motor_candidates(spec: str, allowed: tuple[str, ...], label: str) -> 
 def _envelope_signature(motor_id: str, csv_override: str | None) -> str | None:
     """Fingerprint the actual curve values so an Optuna study cannot mix models."""
 
+    if not args.enable_motor_curve:
+        return None
     points = load_torque_speed_envelope(get_motor_spec(motor_id), csv_override)
     if points is None:
         return None
@@ -105,15 +143,55 @@ def _file_signature(path: str) -> str:
 
 
 knee_motor_candidates = _parse_motor_candidates(
-    args.knee_motors, KNEE_MOTOR_CANDIDATES, "Knee"
+    args.knee_motors, KNEE_MOTOR_BO_CANDIDATES, "Knee"
 )
 ankle_motor_candidates = _parse_motor_candidates(
-    args.ankle_motors, ANKLE_MOTOR_CANDIDATES, "Ankle"
+    args.ankle_motors, ANKLE_MOTOR_BO_CANDIDATES, "Ankle"
 )
+for motor_id in (*knee_motor_candidates, *ankle_motor_candidates):
+    try:
+        require_motor_ready(get_motor_spec(motor_id))
+    except ValueError as exc:
+        parser.error(str(exc))
 if args.knee_envelope_csv and len(knee_motor_candidates) != 1:
     parser.error("--knee-envelope-csv requires exactly one --knee-motors candidate.")
 if args.ankle_envelope_csv and len(ankle_motor_candidates) != 1:
     parser.error("--ankle-envelope-csv requires exactly one --ankle-motors candidate.")
+try:
+    with open(URDF_GP_MODEL_REGISTRY_FILE, encoding="utf-8") as stream:
+        urdf_models = json.load(stream)
+    for segment, candidates, csv_override in (
+        ("thigh", knee_motor_candidates, args.knee_envelope_csv),
+        ("calf", ankle_motor_candidates, args.ankle_envelope_csv),
+    ):
+        for motor_id in candidates:
+            motor = get_motor_spec(motor_id)
+            model = urdf_models.get(motor.urdf_model_id)
+            if model is None or model.get("segment") != segment:
+                parser.error(f"Motor '{motor_id}' has no matching {segment} SW-URDF model.")
+            gp_model_file = model.get("gp_model_file")
+            if not gp_model_file:
+                parser.error(f"Motor '{motor_id}' does not have a runtime GP model.")
+            gp_path = os.path.join(MOTOR_DATA_DIR, gp_model_file)
+            try:
+                with open(gp_path, encoding="utf-8") as gp_stream:
+                    gp_model = json.load(gp_stream)
+            except (OSError, json.JSONDecodeError) as exc:
+                parser.error(f"Motor '{motor_id}' GP model could not be loaded: {exc}")
+            if gp_model.get("segment") != segment:
+                parser.error(f"Motor '{motor_id}' GP model segment does not match {segment}.")
+            if gp_model.get("coordinate_system") != model.get("coordinate_system"):
+                parser.error(f"Motor '{motor_id}' GP model coordinate-system metadata mismatch.")
+            required_outputs = {
+                "mass_kg", "com_x_m", "com_y_m", "com_z_m",
+                "Lxx", "Lxy", "Lxz", "Lyy", "Lyz", "Lzz",
+            }
+            if not required_outputs.issubset(gp_model.get("outputs", {})):
+                parser.error(f"Motor '{motor_id}' GP model is missing URDF properties.")
+            if load_torque_speed_envelope(motor, csv_override) is None:
+                parser.error(f"Motor '{motor_id}' has no torque-speed envelope.")
+except (OSError, ValueError, json.JSONDecodeError) as exc:
+    parser.error(f"Motor data preflight failed: {exc}")
 if min(args.trials, args.max_iterations, args.num_envs, args.eval_episodes,
        args.n_startup_trials, args.train_timeout, args.eval_timeout) < 1:
     parser.error("Trial, training, evaluation, startup, and timeout counts must be positive.")
@@ -153,6 +231,14 @@ def run_training(thigh: float, calf: float, knee_motor: str, ankle_motor: str) -
         "--seed", str(args.seed),
         "--headless",
     ]
+    if args.enable_urdf_update:
+        cmd.append("--enable-urdf-update")
+    if args.enable_motor_curve:
+        cmd.append("--enable-motor-curve")
+    if args.template:
+        cmd += ["--template", args.template]
+    if args.mesh_dir:
+        cmd += ["--mesh-dir", args.mesh_dir]
     if args.knee_envelope_csv:
         cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
     if args.ankle_envelope_csv:
@@ -213,6 +299,14 @@ def run_evaluation(ckpt_path: str, thigh: float, calf: float,
            "--num-episodes", str(args.eval_episodes), "--num-envs", "1",
            "--seed", str(args.seed),
            f"--command={args.eval_commands}", "--headless"]
+    if args.enable_urdf_update:
+        cmd.append("--enable-urdf-update")
+    if args.enable_motor_curve:
+        cmd.append("--enable-motor-curve")
+    if args.template:
+        cmd += ["--template", args.template]
+    if args.mesh_dir:
+        cmd += ["--mesh-dir", args.mesh_dir]
     if args.knee_envelope_csv:
         cmd += ["--knee-envelope-csv", args.knee_envelope_csv]
     if args.ankle_envelope_csv:
@@ -318,12 +412,21 @@ if __name__ == "__main__":
         load_if_exists=True,
     )
 
-    model_protocol = {"urdf_model": "sw", "thigh_range": [0.25, 0.40],
+    model_protocol = {"urdf_model": "sw", "enable_urdf_update": args.enable_urdf_update,
+                      "enable_motor_curve": args.enable_motor_curve,
+                      "thigh_range": [0.25, 0.40],
                       "calf_range": [0.30, 0.45],
                       "knee_motors": list(knee_motor_candidates),
                       "ankle_motors": list(ankle_motor_candidates),
-                      "motor_urdf_model_sha256": _file_signature(URDF_MODEL_FILE),
+                      "motor_urdf_gp_registry_sha256": _file_signature(URDF_GP_MODEL_REGISTRY_FILE),
                       "motor_urdf_generator_sha256": _file_signature(URDF_GENERATOR_FILE),
+                      "motor_urdf_gp_model_sha256": {
+                          motor_id: _file_signature(os.path.join(
+                              MOTOR_DATA_DIR,
+                              urdf_models[get_motor_spec(motor_id).urdf_model_id]["gp_model_file"],
+                          ))
+                          for motor_id in (*knee_motor_candidates, *ankle_motor_candidates)
+                      },
                       "knee_urdf_models": {
                           motor_id: get_motor_spec(motor_id).urdf_model_id
                           for motor_id in knee_motor_candidates

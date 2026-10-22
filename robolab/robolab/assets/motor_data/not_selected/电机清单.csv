@@ -1,0 +1,18 @@
+motor_id,model_label,selection_status,reason,alternative_motor_id,peak_torque_nm,no_load_48v_rpm,mass_kg,gear_ratio,armature_kgm2,bo_status
+AK10-9-V2,AK10-9-V2,不加入选型,跨品牌资料未完整建模,,48.0,320.0,0.96,9.0,,NOT_SELECTED
+AK10-9-V3,AK10-9-V3,不加入选型,跨品牌资料未完整建模,,53.0,320.0,0.94,9.0,,NOT_SELECTED
+AK60-39-V3,AK60-39-V3,不加入选型,跨品牌资料未完整建模,,72.0,98.0,0.75,39.0,,NOT_SELECTED
+AK70-9-V3,AK70-9-V3,不加入选型,跨品牌资料未完整建模,,29.2,320.0,0.54,9.0,,NOT_SELECTED
+AK80-64,AK80-64,不加入选型,跨品牌资料未完整建模,,120.0,75.0,0.85,64.0,,NOT_SELECTED
+AKH70-16,AKH70-16,不加入选型,跨品牌资料未完整建模,,78.0,105.0,0.879,16.0,,NOT_SELECTED
+AKH70-48,AKH70-48,不加入选型,跨品牌资料未完整建模,,222.0,35.0,1.396,48.0,,NOT_SELECTED
+DM-J4310-2EC-V1.2-48V,DM-J4310-2EC V1.2（48V） (12.5 N·m),不加入选型,同系列暂选P版,DM-J4310P-2EC-48V,12.5,450.0,0.306,10.0,0.002,NOT_SELECTED
+DM-J4340-2EC-V1.1-48V,DM-J4340-2EC V1.1（48V） (40 N·m),不加入选型,同系列暂选P版,DM-J4340P-2EC-V1.1-48V,40.0,112.0,0.362,40.0,0.03152,NOT_SELECTED
+DM-J8009-2EC,DM-J8009-2EC (40 N·m),不加入选型,同系列暂选P版,DM-J8009P-2EC-V1.1,40.0,335.0,0.896,9.0,0.015795,NOT_SELECTED
+RMD-X6-P20-60,RMD-X6-P20-60,不加入选型,跨品牌资料未完整建模,,50.0,176.0,0.78,19.612,,NOT_SELECTED
+RMD-X8-P20-120-E,RMD-X8-P20-120-E,不加入选型,跨品牌资料未完整建模,,120.0,158.0,1.4,19.612,,NOT_SELECTED
+Unitree-B1-16,Unitree-B1-16,不加入选型,跨品牌资料未完整建模,,140.0,,1.74,,,NOT_SELECTED
+Unitree-IM6014,Unitree-IM6014,不加入选型,跨品牌资料未完整建模,,31.7,,0.535,12.6,,NOT_SELECTED
+DM-J6006-2EC,DM-J6006-2EC,不加入选型,此前因参数或版本争议剔除，不恢复,,11.0,408.0,0.335,6.0,,NOT_SELECTED
+DM-J6216L-2EC,DM-J6216L-2EC,不加入选型,此前因参数或版本争议剔除，不恢复,,45.0,,0.74,16.0,,NOT_SELECTED
+DM-J8520P-2EC,DM-J8520P-2EC,不加入选型,厂家176Nm峰值与参数模型129.99168Nm平台差异未解决；按用户要求退出有效候选，资料归档,,176.0,124.0,1.392,20.0,0.0596,NOT_SELECTED

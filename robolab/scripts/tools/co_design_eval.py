@@ -9,6 +9,7 @@ tracking error; episode return is retained only as a training diagnostic.
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -37,11 +38,19 @@ from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--enable-urdf-update", action="store_true",
+                    help="Evaluate a checkpoint trained with a generated URDF; default uses the original URDF.")
+parser.add_argument("--enable-motor-curve", action="store_true",
+                    help="Evaluate a checkpoint trained with torque-speed curves; default disables them.")
 parser.add_argument("--urdf-model", choices=["sw", "legacy"], default="sw",
-                    help="Must match the URDF model used during training.")
+                    help="Must match training when --enable-urdf-update is set.")
 parser.add_argument("--checkpoint", type=str, required=True)
-parser.add_argument("--thigh", type=float, required=True)
-parser.add_argument("--calf", type=float, required=True)
+parser.add_argument("--template", type=str, default=None,
+                    help="Original robot URDF template when it is outside this checkout.")
+parser.add_argument("--mesh-dir", type=str, default=None,
+                    help="Directory containing STL meshes referenced by the URDF template.")
+parser.add_argument("--thigh", type=float, default=0.25)
+parser.add_argument("--calf", type=float, default=0.30)
 parser.add_argument("--knee-motor", choices=KNEE_MOTOR_CHOICES, default=DEFAULT_KNEE_MOTOR,
                     help="Knee motor ID used for training this checkpoint.")
 parser.add_argument("--ankle-motor", choices=ANKLE_MOTOR_CHOICES, default=DEFAULT_ANKLE_MOTOR,
@@ -58,19 +67,35 @@ parser.add_argument("--num-envs", type=int, default=1,
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--command", type=str, default="1.0,0,0",
                     help="One or more ';'-separated commands, each formatted as vx,vy,wz.")
+parser.add_argument("--duration", type=float, default=20.0,
+                    help="Episode duration in seconds for each fixed command.")
 parser.add_argument("--record", type=str, default=None,
                     help="Export one command and one episode of robot state to this CSV path.")
+parser.add_argument("--video", action="store_true", default=False,
+                    help="Record the first complete evaluation episode as an Isaac Gym MP4.")
+parser.add_argument("--video-folder", type=str, default=None,
+                    help="Directory for the recorded MP4 (defaults to a new folder beside the checkpoint).")
 parser.add_argument("--no-heading", action="store_true", default=False,
                     help="Disable heading tracking (A/B comparison only; normal evaluation keeps it on).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if not args_cli.enable_urdf_update and (
+    abs(args_cli.thigh - 0.25) > 1e-9 or abs(args_cli.calf - 0.30) > 1e-9
+):
+    parser.error("Non-original leg lengths require --enable-urdf-update.")
+if not args_cli.enable_motor_curve and (args_cli.knee_envelope_csv or args_cli.ankle_envelope_csv):
+    parser.error("Torque-speed CSV overrides require --enable-motor-curve.")
 
 if args_cli.num_envs != 1:
     parser.error("--num-envs must be 1: scalar return, power, mass, and CoT are reported for one robot.")
 if args_cli.num_episodes < 1:
     parser.error("--num-episodes must be at least 1.")
+if not math.isfinite(args_cli.duration) or args_cli.duration <= 0:
+    parser.error("--duration must be a positive finite number.")
 if args_cli.record and (args_cli.num_episodes != 1 or ";" in args_cli.command):
     parser.error("--record supports exactly one command and one episode to keep the CSV unambiguous.")
+if args_cli.video and (args_cli.num_episodes != 1 or ";" in args_cli.command):
+    parser.error("--video supports exactly one command and one episode.")
 
 
 def _parse_commands(spec: str) -> list[tuple[float, float, float]]:
@@ -90,6 +115,8 @@ def _parse_commands(spec: str) -> list[tuple[float, float, float]]:
 
 commands = _parse_commands(args_cli.command)
 print(f"[eval] {len(commands)} command(s): {commands}", flush=True)
+if args_cli.video:
+    args_cli.enable_cameras = True
 
 # Clear command-line arguments before Hydra/RSL-RL imports inspect sys.argv.
 sys.argv = [sys.argv[0]]
@@ -143,16 +170,25 @@ from robolab.tasks.direct.base.scene_cfg import SceneCfg
 
 installed_version = metadata.version("rsl-rl-lib")
 tmp_dir = tempfile.mkdtemp(prefix="rpo_eval_")
-urdf_kwargs = {}
-if args_cli.urdf_model == "sw":
-    urdf_kwargs = {
-        "knee_motor": args_cli.knee_motor,
-        "ankle_motor": args_cli.ankle_motor,
-    }
-urdf_path = generate_urdf(
-    args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
-)
-base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
+template_path = os.path.abspath(os.path.expanduser(args_cli.template or RPO_CFG.spawn.asset_path))
+if not os.path.isfile(template_path):
+    raise FileNotFoundError(f"Original RPO URDF not found: {template_path}. Pass --template with its path.")
+if args_cli.enable_urdf_update:
+    urdf_kwargs = {"template_path": template_path}
+    if args_cli.urdf_model == "sw":
+        urdf_kwargs.update({
+            "knee_motor": args_cli.knee_motor,
+            "ankle_motor": args_cli.ankle_motor,
+            "mesh_dir": args_cli.mesh_dir,
+        })
+    urdf_path = generate_urdf(
+        args_cli.thigh, args_cli.calf, output_dir=tmp_dir, **urdf_kwargs
+    )
+    base_z = 0.75 + (args_cli.thigh + args_cli.calf - 0.55)
+else:
+    urdf_path = template_path
+    base_z = RPO_CFG.init_state.pos[2]
+print(f"[eval] URDF update={args_cli.enable_urdf_update}, motor curve={args_cli.enable_motor_curve}", flush=True)
 
 
 def _command_key(command: tuple[float, float, float]) -> str:
@@ -179,7 +215,7 @@ def _make_eval_env(command: tuple[float, float, float]):
         if hasattr(env_cfg.events, event_name) and getattr(env_cfg.events, event_name) is not None:
             setattr(env_cfg.events, event_name, None)
 
-    env_cfg.episode_length_s = 20.0
+    env_cfg.episode_length_s = args_cli.duration
     env_cfg.capture_terminal_state = True
     env_cfg.commands.rel_standing_envs = 0.0
     if args_cli.headless:
@@ -220,6 +256,7 @@ def _make_eval_env(command: tuple[float, float, float]):
         ankle_motor=args_cli.ankle_motor,
         knee_envelope_csv=args_cli.knee_envelope_csv,
         ankle_envelope_csv=args_cli.ankle_envelope_csv,
+        use_torque_speed_curve=args_cli.enable_motor_curve,
     )
     if hasattr(env_cfg, "scene_context"):
         env_cfg.scene_context.robot = custom_robot_cfg
@@ -238,7 +275,23 @@ def _make_eval_env(command: tuple[float, float, float]):
                 delattr(agent_cfg.algorithm, key)
     agent_cfg.logger = "tensorboard"
 
-    raw_env = gym.make(args_cli.task, cfg=env_cfg)
+    raw_env = gym.make(
+        args_cli.task,
+        cfg=env_cfg,
+        render_mode="rgb_array" if args_cli.video else None,
+    )
+    if args_cli.video:
+        video_folder = args_cli.video_folder or os.path.join(
+            os.path.dirname(args_cli.checkpoint), "videos", "evaluation"
+        )
+        os.makedirs(video_folder, exist_ok=True)
+        raw_env = gym.wrappers.RecordVideo(
+            raw_env,
+            video_folder=video_folder,
+            episode_trigger=lambda episode_id: episode_id == 0,
+            disable_logger=True,
+            name_prefix="rpo-flat-eval",
+        )
     return (
         RslRlVecEnvWrapper(raw_env, clip_actions=agent_cfg.clip_actions),
         agent_cfg,
@@ -370,7 +423,17 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
             ).item())
 
             if args_cli.record:
-                recorded_rows.append(_record_row(state, reward, step, step_dt, joint_names, done))
+                row = _record_row(state, reward, step, step_dt, joint_names, done)
+                recorded_rows.append(row)
+                # Flush each sample so a Windows/Kit shutdown stall cannot
+                # discard a completed or partial trajectory.
+                os.makedirs(os.path.dirname(os.path.abspath(args_cli.record)), exist_ok=True)
+                mode = "w" if _episode_index == 0 and step == 0 else "a"
+                with open(args_cli.record, mode, newline="", encoding="utf-8") as trace_file:
+                    writer = csv.DictWriter(trace_file, fieldnames=list(row.keys()))
+                    if mode == "w":
+                        writer.writeheader()
+                    writer.writerow(row)
 
             if done:
                 timed_out = bool(extras.get("time_outs", torch.zeros(1, device=env.unwrapped.device))[0].item())
@@ -442,7 +505,6 @@ def _run_command(env, policy, command: tuple[float, float, float], heading_track
 
 
 def _write_record(rows: list[dict], record_path: str, joint_names: list[str]) -> None:
-    import csv
     import pandas as pd
 
     with open(record_path, "w", newline="") as file:
@@ -502,6 +564,11 @@ try:
             if args_cli.record:
                 recorded_rows = rows
                 record_joint_names = list(env.unwrapped.scene["robot"].data.joint_names)
+                # Persist the trajectory before closing Isaac. On Windows, Kit
+                # shutdown can stall after a completed rollout; keeping the
+                # data write inside this block ensures the evaluation artifact
+                # survives that shutdown issue.
+                _write_record(recorded_rows, args_cli.record, record_joint_names)
             print(
                 f"[eval] cmd={command_result['command']} return={command_result['avg_episode_return']:.3f} "
                 f"track={command_result['tracking_cost']:.4f} cot={command_result['cot']:.4f} "
@@ -511,9 +578,6 @@ try:
             )
         finally:
             env.close()
-
-    if args_cli.record:
-        _write_record(recorded_rows, args_cli.record, record_joint_names)
 
     avg_episode_return = sum(result["avg_episode_return"] for result in command_results) / len(command_results)
     # This aggregate has a physical interpretation only for translational
