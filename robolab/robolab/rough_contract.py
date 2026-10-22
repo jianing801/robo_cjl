@@ -33,7 +33,8 @@ def source_identity():
     paths = {"robolab/rough_contract.py", "robolab/rough_geometry.py", "robolab/physical_snapshot.py",
              "robolab/configurable_morphology.py", "robolab/spatial_morphology.py", "robolab/spatial_policy.py",
              "scripts/tools/prepare_spatial_grid.py", "scripts/tools/spatial_rough_runtime.py",
-             "scripts/tools/train_spatial_rough.py", "robolab/assets/robots/roboparty.py"}
+             "scripts/tools/train_spatial_rough.py", "scripts/tools/launch_spatial_rough.py",
+             "scripts/rsl_rl/train.py", "robolab/assets/robots/roboparty.py"}
     for folder in ("robolab/tasks/direct/base", "robolab/actuators", "../rsl_rl/rsl_rl"):
         paths.update(folder+"/"+p.relative_to(ROOT/folder).as_posix() for p in (ROOT/folder).rglob("*.py"))
     return {p: hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in sorted(paths)}

@@ -42,6 +42,15 @@ import argparse
 import os
 import sys
 
+# Dispatch before importing/launching Isaac: the optional Rough workflow handles
+# its own sequential preparation, preflight and training. Ordinary RPO is intact.
+if __name__ == "__main__" and "--multi_morph" in sys.argv:
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from launch_spatial_rough import main as launch_spatial_rough
+    launch_spatial_rough(sys.argv[1:])
+    raise SystemExit(0)
+
 from isaaclab.app import AppLauncher
 
 # local imports

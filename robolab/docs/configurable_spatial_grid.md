@@ -1,5 +1,21 @@
 # 可配置形态网格（Rough空间联合训练）
 
+## 常规启动：只加一个开关
+
+在仓库根目录（如`/data/chenjiale/robo_cjl`），激活原Isaac训练环境后：
+
+```bash
+python robolab/scripts/rsl_rl/train.py --task RPO-Rough --multi_morph --headless
+```
+
+不开`--multi_morph`时原RPO入口完全不变。开启后自动读取4096环境/400结构配置，使用原RPO同一个`robolab/data/robots/roboparty/rpo`资源路径，生成独立bank，串行运行两更新预检，预检成功后自动从头长训；无需手工找路径、进入子目录或运行三个脚本。两更新预检参数丢弃，不加载到长训。日志自动保存到`robolab/logs/rpo_rough_multimorph/时间戳`，任何阶段失败不启动下一阶段。
+
+默认训练代数从原RPO-Rough配置读取（当前继承12000），可像原入口一样指定`--max_iterations 12000`、`--num_envs 4096`。其余形态参数仍在下述JSON里设置。原始机器人数据必须已安装，和原RPO相同；缺资源时会明确报错，不会偷偷选择另一套URDF。非标准安装才需要`--robot-root`。
+
+这里将内部步骤自动化，不取消源身份/真实形态/物理/预检校验。当前400结构完整规模的显存和吞吐仍需在训练机器实测。
+
+下文分步命令是高级调试入口，日常不需要使用。
+
 编辑 `configs/spatial_rough_grid.json`。所有修改只对新生成的实验生效，不修改旧bank、检查点或正在运行的仿真。
 
 | 字段 | 含义 |
