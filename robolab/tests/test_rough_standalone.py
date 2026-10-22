@@ -10,7 +10,7 @@ FILES = ["robolab/rough_contract.py", "robolab/rough_geometry.py", "robolab/conf
          "robolab/spatial_morphology.py", "robolab/spatial_policy.py", "scripts/tools/prepare_spatial_grid.py",
          "scripts/tools/train_spatial_rough.py", "scripts/tools/spatial_rough_runtime.py"]
 ALLOWED = {"robolab.rough_contract", "robolab.rough_geometry", "robolab.configurable_morphology",
-           "robolab.spatial_morphology", "robolab.spatial_policy", "robolab.physical_snapshot",
+           "robolab.spatial_morphology", "robolab.spatial_policy", "robolab.physical_snapshot", "robolab.rough_gpu",
            "robolab.tasks", "robolab.tasks.direct.base.base_env", "robolab.actuators.torque_speed_envelope"}
 
 

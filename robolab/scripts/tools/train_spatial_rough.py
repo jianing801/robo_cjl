@@ -76,20 +76,8 @@ def main():
     if not a.smoke_only and not a.execute and not a.preflight_only:
         print(json.dumps({k: v for k, v in layout.items() if k != "env_design_index"}, indent=2))
         return
-    # Windows WDDM nvidia-smi lists desktop graphics clients as compute apps.
-    # Check actual Python/Isaac workers rather than treating Explorer as a trainer.
-    import psutil
-    own_tree = {os.getpid(), *[v.pid for v in psutil.Process().parents()]}
-    workflow_names = {"train_multimorph_expert_block.py", "evaluate_native_rough_case.py", "run_multimorph_experts.py",
-                      "run_native_expert_pair.py", "diagnose_short_rough.py", "auto_evaluate_completed_rough.py"}
-    for process in psutil.process_iter(["name", "cmdline"]):
-        if process.pid in own_tree:
-            continue
-        name = (process.info["name"] or "").lower()
-        if "python" in name or name in ("kit.exe", "isaac-sim.exe"):
-            raise RuntimeError(f"other Python/Isaac worker {process.pid}; inspect before launching")
-        if any(Path(v).name in workflow_names for v in (process.info["cmdline"] or [])):
-            raise RuntimeError("another training/evaluation workflow exists")
+    from robolab.rough_gpu import reject_duplicate_bank
+    reject_duplicate_bank(bank_path)
     a.task = "stairs"
     a.kit_args = (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
     app = AppLauncher(a).app

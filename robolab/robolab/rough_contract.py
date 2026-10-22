@@ -31,7 +31,7 @@ def serializable(value):
 
 def source_identity():
     paths = {"robolab/rough_contract.py", "robolab/rough_geometry.py", "robolab/physical_snapshot.py",
-             "robolab/configurable_morphology.py", "robolab/spatial_morphology.py", "robolab/spatial_policy.py",
+             "robolab/configurable_morphology.py", "robolab/spatial_morphology.py", "robolab/spatial_policy.py", "robolab/rough_gpu.py",
              "scripts/tools/prepare_spatial_grid.py", "scripts/tools/spatial_rough_runtime.py",
              "scripts/tools/train_spatial_rough.py", "scripts/tools/launch_spatial_rough.py",
              "scripts/rsl_rl/train.py", "robolab/assets/robots/roboparty.py"}

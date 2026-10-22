@@ -3,6 +3,7 @@ import argparse
 import ast
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -40,12 +41,12 @@ def robot_assets(root=ROOT, override=None):
     return template.resolve(), meshes.resolve()
 
 
-def run_stage(name, command, output, *, runner=subprocess.run):
+def run_stage(name, command, output, *, environment=None, runner=subprocess.run):
     from robolab.rough_contract import write_new
     write_new(output/(name+".started.json"), dict(command=command, cwd=str(ROOT)))
     print(f"[Rough multi-morph] {name}", flush=True)
     try:
-        result = runner(command, cwd=ROOT, check=False)
+        result = runner(command, cwd=ROOT, check=False, env=environment)
     except KeyboardInterrupt:
         write_new(output/(name+".interrupted.json"), dict(user_interrupt=True, later_stages_not_started=True))
         raise
@@ -65,6 +66,8 @@ def main(argv=None):
     p.add_argument("--max_iterations", type=int)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--device")
+    p.add_argument("--gpu_min_free_gb", type=float, default=12., help="GPU selection floor in GiB, not a guaranteed memory budget")
+    p.add_argument("--gpu_max_utilization", type=int, default=30, help="Maximum sampled GPU utilization percent")
     p.add_argument("--kit_args")
     p.add_argument("--multi_morph_config", default=str(ROOT/"configs/spatial_rough_grid.json"))
     p.add_argument("--multi_morph_root", help="Optional NEW output directory; normally generated automatically")
@@ -97,16 +100,31 @@ def main(argv=None):
     common = [sys.executable, str(ROOT/"scripts/tools/train_spatial_rough.py"), "--bank", str(output/"bank/bank.json")]
     if a.headless:
         common += ["--headless"]
-    if a.device:
-        common += ["--device", a.device]
-    if a.kit_args:
-        common += ["--kit_args", a.kit_args]
-    run_stage("preflight", common+["--output-dir", str(output/"preflight"), "--preflight-only"], output)
-    proof = json.loads((output/"preflight/summary.json").read_text(encoding="utf8"))
-    if proof.get("result") != "SPATIAL_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY":
-        raise ValueError("preflight did not pass; formal training will NOT start")
-    run_stage("train", common+["--output-dir", str(output/"train"), "--execute", "--updates", str(updates),
-        "--preflight-report", str(output/"preflight/summary.json"), "--asset-cache", str(output/"preflight")], output)
+    from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
+    inventory = query_gpus()
+    choices = candidates(inventory, os.environ, min_free_mib=a.gpu_min_free_gb*1024,
+                         max_utilization=a.gpu_max_utilization, requested=a.device)
+    write_new(output/"gpu_inventory.json", dict(gpus=inventory, min_free_gib=a.gpu_min_free_gb,
+        max_utilization=a.gpu_max_utilization, eligible_uuids=[r["uuid"] for r in choices]))
+    with gpu_lease(choices, ROOT/"logs/rpo_rough_multimorph/gpu_locks") as gpu:
+        environment = child_environment(gpu, os.environ)
+        write_new(output/"gpu_selection.json", dict(**gpu, child_cuda_visible_devices=gpu["uuid"],
+            child_device="cuda:0", render_physical_gpu=gpu["index"], cooperative_lock_not_external_reservation=True))
+        print(f"[Rough multi-morph] selected GPU {gpu['index']} ({gpu['uuid']}), free {gpu['free_mib']} MiB, utilization {gpu['utilization']}%", flush=True)
+        # CUDA sees one UUID as logical cuda:0; RTX activeGpu is a physical index.
+        # The two index spaces must not be confused on shared multi-GPU machines.
+        kit = (a.kit_args or "")+f" --/renderer/activeGpu={gpu['index']} --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0"
+        common += ["--device", "cuda:0", "--kit_args", kit]
+        run_stage("preflight", common+["--output-dir", str(output/"preflight"), "--preflight-only"], output, environment=environment)
+        proof = json.loads((output/"preflight/summary.json").read_text(encoding="utf8"))
+        if proof.get("result") != "SPATIAL_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY":
+            raise ValueError("preflight did not pass; formal training will NOT start")
+        ready = candidates(query_gpus(), environment, min_free_mib=a.gpu_min_free_gb*1024,
+                           max_utilization=a.gpu_max_utilization, requested="cuda:0")
+        if not ready:
+            raise RuntimeError("Selected GPU is no longer eligible after preflight; stopping without moving to another GPU or killing jobs")
+        run_stage("train", common+["--output-dir", str(output/"train"), "--execute", "--updates", str(updates),
+            "--preflight-report", str(output/"preflight/summary.json"), "--asset-cache", str(output/"preflight")], output, environment=environment)
     summary = json.loads((output/"train/summary.json").read_text(encoding="utf8"))
     if summary.get("result") != "SPATIAL_FINITE_TRAINING_COMPLETE_NOT_GAIT_VALIDATED" or summary.get("completed_updates") != updates:
         raise ValueError("training did not complete the requested update budget")

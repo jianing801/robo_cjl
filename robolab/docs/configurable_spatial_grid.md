@@ -16,6 +16,14 @@ python robolab/scripts/rsl_rl/train.py --task RPO-Rough --multi_morph --headless
 
 下文分步命令是高级调试入口，日常不需要使用。
 
+### 共享服务器自动选卡
+
+不指定`--device`时，读取nvidia-smi，默认在空闲显存至少12GiB、采样利用率不超过30%的可见GPU中选择空闲显存最多的一张。可用`--gpu_min_free_gb`和`--gpu_max_utilization`调整筛选；12GiB不是400结构能放下的保证。无合格卡就报错停止，不杀进程、不自动抢卡。正式训练前复查同一张卡的余量。
+
+尊重现有CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES限制；子进程通过选中卡UUID绑定逻辑cuda:0，RTX渲染单独指定对应物理GPU，并关闭多卡渲染。选择记录写入本轮gpu_selection.json。参见[NVIDIA的索引说明](https://docs.isaacsim.omniverse.nvidia.com/latest/py/source/extensions/isaacsim.simulation_app/docs/index.html)：CUDA逻辑编号和active_gpu物理编号不能混用。
+
+不再拦截无关Python进程，只拒绝另一个使用同一bank的Rough worker。使用本仓库的协作锁防止两个自动选卡启动器重复挑中同一卡；该锁不能预约或限制其他用户/软件，查询后仍可能发生资源竞争，内存不足时预检应失败而不是宣称可训练。
+
 编辑 `configs/spatial_rough_grid.json`。所有修改只对新生成的实验生效，不修改旧bank、检查点或正在运行的仿真。
 
 | 字段 | 含义 |

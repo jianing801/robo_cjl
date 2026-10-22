@@ -26,6 +26,16 @@ def test_source_budget_and_resource_resolution_independent_of_cwd(tmp_path, monk
 
 def fixture_args(tmp_path, monkeypatch):
     import robolab.configurable_morphology as cm
+    import robolab.rough_gpu as gpu
+    from contextlib import contextmanager
+    row = dict(index=3, uuid="GPU-test", total_mib=24564, free_mib=18000, utilization=10)
+    monkeypatch.setattr(gpu, "query_gpus", lambda: [row])
+    @contextmanager
+    def lease(rows, root):
+        yield rows[0]
+    monkeypatch.setattr(gpu, "gpu_lease", lease)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-test")
+    monkeypatch.delenv("NVIDIA_VISIBLE_DEVICES", raising=False)
     config = dict(num_envs=17, length_count=1, thigh_range_m=[.25,.4], calf_range_m=[.3,.45],
                   knee_motor_count=1, ankle_motor_count=1, motor_seed=42)
     cfg = tmp_path/"config.json"; cfg.write_text(json.dumps(config))
@@ -38,9 +48,12 @@ def fixture_args(tmp_path, monkeypatch):
 def test_one_switch_orders_stages_and_explicit_budget(tmp_path, monkeypatch):
     argv, out = fixture_args(tmp_path, monkeypatch)
     calls = []
-    def stage(name, command, output):
+    def stage(name, command, output, **kwargs):
         calls.append((name, command))
         if name in ("preflight", "train"):
+            assert kwargs["environment"]["CUDA_VISIBLE_DEVICES"] == "GPU-test"
+            assert command[command.index("--device")+1] == "cuda:0"
+            assert "--/renderer/activeGpu=3" in command[command.index("--kit_args")+1]
             folder = output/name; folder.mkdir()
             value = dict(result=("SPATIAL_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY" if name == "preflight" else
                                 "SPATIAL_FINITE_TRAINING_COMPLETE_NOT_GAIT_VALIDATED"), completed_updates=50)
@@ -57,7 +70,7 @@ def test_one_switch_orders_stages_and_explicit_budget(tmp_path, monkeypatch):
 def test_failure_never_launches_next_stage(tmp_path, monkeypatch):
     argv, out = fixture_args(tmp_path, monkeypatch)
     calls = []
-    def stage(name, command, output):
+    def stage(name, command, output, **kwargs):
         calls.append(name)
         if name == "preflight":
             raise subprocess.CalledProcessError(1, command)
@@ -82,3 +95,21 @@ def test_dispatch_is_opt_in_and_before_isaac_import():
     isaac = next(n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "isaaclab.app")
     assert dispatch.lineno < isaac.lineno
     assert "__main__" in ast.unparse(dispatch.test)
+
+
+def test_resource_change_after_preflight_stops_train(tmp_path, monkeypatch):
+    import robolab.rough_gpu as gpu
+    argv, out = fixture_args(tmp_path, monkeypatch)
+    inventory = [dict(index=3, uuid="GPU-test", total_mib=24564, free_mib=18000, utilization=10)]
+    reads = iter([inventory, [dict(inventory[0], free_mib=100)]])
+    monkeypatch.setattr(gpu, "query_gpus", lambda: next(reads))
+    calls = []
+    def stage(name, command, output, **kwargs):
+        calls.append(name)
+        if name == "preflight":
+            folder = output/name; folder.mkdir()
+            (folder/"summary.json").write_text(json.dumps(dict(result="SPATIAL_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY")))
+    monkeypatch.setattr(launcher, "run_stage", stage)
+    with pytest.raises(RuntimeError, match="no longer eligible"):
+        launcher.main(argv)
+    assert calls == ["prepare", "preflight"]
