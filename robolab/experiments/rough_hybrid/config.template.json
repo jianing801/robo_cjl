@@ -1,0 +1,17 @@
+{
+  "grid": {
+    "num_envs": null,
+    "length_count": null,
+    "thigh_range_m": [0.25, 0.40],
+    "calf_range_m": [0.30, 0.45],
+    "knee_motor_count": null,
+    "ankle_motor_count": null,
+    "motor_seed": 42
+  },
+  "rotation": {
+    "active_designs": null,
+    "updates_per_stage": null,
+    "total_updates": null,
+    "seed": 42
+  }
+}
