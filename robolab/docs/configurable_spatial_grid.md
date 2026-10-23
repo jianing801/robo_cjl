@@ -1,5 +1,29 @@
 # 可配置形态网格（Rough空间联合训练）
 
+## 常规启动：只加一个开关
+
+在仓库根目录（如`/data/chenjiale/robo_cjl`），激活原Isaac训练环境后：
+
+```bash
+python robolab/scripts/rsl_rl/train.py --task RPO-Rough --multi_morph --headless
+```
+
+不开`--multi_morph`时原RPO入口完全不变。开启后自动读取4096环境/400结构配置，使用原RPO同一个`robolab/data/robots/roboparty/rpo`资源路径，生成独立bank，串行运行两更新预检，预检成功后自动从头长训；无需手工找路径、进入子目录或运行三个脚本。两更新预检参数丢弃，不加载到长训。日志自动保存到`robolab/logs/rpo_rough_multimorph/时间戳`，任何阶段失败不启动下一阶段。
+
+默认训练代数从原RPO-Rough配置读取（当前继承12000），可像原入口一样指定`--max_iterations 12000`、`--num_envs 4096`。其余形态参数仍在下述JSON里设置。原始机器人数据必须已安装，和原RPO相同；缺资源时会明确报错，不会偷偷选择另一套URDF。非标准安装才需要`--robot-root`。
+
+这里将内部步骤自动化，不取消源身份/真实形态/物理/预检校验。当前400结构完整规模的显存和吞吐仍需在训练机器实测。
+
+下文分步命令是高级调试入口，日常不需要使用。
+
+### 共享服务器自动选卡
+
+不指定`--device`时，读取nvidia-smi，默认在空闲显存至少12GiB、采样利用率不超过30%的可见GPU中选择空闲显存最多的一张。可用`--gpu_min_free_gb`和`--gpu_max_utilization`调整筛选；12GiB不是400结构能放下的保证。无合格卡就报错停止，不杀进程、不自动抢卡。正式训练前复查同一张卡的余量。
+
+尊重现有CUDA_VISIBLE_DEVICES/NVIDIA_VISIBLE_DEVICES限制；子进程通过选中卡UUID绑定逻辑cuda:0，RTX渲染单独指定对应物理GPU，并关闭多卡渲染。选择记录写入本轮gpu_selection.json。参见[NVIDIA的索引说明](https://docs.isaacsim.omniverse.nvidia.com/latest/py/source/extensions/isaacsim.simulation_app/docs/index.html)：CUDA逻辑编号和active_gpu物理编号不能混用。
+
+不再拦截无关Python进程，只拒绝另一个使用同一bank的Rough worker。使用本仓库的协作锁防止两个自动选卡启动器重复挑中同一卡；该锁不能预约或限制其他用户/软件，查询后仍可能发生资源竞争，内存不足时预检应失败而不是宣称可训练。
+
 编辑 `configs/spatial_rough_grid.json`。所有修改只对新生成的实验生效，不修改旧bank、检查点或正在运行的仿真。
 
 | 字段 | 含义 |
@@ -30,10 +54,26 @@ python scripts/tools/prepare_spatial_grid.py --config configs/spatial_rough_grid
 只预览取点、完整候选池、抽取型号、结构数，不启动仿真。
 
 ```powershell
-python scripts/tools/prepare_spatial_grid.py --config configs/spatial_rough_grid.json --source-bank logs/retarget_amp_rough_20261020_v1/stairs_formal/bank.json --output-dir logs/my_new_grid/bank --generate-assets
+python scripts/tools/prepare_spatial_grid.py --config configs/spatial_rough_grid.json --template /path/to/rpo/urdf/rpo.urdf --mesh-dir /path/to/rpo/meshes --output-dir logs/my_new_grid/bank --generate-assets
 python scripts/tools/train_spatial_rough.py --bank logs/my_new_grid/bank/bank.json --output-dir logs/my_new_grid/plan
 ```
 
 第二步只生成CPU训练计划。输出目录必须全新。环境数默认读取bank，也可用`--num-envs`指定新计划的环境数。物理预检使用`--preflight-only`，正式训练仍需`--execute --updates N --preflight-report <匹配预检summary.json>`，保留原来的源配置/物理校验和GPU冲突检查。
 
 当前接通的是Rough空间联合训练，不代表AMP空间联合训练已实现。AMP仍需为同批不同形态绑定各自重定向参考，不能直接套用一个结构的参考。
+
+## 独立发布
+
+默认配置为4096环境、10²×2×2=400种结构；不是已启动的训练。
+
+新入口仅依赖原RPO-Rough/本仓库RSL-RL、既有物理快照，以及本次Rough辅助模块，不需要旧AMP/MxT/共享策略模块、旧模型或旧日志bank。原始URDF和mesh需要在训练机器上存在；上面的路径必须替换为该机器的实际路径。默认关节顺序/初始姿态在`configs/rough_robot_contract.json`，真实仿真启动时再次核对；不匹配会停止，不能忽略。
+
+v2 bank需要在训练机器重新生成，不直接使用之前v1 bank或旧检查点。修改不改变旧文件。模型/输出保存到logs，未纳入Git。
+
+Linux服务器准备好Isaac Lab和本仓库依赖后，在robolab目录先运行配置预览，再生成bank。随后可以明确运行两次更新的预检（非长训练）：
+
+```bash
+python scripts/tools/train_spatial_rough.py --bank logs/my_new_grid/bank/bank.json --output-dir logs/my_new_grid/preflight --preflight-only --headless
+```
+
+正式更新预算仍需用户明确指定，不能从“400种结构”推导训练代数。400真实URDF、4096环境的完整显存/吞吐尚未验证；不要把CPU测试通过视为该规模训练已通过。

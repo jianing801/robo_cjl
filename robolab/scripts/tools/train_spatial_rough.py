@@ -30,18 +30,14 @@ def main():
         from isaaclab.app import AppLauncher
         AppLauncher.add_app_launcher_args(p)
     a = p.parse_args()
-    from robolab.morph_experiments import load_bank, write_new
-    from robolab.mxt_design_transfer import file_sha
-    from robolab.native_expert_contract import validate_native_bank, source_identity
+    from robolab.rough_contract import write_new, source_identity
+    from robolab.rough_geometry import file_sha
     from robolab.spatial_morphology import make_layout, identity
     bank_path = Path(a.bank).resolve()
     from robolab.configurable_morphology import KIND, load_configurable_bank
-    configurable = json.loads(bank_path.read_text(encoding="utf8")).get("kind") == KIND
-    if configurable:
-        bank = load_configurable_bank(bank_path)
-    else:
-        bank = load_bank(bank_path)
-        validate_native_bank(bank)
+    if json.loads(bank_path.read_text(encoding="utf8")).get("kind") != KIND:
+        raise ValueError("standalone Rough requires a new v2 grid bank; old frozen banks remain untouched")
+    bank = load_configurable_bank(bank_path)
     if a.num_envs is None:
         a.num_envs = bank["num_envs"]
     if sum((a.smoke_only, a.preflight_only, a.execute)) > 1:
@@ -80,20 +76,8 @@ def main():
     if not a.smoke_only and not a.execute and not a.preflight_only:
         print(json.dumps({k: v for k, v in layout.items() if k != "env_design_index"}, indent=2))
         return
-    # Windows WDDM nvidia-smi lists desktop graphics clients as compute apps.
-    # Check actual Python/Isaac workers rather than treating Explorer as a trainer.
-    import psutil
-    own_tree = {os.getpid(), *[v.pid for v in psutil.Process().parents()]}
-    workflow_names = {"train_multimorph_expert_block.py", "evaluate_native_rough_case.py", "run_multimorph_experts.py",
-                      "run_native_expert_pair.py", "diagnose_short_rough.py", "auto_evaluate_completed_rough.py"}
-    for process in psutil.process_iter(["name", "cmdline"]):
-        if process.pid in own_tree:
-            continue
-        name = (process.info["name"] or "").lower()
-        if "python" in name or name in ("kit.exe", "isaac-sim.exe"):
-            raise RuntimeError(f"other Python/Isaac worker {process.pid}; inspect before launching")
-        if any(Path(v).name in workflow_names for v in (process.info["cmdline"] or [])):
-            raise RuntimeError("another training/evaluation workflow exists")
+    from robolab.rough_gpu import reject_duplicate_bank
+    reject_duplicate_bank(bank_path)
     a.task = "stairs"
     a.kit_args = (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
     app = AppLauncher(a).app
@@ -104,7 +88,7 @@ def main():
         import robolab.tasks
         import omni.usd
         from spatial_rough_runtime import configure_spatial, SpatialRoughEnv, SpatialVecEnv, SpatialRunner
-        from robolab.native_expert_contract import extend_agent, serializable
+        from robolab.rough_contract import extend_agent, serializable
         from rsl_rl.utils import resolve_callable
         torch.set_num_threads(2)
         cfg, source, contract = configure_spatial(a, bank, designs, output)
@@ -119,6 +103,9 @@ def main():
             raise ValueError("spawn order != tensor order: refusing wrong context/motor association")
         if list(raw.robot.joint_names) != bank["canonical_semantic_contract"]["joint_names"]:
             raise ValueError("physical joint order differs from canonical bank")
+        expected_pose = torch.tensor(bank["canonical_semantic_contract"]["default_joint_pos"], device=raw.device)
+        if not torch.allclose(raw.robot.data.default_joint_pos, expected_pose.expand_as(raw.robot.data.default_joint_pos), atol=1e-6, rtol=0):
+            raise ValueError("source Rough default posture differs from bank; do not silently retarget reset pose")
         # Tags are not evidence of real differing geometry: independently check
         # parent/child link distances against each corresponding URDF origin.
         import xml.etree.ElementTree as ET
@@ -145,12 +132,7 @@ def main():
         symmetry = source["algorithm"].get("symmetry_cfg")
         fn = resolve_callable(symmetry["data_augmentation_func"]) if symmetry else None
         env = SpatialVecEnv(raw, fn, source.get("clip_actions"))
-        agent = extend_agent(source, task="stairs", bank_sha=file_sha(bank_path))
-        if configurable:
-            agent["policy"]["class_name"] = "robolab.spatial_policy:SpatialActorCritic"
-            agent["policy"]["native_config"]["context_width"] = layout["context_width"]
-            if agent["algorithm"].get("symmetry_cfg"):
-                agent["algorithm"]["symmetry_cfg"]["data_augmentation_func"] = "robolab.spatial_policy:spatial_design_symmetry"
+        agent = extend_agent(source, bank_sha=file_sha(bank_path), context_width=layout["context_width"])
         agent["policy"]["native_config"]["spatial_identity"] = identity(experiment)
         agent.update(device=cfg.sim.device, logger="tensorboard")
         runner = SpatialRunner(env, agent, log_dir=str(output / "models"), device=cfg.sim.device)

@@ -1,123 +1,12 @@
-"""电机型号与腿长共同驱动的RPO URDF生成器。
+"""Generate RPO URDFs from per-motor SolidWorks Gaussian-process models.
 
-四套SolidWorks模型统一采用质量一次、其余属性四次多项式。模型先转换到
-左腿link坐标，再将右腿关于y=0镜像。四套当前报告均已按对应左腿
-link坐标导出，不再需要型号专用的源坐标修正。
-使用说明：docs/基于SW拟合参数的URDF更新.md。
+Each motor and segment has its own GP model registered in
+motor_urdf_gp_registry.json. No polynomial coefficients or fallback are used.
+See docs/基于SW拟合参数的URDF更新.md for details.
 """
 
-# 系数按归一化变量的升幂排列，输出已经恢复到kg、m、kg·m²。
-MODELS = {'thigh': {'center': 0.325,
-           'half_range': 0.075,
-           'training_range': [0.25, 0.4],
-           'prediction_range': [0.25, 0.4],
-           'coefficients': {'mass_kg': [2.35598994, 0.1213446421323529],
-                            'com_x_m': [8.505509765625e-05,
-                                        -4.3829512979280805e-06,
-                                        2.238388697457672e-07,
-                                        -7.702726839712998e-09,
-                                        1.3343718370562838e-09],
-                            'com_y_m': [-0.015542036735026042,
-                                        -0.00020576864041289643,
-                                        1.0595937672099982e-05,
-                                        -5.464331165148955e-07,
-                                        2.7197637740204014e-08],
-                            'com_z_m': [-0.2592954185872396,
-                                        -0.05310133486891726,
-                                        0.0008035395757825075,
-                                        -4.152897267196897e-05,
-                                        2.1393120247037594e-06],
-                            'sw_com_xx_kg_m2': [0.028745309309895835,
-                                                0.015994758327503585,
-                                                0.0027395632074787356,
-                                                8.651744649018983e-05,
-                                                -1.5326437935594565e-06],
-                            'sw_com_xy_kg_m2': [-8.488997395833333e-07,
-                                                4.407088493292064e-08,
-                                                5.121894721957636e-09,
-                                                -2.5396671826627155e-09,
-                                                -6.985829029233114e-09],
-                            'sw_com_xz_kg_m2': [-1.3985979817708335e-05,
-                                                -4.394323487239031e-06,
-                                                -1.6484707575464124e-07,
-                                                1.4163528518705405e-08,
-                                                5.102009965163316e-10],
-                            'sw_com_yy_kg_m2': [0.029776268824869796,
-                                                0.01613650531209069,
-                                                0.002739666552048307,
-                                                8.650869719720504e-05,
-                                                -1.5343313814664364e-06],
-                            'sw_com_yz_kg_m2': [0.0020332672298177083,
-                                                0.0005145604172248357,
-                                                -7.560809330532423e-06,
-                                                3.885830331612971e-07,
-                                                -2.5627788517506285e-08],
-                            'sw_com_zz_kg_m2': [0.0018869199381510418,
-                                                0.00017113329258702488,
-                                                -1.2231951152810283e-07,
-                                                6.6003438314893746e-09,
-                                                2.2095627772334943e-08]}},
- 'calf': {'center': 0.38,
-          'half_range': 0.07,
-          'training_range': [0.31, 0.45],
-          'prediction_range': [0.3, 0.45],
-          'coefficients': {'mass_kg': [1.936134374, 0.24022469225000012],
-                           'com_x_m': [0.00027189469116023295,
-                                       -3.373109560212751e-05,
-                                       4.179230534687179e-06,
-                                       -5.178848684210406e-07,
-                                       7.145369207677064e-08,
-                                       -1.5726959791993914e-08],
-                           'com_y_m': [-0.01013701820108684,
-                                       0.0013759006762046517,
-                                       -0.00017068273019099013,
-                                       2.116616765400871e-05,
-                                       -2.6975555642780284e-06,
-                                       3.4287440759293804e-07],
-                           'com_z_m': [-0.214158470369785,
-                                       -0.04464515973888224,
-                                       0.0011965716276151604,
-                                       -0.00014846175505103543,
-                                       1.8847898516615475e-05,
-                                       -2.343233620898896e-06],
-                           'sw_com_xx_kg_m2': [0.02011522591829223,
-                                               0.010765838618492495,
-                                               0.0021879986548068845,
-                                               0.00012090550209376295,
-                                               -2.8878316130514775e-06,
-                                               3.414568131277625e-07],
-                           'sw_com_xy_kg_m2': [2.0902237545736e-05,
-                                               -7.25784528062237e-07,
-                                               9.74049467044797e-08,
-                                               -5.459355402081741e-09,
-                                               -5.176548168032102e-09,
-                                               -4.536302294195723e-09],
-                           'sw_com_xz_kg_m2': [-8.079918811838315e-06,
-                                               -1.334444372072716e-05,
-                                               -6.360473047334537e-07,
-                                               7.702830535046936e-08,
-                                               -4.277691477758623e-09,
-                                               -2.384894220837361e-09],
-                           'sw_com_yy_kg_m2': [0.019925431393405357,
-                                               0.010796561827069942,
-                                               0.002191664462687719,
-                                               0.00012040890666924262,
-                                               -2.831246959951147e-06,
-                                               3.742616168475846e-07],
-                           'sw_com_yz_kg_m2': [0.0011872423765398688,
-                                               0.0006247093959712629,
-                                               2.570894412540552e-05,
-                                               -3.1834661973079365e-06,
-                                               3.866708207936031e-07,
-                                               -5.581986683411302e-08],
-                           'sw_com_zz_kg_m2': [0.0012928935753101388,
-                                               0.0001872972352742714,
-                                               -3.6787905805495808e-06,
-                                               4.691591003823239e-07,
-                                               -4.928550358312218e-08,
-                                               -1.4175944679931892e-09]}}}
-
 import argparse
+from functools import lru_cache
 import json
 import math
 import os
@@ -128,12 +17,12 @@ import numpy as np
 from robolab.assets.rpo_motor_catalog import get_motor_spec
 
 
-MODEL_FILE = (
+GP_MODEL_REGISTRY_FILE = (
     Path(__file__).resolve().parents[2]
-    / "robolab/assets/motor_data/motor_urdf_models.json"
+    / "robolab/assets/motor_data/motor_urdf_gp_registry.json"
 )
-# 外部JSON是唯一运行时模型来源；上方旧常量暂留用于历史diff可读性。
-MODELS = json.loads(MODEL_FILE.read_text(encoding="utf-8"))
+MODELS = json.loads(GP_MODEL_REGISTRY_FILE.read_text(encoding="utf-8"))
+MODEL_ASSET_DIR = GP_MODEL_REGISTRY_FILE.parent
 
 # 旧命令仍可生成原先对应的达妙结构。优化命令总会传入实际电机型号。
 LEGACY_MODEL_KEYS = {
@@ -164,15 +53,17 @@ def predict_properties(model_id, length):
     lo, hi = model['prediction_range_m']
     if not math.isfinite(length) or not lo <= length <= hi:
         raise ValueError(f'{model["segment"]} length must be in [{lo}, {hi}] m')
-    x = (length - model['center_m']) / model['half_range_m']
-    def value(key):
-        result = 0.0
-        for c in reversed(model['coefficients_ascending_power'][key]):
-            result = result*x + c
-        return result
+    gp_model_file = model.get('gp_model_file')
+    if not gp_model_file:
+        raise ValueError(f'URDF model {model_id} is missing its GP model file')
+    gp_model = _load_gp_model(gp_model_file)
+    if gp_model.get('segment') != model['segment']:
+        raise ValueError(f'GP model {gp_model_file} segment does not match {model["segment"]}')
+    outputs = gp_model['outputs']
+    value = lambda key: _predict_gp_output(outputs[key], length)
     mass = value('mass_kg')
-    com = np.array([value('com_'+a+'_m') for a in 'xyz'])
-    v = {a: value('sw_com_'+a+'_kg_m2') for a in ('xx','xy','xz','yy','yz','zz')}
+    com = np.array([value('com_'+axis+'_m') for axis in 'xyz'])
+    v = {axis: value('L'+axis) for axis in ('xx','xy','xz','yy','yz','zz')}
     # SW正惯性积的非对角项取负；不对质心惯量再做平行轴平移。
     inertia = np.array([[v['xx'], -v['xy'], -v['xz']],
                         [-v['xy'], v['yy'], -v['yz']],
@@ -190,6 +81,40 @@ def predict_properties(model_id, length):
     return {'mass_kg': mass, 'com_m': com, 'inertia_kg_m2': inertia,
             'model_id': model_id,
             'extrapolated': length < model['training_range_m'][0]}
+
+
+@lru_cache(maxsize=None)
+def _load_gp_model(relative_path):
+    path = (MODEL_ASSET_DIR / relative_path).resolve()
+    if not path.is_relative_to(MODEL_ASSET_DIR.resolve()):
+        raise ValueError(f'GP model path must be inside motor_data: {relative_path}')
+    data = json.loads(path.read_text(encoding='utf-8'))
+    required = {'mass_kg', 'com_x_m', 'com_y_m', 'com_z_m',
+                'Lxx', 'Lxy', 'Lxz', 'Lyy', 'Lyz', 'Lzz'}
+    if not required.issubset(data.get('outputs', {})):
+        raise ValueError(f'GP model is missing URDF outputs: {path}')
+    return data
+
+
+def _predict_gp_output(model, length):
+    if model.get('constant', False):
+        return float(model['constant_value'])
+    x_mean = float(model['x_mean'])
+    x_scale = float(model['x_scale'])
+    length_scale = float(model['length_scale_standardized'])
+    if x_scale <= 0.0 or length_scale <= 0.0:
+        raise ValueError('GP model has non-positive input scaling or kernel length scale')
+    train = (np.asarray(model['x_train_m'], dtype=float) - x_mean) / x_scale
+    query = (float(length) - x_mean) / x_scale
+    r = np.abs(query - train) / length_scale
+    sqrt5r = math.sqrt(5.0) * r
+    signal = float(model.get('signal_std_standardized', 1.0))
+    kernel = signal**2 * (1.0 + sqrt5r + (5.0 / 3.0) * r**2) * np.exp(-sqrt5r)
+    alpha = np.asarray(model['alpha_standardized'], dtype=float)
+    if kernel.shape != alpha.shape:
+        raise ValueError('GP model training inputs and alpha coefficients do not match')
+    standardized_mean = float(model['beta_standardized']) + float(kernel @ alpha)
+    return float(model['y_mean']) + float(model['y_scale']) * standardized_mean
 
 
 def _motor_model_id(motor_id, segment):
@@ -336,7 +261,7 @@ def generate_urdf(thigh_length, calf_length, output_dir, template_path=None, *,
     root = tree.getroot()
     report = {'template': str(template), 'thigh_length_m':float(thigh_length), 'calf_length_m':float(calf_length),
               'knee_motor': knee_motor, 'ankle_motor': ankle_motor,
-              'motor_urdf_models': model_ids,
+              'motor_urdf_gp_models': model_ids,
               'frame_assumption': 'explicit transforms' if aligned_side is None else f'SW aligned with {aligned_side}; opposite side mirrored in y',
               'thigh_extrapolated':properties['thigh']['extrapolated'],
               'calf_extrapolated':properties['calf']['extrapolated'], 'links':{}}

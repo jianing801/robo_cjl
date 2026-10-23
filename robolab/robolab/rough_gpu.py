@@ -109,7 +109,7 @@ def reject_duplicate_bank(bank, *, processes=None, own_tree=None):
             continue
         try:
             cmd = process.info.get("cmdline") or []
-            if not any(Path(x).name in ("train_spatial_rough.py", "train_spatial_expert.py") for x in cmd):
+            if not any(Path(x).name == "train_spatial_rough.py" for x in cmd):
                 continue
             for i, token in enumerate(cmd):
                 value = token.split("=", 1)[1] if token.startswith("--bank=") else cmd[i+1] if token == "--bank" and i+1 < len(cmd) else None

@@ -1,8 +1,25 @@
 """Native MLP/PPO semantics with a bank-sized known design suffix."""
 from copy import deepcopy
 import torch
+from torch import nn
 from rsl_rl.modules import ActorCritic
-from robolab.native_expert_policy import PrefixNormalization
+from rsl_rl.networks import EmpiricalNormalization
+
+
+class PrefixNormalization(nn.Module):
+    """Normalize original observations only; known design suffix is already scaled."""
+    def __init__(self, base_width):
+        super().__init__()
+        if base_width < 1:
+            raise ValueError("context must not consume the original observations")
+        self.base_width = base_width
+        self.base = EmpiricalNormalization(base_width)
+
+    def forward(self, x):
+        return torch.cat((self.base(x[..., :self.base_width]), x[..., self.base_width:]), -1)
+
+    def update(self, x):
+        self.base.update(x[..., :self.base_width])
 
 
 class SpatialActorCritic(ActorCritic):

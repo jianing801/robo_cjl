@@ -75,8 +75,7 @@ class SpatialMotorCfg(TorqueSpeedEnvelopeActuatorCfg):
 
 
 def configure_spatial(options, bank, designs, output):
-    from native_multimorph_runtime import configure_native
-    cfg, agent, contract = configure_native(options, bank, designs[0], output)
+    cfg, agent, contract = configure_rough(options, bank, designs[0], output)
     cache = {}
     if options.asset_cache:
         from isaaclab.sim.converters.asset_converter_base import AssetConverterBase
@@ -120,6 +119,50 @@ def configure_spatial(options, bank, designs, output):
     contract.update(spatial_real_assets=True, single_actual_URDF_per_block=False,
         env_assignment="environment index modulo design count; verified at runtime", paper_discount_regularization=False)
     return cfg, agent, contract
+
+
+def configure_rough(options, bank, design, output):
+    """Source RPO-Rough only; no task router, AMP configuration or old bank."""
+    from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
+    from robolab.rough_contract import RECIPE, serializable, digest
+    cfg = load_cfg_from_registry("RPO-Rough", "env_cfg_entry_point")
+    source_agent = load_cfg_from_registry("RPO-Rough", "rsl_rl_cfg_entry_point").to_dict()
+    before = serializable(cfg.to_dict())
+    cfg.scene.num_envs = options.num_envs
+    cfg.seed, cfg.sim.device = source_agent["seed"], options.device or "cuda:0"
+    robot = cfg.scene.robot.copy()
+    robot.spawn.asset_path, robot.spawn.usd_dir = design["urdf"], str(output/"usd")
+    configure_robot(robot, bank["motor_pairs"][design["pair_id"]])
+    state = robot.init_state
+    state.pos = (*state.pos[:2], state.pos[2]+design["root_height_compensation_m"])
+    cfg.scene.robot = robot
+    cfg.scene_context.num_envs, cfg.scene_context.robot = options.num_envs, robot
+    cfg.scene.terrain.visual_material = None
+    cfg.scene.sky_light.spawn.texture_file = None
+    cfg.commands.debug_vis = False
+    for sensor in ("left_feet_scanner", "right_feet_scanner", "height_scanner"):
+        getattr(cfg.scene, sensor).debug_vis = False
+    if bank["training"].get("stairs_height_range_m") != [.05, .10]:
+        raise ValueError("only the authorized 5-10cm stair range is supported")
+    for name, terrain in cfg.scene.terrain.terrain_generator.sub_terrains.items():
+        if "stairs" in name:
+            terrain.step_height_range = (.05, .10)
+    after = serializable(cfg.to_dict())
+    protected = ("rewards", "reward", "commands", "events", "observations", "noise", "robot",
+                 "normalization", "terminations", "episode_length_s", "decimation")
+    for key in protected:
+        expected = deepcopy(before.get(key))
+        if key == "commands":
+            expected["debug_vis"] = False
+        if expected != after.get(key):
+            raise RuntimeError(f"Rough adapter changed protected source setting: {key}")
+    contract = dict(recipe=RECIPE, task="stairs", source_task="RPO-Rough",
+        source_environment_sha256=digest(before), source_agent_sha256=digest(source_agent),
+        protected_source_settings={k: after[k] for k in protected if k in after},
+        context_width=len(design["context"]), context_is_known_design_not_sensor=True,
+        stairs_height_range_m=[.05, .10], resolved_terrain=after["scene"]["terrain"],
+        display_only_overrides=["remote terrain MDL and sky HDR removed", "command/raycaster debug disabled"])
+    return cfg, source_agent, contract
 
 
 class SpatialRoughEnv(BaseEnv):

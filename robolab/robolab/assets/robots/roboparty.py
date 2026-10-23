@@ -37,11 +37,13 @@ from isaaclab.assets.articulation import ArticulationCfg
 from robolab.assets import ISAAC_DATA_DIR
 from robolab.assets.rpo_motor_catalog import (
     ANKLE_MOTOR_CHOICES,
+    STAGED_MOTOR_IDS,
     DEFAULT_ANKLE_MOTOR,
     DEFAULT_KNEE_MOTOR,
     KNEE_MOTOR_CHOICES,
     get_motor_spec,
     load_torque_speed_envelope,
+    require_motor_actuator_ready,
 )
 from robolab.actuators import TorqueSpeedEnvelopeActuatorCfg
 
@@ -177,17 +179,21 @@ def configure_rpo_motors(
     ankle_motor: str = DEFAULT_ANKLE_MOTOR,
     knee_envelope_csv: str | None = None,
     ankle_envelope_csv: str | None = None,
+    use_torque_speed_curve: bool = True,
 ) -> dict[str, dict[str, object]]:
     """Apply selected knee and common ankle actuator models to ``robot_cfg``.
 
-    If a selected motor has a torque-speed CSV (or an override CSV is passed),
-    its delayed PD output is clipped by that curve at every simulation step.
+    If enabled and a selected motor has a torque-speed CSV (or an override CSV
+    is passed), its delayed PD output is clipped by that curve at every step.
     URDF geometry, mass, center of mass, and rigid-body inertia remain
     untouched.  Joint-side armature follows the selected motor specification.
     """
 
     knee = get_motor_spec(knee_motor, KNEE_MOTOR_CHOICES)
     ankle = get_motor_spec(ankle_motor, ANKLE_MOTOR_CHOICES)
+    for motor in (knee, ankle):
+        if motor.motor_id in STAGED_MOTOR_IDS:
+            require_motor_actuator_ready(motor)
     dynamic_envelope: dict[str, bool] = {}
 
     for actuator_name, motor, legacy_id, csv_override in (
@@ -204,7 +210,7 @@ def configure_rpo_motors(
         actuator_cfg.effort_limit = None if motor.motor_id == legacy_id else motor.peak_torque_nm
         actuator_cfg.velocity_limit = None if motor.motor_id == legacy_id else motor.max_speed_rad_s
 
-        envelope = load_torque_speed_envelope(motor, csv_override)
+        envelope = load_torque_speed_envelope(motor, csv_override) if use_torque_speed_curve else None
         dynamic_envelope[actuator_name] = envelope is not None
         if envelope is not None:
             robot_cfg.actuators[actuator_name] = TorqueSpeedEnvelopeActuatorCfg(

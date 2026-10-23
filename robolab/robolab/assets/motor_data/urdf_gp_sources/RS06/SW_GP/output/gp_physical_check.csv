@@ -1,0 +1,2 @@
+﻿model_id,dense_points,physically_valid_points,minimum_eigenvalue_kg_m2,minimum_triangle_margin_kg_m2,all_valid
+RS06_calf_URDF_GP,301,301,0.0016574462300603626,0.001577162805698102,True

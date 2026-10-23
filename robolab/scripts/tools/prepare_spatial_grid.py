@@ -1,23 +1,22 @@
 """Preview configurable grid on CPU; --generate-assets freezes a NEW Rough bank."""
 import argparse
-from copy import deepcopy
 import json
 from pathlib import Path
 import sys
-import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT.parent / "rsl_rl")]
 
 
 def main():
     from robolab.configurable_morphology import KIND, select_grid, eligible_pools, context, load_configurable_bank
-    from robolab.morph_experiments import load_bank, write_new
+    from robolab.rough_contract import write_new, source_identity, RECIPE
     from robolab.physical_snapshot import DEFAULT_ROOT, physical_model, generator
-    from robolab.mxt_design_transfer import file_sha, audit_candidate_urdf, candidate_contract, neutral_foot_compensation
-    from robolab.native_expert_contract import source_identity, validate_native_bank
+    from robolab.rough_geometry import file_sha, audit_candidate_urdf, neutral_foot_compensation
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=str(ROOT / "configs/spatial_rough_grid.json"))
-    p.add_argument("--source-bank")
+    p.add_argument("--template", help="Original baseline RPO URDF on THIS machine; never load old policies/banks")
+    p.add_argument("--mesh-dir", help="Original RPO display meshes on THIS machine")
+    p.add_argument("--contract-json", default=str(ROOT/"configs/rough_robot_contract.json"))
     p.add_argument("--output-dir")
     p.add_argument("--generate-assets", action="store_true")
     a = p.parse_args()
@@ -28,10 +27,8 @@ def main():
                          **{k: v for k, v in grid.items() if k != "designs"}), indent=2), flush=True)
     if not a.generate_assets:
         return
-    if not a.source_bank or not a.output_dir:
-        p.error("asset generation requires --source-bank and a NEW --output-dir")
-    source = load_bank(a.source_bank)
-    validate_native_bank(source)
+    if not a.template or not a.mesh_dir or not a.output_dir:
+        p.error("asset generation requires --template, --mesh-dir and a NEW --output-dir")
     out = Path(a.output_dir).resolve()
     # Validate all selected models/ranges before creating the output folder.
     pairs = {}
@@ -45,11 +42,14 @@ def main():
                 if not lo <= ranges[segment][0] < ranges[segment][1] <= hi:
                     raise ValueError(f"{segment} requested range exceeds {knee}/{ankle} calibrated GP bounds {[lo, hi]}")
             pairs[knee+"__"+ankle] = model
-    template = Path(source["original_template"])
-    contract_path = Path(source["reference_contract_source"])
+    template = Path(a.template).resolve()
+    contract_path = Path(a.contract_json).resolve()
     contract = json.loads(contract_path.read_text(encoding="utf8"))
-    mesh = next(ET.parse(source["designs"][0]["urdf"]).getroot().iter("mesh")).get("filename")
-    mesh_dir = Path(mesh.removeprefix("file://")).parent
+    if set(contract) != {"joint_names", "default_joint_pos"} or len(contract["joint_names"]) != 23 or len(contract["default_joint_pos"]) != 23:
+        raise ValueError("expected explicit 23-joint Rough order and unchanged neutral pose")
+    mesh_dir = Path(a.mesh_dir).resolve()
+    if not template.is_file() or not mesh_dir.is_dir():
+        raise ValueError("template/mesh directory must exist on this machine")
     out.mkdir(parents=True, exist_ok=False)
     rows = grid["designs"]
     for index, row in enumerate(rows):
@@ -60,7 +60,7 @@ def main():
             mesh_dir=mesh_dir, knee_motor=row["knee_motor"], ankle_motor=row["ankle_motor"]))
         report = urdf.with_suffix(".report.json")
         audit = audit_candidate_urdf(template, urdf)
-        graph = candidate_contract(contract, urdf)["mtg"]
+        graph = dict(joint_names=contract["joint_names"])
         placement = neutral_foot_compensation(template, urdf, contract["joint_names"],
             contract["default_joint_pos"], max_height_shift_m=.31)
         row.update(pair_id=pair, urdf=str(urdf), urdf_sha256=file_sha(urdf), report=str(report),
@@ -70,16 +70,15 @@ def main():
             total_mass_kg=audit["total_mass_kg"]["candidate"],
             visuals_are_original_meshes_not_parameterized_CAD=True)
         print(f"Generated {index+1}/{len(rows)}: {row['id']}", flush=True)
-    training = deepcopy(source["training"])
-    training.update(authorized_tasks=["stairs"], source_hashes=source_identity(),
-                    retargeted_references=False)
-    bank = dict(kind=KIND, schema_version=1, configuration=config, snapshot_root=str(DEFAULT_ROOT.resolve()),
+    training = dict(recipe=RECIPE, authorized_tasks=["stairs"], source_hashes=source_identity(),
+                    retargeted_references=False, stairs_height_range_m=[.05, .10])
+    bank = dict(kind=KIND, schema_version=2, configuration=config, snapshot_root=str(DEFAULT_ROOT.resolve()),
         num_envs=grid["num_envs"], knees=grid["knees"], ankles=grid["ankles"],
         context_width=grid["context_width"], ranges_m=ranges, designs=rows, motor_pairs=pairs,
         original_template=str(template), original_template_sha256=file_sha(template),
         reference_contract_source=str(contract_path), reference_contract_sha256=file_sha(contract_path),
-        canonical_semantic_contract=source["canonical_semantic_contract"], training=training,
-        source_bank_sha256=file_sha(a.source_bank), no_implicit_holdout_or_update_budget=True)
+        canonical_semantic_contract=contract, training=training,
+        no_implicit_holdout_or_update_budget=True)
     write_new(out/"bank.json", bank)
     load_configurable_bank(out/"bank.json")
     print("VALIDATED", out/"bank.json", file_sha(out/"bank.json"), flush=True)

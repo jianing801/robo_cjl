@@ -4,9 +4,9 @@ import json
 import math
 import random
 from pathlib import Path
-from robolab.morph_experiments import digest, _interpolate
+from robolab.rough_contract import digest, interpolate
 
-KIND = "configurable_spatial_rough_bank_v1"
+KIND = "configurable_spatial_rough_bank_v2"
 
 
 def positive(value, name):
@@ -95,7 +95,7 @@ def context(row, physical, knees, ankles, ranges):
         spec = physical["selected"][label]
         values += [spec["peak_torque_nm"]/150, spec["max_speed_rad_s"]/25, spec["armature_kgm2"]/.1]
         curve = module.load_torque_speed_envelope(module.get_motor_spec(row[label+"_motor"]))
-        profiles += [_interpolate(curve, f*spec["max_speed_rad_s"])/spec["peak_torque_nm"]
+        profiles += [interpolate(curve, f*spec["max_speed_rad_s"])/spec["peak_torque_nm"]
                      for f in (0, .25, .5, .75, 1)]
     values += profiles
     if len(values) != 18+len(knees)+len(ankles) or not all(math.isfinite(v) for v in values):
@@ -104,11 +104,11 @@ def context(row, physical, knees, ankles, ranges):
 
 
 def load_configurable_bank(path):
-    from robolab.mxt_design_transfer import file_sha
-    from robolab.native_expert_contract import source_identity
+    from robolab.rough_geometry import file_sha
+    from robolab.rough_contract import source_identity
     from robolab.physical_snapshot import validate_physical_model
     bank = json.loads(Path(path).read_text(encoding="utf8"))
-    if bank["kind"] != KIND or bank["schema_version"] != 1:
+    if bank["kind"] != KIND or bank["schema_version"] != 2:
         raise ValueError("wrong configurable bank schema")
     pools, excluded = eligible_pools(bank["snapshot_root"])
     grid = select_grid(bank["configuration"], pools["knee"], pools["ankle"])

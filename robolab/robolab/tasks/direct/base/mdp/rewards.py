@@ -73,32 +73,6 @@ def lin_vel_z_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot
     return reward
 
 
-def lin_vel_underspeed_l1(
-    env: BaseEnv, min_command_speed: float = 0.05, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
-) -> torch.Tensor:
-    """Penalize underspeed along the commanded planar direction.
-
-    The exp tracking term saturates near the optimum (zero gradient at
-    err=0), which biases the equilibrium toward underspeed once the
-    effort-related penalties grow with speed. This ReLU term has a constant
-    nonzero gradient on the underspeed side only, pushing the policy back to
-    the command. Projecting velocity onto the command direction makes the
-    term correct for forward, backward, and lateral commands; the previous
-    component-wise ReLU silently gave zero penalty for stationary negative
-    commands. Standing commands are deliberately excluded.
-    """
-    asset: Articulation = env.scene[asset_cfg.name]
-    vel_yaw = math_utils.quat_apply_inverse(
-        math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3]
-    )
-    command_xy = env.command_generator.command[:, :2]
-    command_speed = torch.linalg.vector_norm(command_xy, dim=1)
-    command_direction = command_xy / torch.clamp(command_speed.unsqueeze(1), min=min_command_speed)
-    speed_along_command = torch.sum(vel_yaw[:, :2] * command_direction, dim=1)
-    underspeed = torch.clamp(command_speed - speed_along_command, min=0.0)
-    return underspeed * (command_speed >= min_command_speed)
-
-
 def ang_vel_xy_l2(env: BaseEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     asset: Articulation = env.scene[asset_cfg.name]
     reward = torch.sum(torch.square(asset.data.root_ang_vel_b[:, :2]), dim=1)

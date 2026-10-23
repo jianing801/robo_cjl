@@ -1,0 +1,14 @@
+Motor: DM-J4340P-2EC
+Generated: 2026-09-16 19:53:22
+Input points: 65
+GP training points: 45
+Export points: 464
+Kernel: Matern 3/2
+Noise ratio: 0.001000000
+Sigma: 0.027000000 N*m
+Model plateau: 27.000000000 N*m
+Manufacturer peak limit: 27.000000000 N*m
+Corner: 72.389017193 rpm
+Training RMSE: 0.004935914 N*m
+5-fold CV RMSE: 0.012726026 N*m
+CV max error: 0.081470757 N*m
