@@ -12,6 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT.parent / "rsl_rl")]
 
 
+def attach_global_logger(runner, target):
+    """Native metrics every PPO update, with the full experiment denominator."""
+    native_log = runner.logger.log
+    def log_global_update(**values):
+        values["total_it"] = target
+        native_log(**values)
+    runner.logger.log = log_global_update
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bank", required=True)
@@ -21,14 +30,14 @@ def main():
     p.add_argument("--stage-index", required=True, type=int)
     p.add_argument("--num-envs", type=int, help="Default: bank configuration (2048 for legacy banks)")
     p.add_argument("--smoke-only", action="store_true")
-    p.add_argument("--preflight-only", action="store_true", help="Configured envs, all active-stage designs, exactly two PPO updates; discard policy")
     p.add_argument("--execute", action="store_true")
     p.add_argument("--updates", type=int)
     p.add_argument("--resume-checkpoint")
-    p.add_argument("--preflight-report", help="Matching all-design two-update preflight summary; required for long training")
     p.add_argument("--asset-cache", help="Optional read-only root of previously converted USDs; copy only exact converter-hash matches")
+    p.add_argument("--allow-cache-misses", action="store_true",
+                   help="Internal experiment cache: convert previously unseen designs normally")
     # Planning needs no Isaac/Kit imports.
-    if any(flag in sys.argv for flag in ("--smoke-only", "--preflight-only", "--execute")):
+    if any(flag in sys.argv for flag in ("--smoke-only", "--execute")):
         from isaaclab.app import AppLauncher
         AppLauncher.add_app_launcher_args(p)
     a = p.parse_args()
@@ -53,14 +62,10 @@ def main():
         a.num_envs = frozen["configuration"]["grid"]["num_envs"]
     if a.num_envs != frozen["configuration"]["grid"]["num_envs"]:
         raise ValueError("environment count differs from frozen plan")
-    if sum((a.smoke_only, a.preflight_only, a.execute)) > 1:
+    if sum((a.smoke_only, a.execute)) > 1:
         p.error("choose one execution mode")
     if a.smoke_only and (a.updates or a.resume_checkpoint):
         p.error("smoke is zero-update and cannot load policies")
-    if a.preflight_only:
-        if a.updates or a.resume_checkpoint:
-            p.error("preflight is all active-stage designs / fresh / two updates")
-        a.updates = 2
     if a.execute and (a.updates != stage["end_update"]):
         p.error("formal stage target must exactly equal the frozen schedule boundary")
     if a.resume_checkpoint and not a.execute:
@@ -70,17 +75,10 @@ def main():
     output = Path(a.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=False)
     experiment = frozen["experiment"]
-    if a.execute:
-        if not a.preflight_report:
-            p.error("formal execution requires a successful matching preflight report")
-        proof = json.loads(Path(a.preflight_report).read_text())
-        if (proof.get("result") != "HYBRID_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY"
-                or proof.get("spatial_identity_sha256") != identity(experiment)
-                or proof.get("layout") != layout):
-            raise ValueError("preflight does not match current source/assets/layout")
     write_new(output / "plan.json", dict(**experiment, plan_sha256=identity(experiment),
-        stage=stage, requested_updates=a.updates, smoke_only=a.smoke_only, preflight_only=a.preflight_only, pid=os.getpid()))
-    if not a.smoke_only and not a.execute and not a.preflight_only:
+        stage=stage, requested_updates=a.updates, smoke_only=a.smoke_only,
+        execution_protocol="direct_stage_v2", pid=os.getpid()))
+    if not a.smoke_only and not a.execute:
         print(json.dumps({k: v for k, v in layout.items() if k != "env_design_index"}, indent=2))
         return
     from robolab.rough_gpu import reject_duplicate_bank
@@ -149,6 +147,9 @@ def main():
         runner = runner_type(env, agent, log_dir=str(output / "models"), device=cfg.sim.device)
         runner.hybrid_identity = experiment
         runner.hybrid_stage = stage
+        # Keep the native per-update metrics, but display the absolute target
+        # instead of misleadingly showing only this group's end boundary.
+        attach_global_logger(runner, frozen["configuration"]["rotation"]["total_updates"])
         if a.execute and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
             raise ValueError("exact previous completed-stage checkpoint required; no scratch restart")
         if a.resume_checkpoint:
@@ -192,7 +193,6 @@ def main():
             audit[name] = dict(clipping_max_error=error, armature=actuator.armature.cpu().tolist(),
                 motor_groups=actuator.groups.cpu().tolist())
         result = ("HYBRID_PHYSICS_SMOKE_PASSED" if a.smoke_only else
-                  "HYBRID_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY" if a.preflight_only else
                   "HYBRID_STAGE_COMPLETE_NOT_GAIT_VALIDATED")
         write_new(output / "summary.json", dict(result=result,
             spatial_identity_sha256=identity(experiment),

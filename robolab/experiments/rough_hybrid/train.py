@@ -37,14 +37,20 @@ def run_child(command,folder,env):
     import psutil
     folder.mkdir(exist_ok=False)
     started=time.monotonic()
-    with (folder/'stdout.log').open('x') as out,(folder/'stderr.log').open('x') as err:
-        kwargs=dict(cwd=ROOT,env=env,stdout=out,stderr=err)
+    with (folder/'stdout.log').open('x',encoding='utf8') as out,(folder/'stderr.log').open('x',encoding='utf8') as err:
+        environment=dict(env, PYTHONIOENCODING='utf-8')
+        kwargs=dict(cwd=ROOT,env=environment,stdout=subprocess.PIPE,stderr=err,
+                    text=True,encoding='utf8',errors='replace',bufsize=1)
         if os.name=='nt':kwargs['creationflags']=subprocess.CREATE_NO_WINDOW
         worker=subprocess.Popen(command,**kwargs)
         write_new(folder/'launch.json',dict(pid=worker.pid,create_time=psutil.Process(worker.pid).create_time(),command=command))
         print('CHILD_START',worker.pid,str(folder),flush=True)
         # Interrupting a parent must never leave an automatically advancing sequence.
-        try:code=worker.wait()
+        try:
+            for line in worker.stdout:
+                out.write(line);out.flush()
+                print(line,end='',flush=True)
+            code=worker.wait()
         except KeyboardInterrupt:
             (folder.parents[2]/'USER_PAUSED').touch(exist_ok=True)
             process=psutil.Process(worker.pid)
@@ -96,7 +102,7 @@ def main(argv=None):
     else:
         root.mkdir(parents=True,exist_ok=False)
         plan=dict(configuration=config,experiment=experiment_identity(bank_path,config),bank=str(bank_path),
-            preflight_updates_per_new_layout=2,preflight_policy_discarded=True,total_updates_are_absolute=True)
+            preflight_updates_per_new_layout=0,execution_protocol='direct_stage_v2',total_updates_are_absolute=True)
         write_new(root/'plan.json',plan)
         (root/'commits').mkdir();(root/'attempts').mkdir()
     if not a.execute:
@@ -135,12 +141,16 @@ def main(argv=None):
                 common=[a.python,'-u',str(HERE/'train_stage.py'),'--bank',str(bank_path),'--hybrid-plan',str(root/'plan.json'),
                     '--stage-index',str(index),'--headless','--device','cuda:0','--kit_args',kit]
                 cache=a.asset_cache
-                if cache:common+=['--asset-cache',str(Path(cache).resolve())]
-                run_child(common+['--output-dir',str(attempt/'preflight/result'),'--preflight-only'],attempt/'preflight',env)
-                proof=attempt/'preflight/result/summary.json'
-                if json.loads(proof.read_text())['result']!='HYBRID_TWO_UPDATE_PREFLIGHT_PASSED_DISCARD_POLICY':raise ValueError('stage preflight failed')
-                command=common+['--output-dir',str(attempt/'train/result'),'--execute','--updates',str(stage['end_update']),'--preflight-report',str(proof)]
-                if not cache:command+=['--asset-cache',str(attempt/'preflight/result')]
+                if cache:
+                    common+=['--asset-cache',str(Path(cache).resolve())]
+                else:
+                    # Reuse only exact native hashes from prior groups in this
+                    # experiment. New designs convert normally on first use.
+                    common+=['--asset-cache',str(root/'attempts'),'--allow-cache-misses']
+                print(f'GROUP {index+1}: {len(stage["design_ids"])} designs; '
+                      f'global updates {stage["first_update"]}..{stage["end_update"]-1}; '
+                      f'target={target}; resume={previous["checkpoint"] if previous else "fresh initial policy"}',flush=True)
+                command=common+['--output-dir',str(attempt/'train/result'),'--execute','--updates',str(stage['end_update'])]
                 if previous:command+=['--resume-checkpoint',previous['checkpoint']]
                 run_child(command,attempt/'train',env)
                 summary_path=attempt/'train/result/summary.json';summary=json.loads(summary_path.read_text())

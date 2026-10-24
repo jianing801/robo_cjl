@@ -177,6 +177,7 @@ def test_controller_stage_commit_failure_and_resume(tmp_path,monkeypatch):
     monkeypatch.setattr(gpu,'reject_duplicate_bank',lambda *a,**kw:None)
     calls=[];fail=[True]
     def child(command,folder,env):
+        assert '--preflight-only' not in command and '--preflight-report' not in command
         index=int(command[command.index('--stage-index')+1]);mode='preflight' if '--preflight-only' in command else 'train'
         calls.append((index,mode))
         if index==1 and mode=='train' and fail[0]:
@@ -207,6 +208,8 @@ def test_controller_stage_commit_failure_and_resume(tmp_path,monkeypatch):
     module.main(args+['--resume','--execute'])
     assert json.loads((root/'completed.json').read_text())['completed_updates']==5
     assert len(list((root/'commits').glob('stage_*.json')))==3
+    assert calls==[(0,'train'),(1,'train'),(1,'train'),(2,'train')]
+    assert json.loads((root/'plan.json').read_text())['preflight_updates_per_new_layout']==0
     saved=list(calls);module.main(args+['--resume','--execute']);assert calls==saved
     (root/'USER_PAUSED').touch()
     with pytest.raises(RuntimeError,match='USER_PAUSED'):module.main(args+['--resume','--execute'])
@@ -214,6 +217,38 @@ def test_controller_stage_commit_failure_and_resume(tmp_path,monkeypatch):
 def test_template_cannot_implicitly_start_a_training():
     c=json.loads((HERE/'config.template.json').read_text())
     with pytest.raises(ValueError):validate_config(c,bank())
+
+
+def test_child_logs_each_update_to_terminal_and_file(tmp_path,capsys):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('hybrid_tee_test',HERE/'train.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    folder=tmp_path/'attempts'/'stage_0'/'train'
+    folder.parent.mkdir(parents=True)
+    module.run_child([sys.executable,'-u','-c',
+                      "print('Learning iteration 0/12000',flush=True); print('Learning iteration 1/12000',flush=True)"],
+                     folder, __import__('os').environ)
+    output=capsys.readouterr().out
+    assert 'Learning iteration 0/12000' in output and 'Learning iteration 1/12000' in output
+    assert (folder/'stdout.log').read_text().count('Learning iteration')==2
+    assert json.loads((folder/'exit.json').read_text())['returncode']==0
+
+
+def test_native_logger_global_target_without_training_changes():
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('hybrid_logging_test',HERE/'train_stage.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    calls=[];runner=SimpleNamespace(logger=SimpleNamespace(log=lambda **v:calls.append(v)))
+    module.attach_global_logger(runner,12000)
+    for it in (0,49,50,949):
+        runner.logger.log(it=it,total_it=it+1,learning_rate=1e-4,loss_dict={'value':1.})
+    assert [v['it'] for v in calls]==[0,49,50,949]
+    assert all(v['total_it']==12000 and v['learning_rate']==1e-4 for v in calls)
+
+
+def test_worker_has_no_preflight_execution_path():
+    source=(HERE/'train_stage.py').read_text()
+    assert '--preflight-only' not in source and '--preflight-report' not in source
 
 def test_exact_900_group_uniformity_over_eight_cycles():
     from collections import Counter

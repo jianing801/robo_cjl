@@ -90,7 +90,9 @@ def configure_spatial(options, bank, designs, output, configurator=None):
             import shutil
             key = AssetConverterBase._config_to_hash(robot.spawn)
             if key not in cache:
-                raise ValueError(f"no exact converter-hash cache for {d['id']}; do not substitute another design")
+                if not getattr(options, 'allow_cache_misses', False):
+                    raise ValueError(f"no exact converter-hash cache for {d['id']}; do not substitute another design")
+        if cache and key in cache:
             # USD layers are immutable on an exact native hash cache hit.
             # Link only those layers on the same volume; configuration/hash
             # metadata stays private because the native converter may rewrite it.
