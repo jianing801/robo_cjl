@@ -226,12 +226,36 @@ def test_child_logs_each_update_to_terminal_and_file(tmp_path,capsys):
     folder=tmp_path/'attempts'/'stage_0'/'train'
     folder.parent.mkdir(parents=True)
     module.run_child([sys.executable,'-u','-c',
-                      "print('Learning iteration 0/12000',flush=True); print('Learning iteration 1/12000',flush=True)"],
+                      f"from pathlib import Path; p=Path({str(folder / 'result')!r}); p.mkdir(); (p/'summary.json').write_text('{{}}'); print('Learning iteration 0/12000',flush=True); print('Learning iteration 1/12000',flush=True)"],
                      folder, __import__('os').environ)
     output=capsys.readouterr().out
     assert 'Learning iteration 0/12000' in output and 'Learning iteration 1/12000' in output
     assert (folder/'stdout.log').read_text().count('Learning iteration')==2
     assert json.loads((folder/'exit.json').read_text())['returncode']==0
+
+
+def test_zero_exit_with_failure_or_missing_summary_is_rejected(tmp_path):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('hybrid_exit_test',HERE/'train.py')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    for failure in (False, True):
+        folder=tmp_path/str(failure)
+        script="print('worker exiting zero')"
+        if failure:
+            script=f"from pathlib import Path; p=Path({str(folder/'result')!r}); p.mkdir(); (p/'failure.json').write_text('CUDA out of memory'); (p/'summary.json').write_text('{{}}')"
+        with pytest.raises(RuntimeError,match='recorded failure|without required summary'):
+            module.run_child([sys.executable,'-c',script],folder,__import__('os').environ)
+        exit_record=json.loads((folder/'exit.json').read_text())
+        assert exit_record['returncode']==1 and exit_record['raw_returncode']==0
+
+
+def test_persistent_observation_contract_uses_tensordict_keys():
+    from tensordict import TensorDict
+    obs=TensorDict({'policy':torch.zeros(8,12),'critic':torch.zeros(8,20)},batch_size=[8])
+    storage=TensorDict({'policy':torch.zeros(24,8,12),'critic':torch.zeros(24,8,20)},batch_size=[24,8])
+    assert all(obs[k].shape==storage[k].shape[1:] for k in obs.keys())
+    text=(HERE/'train_stage.py').read_text()
+    assert 'for k in obs.keys()' in text and 'RayCaster.meshes.clear()' in text
 
 
 def test_native_logger_global_target_without_training_changes():

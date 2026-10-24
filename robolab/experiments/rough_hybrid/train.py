@@ -64,8 +64,18 @@ def run_child(command,folder,env):
                 try:remaining.kill()
                 except psutil.NoSuchProcess:pass
             raise
-    write_new(folder/'exit.json',dict(returncode=code,wall_seconds=time.monotonic()-started))
+    # Kit shutdown can mask a Python exception with exit code zero.
+    failure=folder/'result/failure.json'
+    summary_exists=(folder/'result/summary.json').is_file()
+    effective_code=code if code else (1 if failure.exists() or not summary_exists else 0)
+    write_new(folder/'exit.json',dict(returncode=effective_code,raw_returncode=code,
+              failure_recorded=failure.exists(),summary_exists=summary_exists,
+              wall_seconds=time.monotonic()-started))
+    if failure.exists():
+        raise RuntimeError(f'worker recorded failure despite returncode={code}: {failure}\n{failure.read_text(encoding="utf8")}')
     if code:raise RuntimeError(f'worker exited {code}; inspect {folder}; no next stage started')
+    if not summary_exists:
+        raise RuntimeError(f'worker exited {code} without required summary; inspect {folder / "stderr.log"}; no stage committed')
 
 def committed(root,plan,bank):
     commits=sorted((root/'commits').glob('stage_*.json'))

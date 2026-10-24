@@ -21,7 +21,7 @@ def attach_global_logger(runner, target):
     runner.logger.log = log_global_update
 
 
-def main():
+def main(argv=None, session=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bank", required=True)
     p.add_argument("--output-dir", required=True)
@@ -40,7 +40,7 @@ def main():
     if any(flag in sys.argv for flag in ("--smoke-only", "--execute")):
         from isaaclab.app import AppLauncher
         AppLauncher.add_app_launcher_args(p)
-    a = p.parse_args()
+    a = p.parse_args(argv)
     from hybrid_support import write_new, source_identity
     from robolab.rough_geometry import file_sha
     from hybrid_layout import make_layout, identity
@@ -85,7 +85,10 @@ def main():
     reject_duplicate_bank(bank_path)
     a.task = task
     a.kit_args = (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
-    app = AppLauncher(a).app
+    app = session.get('app') if session is not None else None
+    if app is None:
+        app = AppLauncher(a).app
+        if session is not None: session['app'] = app
     env = raw = None
     try:
         import torch
@@ -98,6 +101,20 @@ def main():
         torch.set_num_threads(2)
         env_type, runner_type, configurator = SpatialRoughEnv, SpatialRunner, None
         cfg, source, contract = configure_spatial(a, bank, designs, output, configurator=configurator)
+        if session is not None:
+            def check_cycles(obj, path='', ancestors=None):
+                ancestors = {} if ancestors is None else ancestors
+                if type(obj).__name__ == 'MeshConverterCfg': return
+                if isinstance(obj, (list, tuple)): fields = enumerate(obj)
+                elif isinstance(obj, dict): fields = obj.items()
+                elif hasattr(obj, '__dict__'): fields = vars(obj).items()
+                else: return
+                if id(obj) in ancestors:
+                    raise ValueError(f'configuration reference cycle: {path} -> {ancestors[id(obj)]}')
+                chain = dict(ancestors); chain[id(obj)] = path
+                for key, value in fields:
+                    if not str(key).startswith('__'): check_cycles(value, f'{path}.{key}', chain)
+            check_cycles(cfg)
         raw = env_type.__new__(env_type)
         env_type.__init__(raw, cfg)
         scene_stage = omni.usd.get_context().get_stage()
@@ -144,15 +161,36 @@ def main():
             agent["algorithm"]["symmetry_cfg"]["data_augmentation_func"] = "hybrid_policy:spatial_design_symmetry"
         agent["policy"]["native_config"]["spatial_identity"] = identity(experiment)
         agent.update(device=cfg.sim.device, logger="tensorboard")
-        runner = runner_type(env, agent, log_dir=str(output / "models"), device=cfg.sim.device)
+        continuing = session is not None and session.get('runner') is not None
+        if continuing:
+            runner = session['runner']
+            if runner.current_learning_iteration != stage['first_update']:
+                raise ValueError('persistent runner iteration differs from next group')
+            obs = env.get_observations()
+            if any(obs[k].shape != runner.alg.storage.observations[k].shape[1:]
+                   for k in obs.keys()):
+                raise ValueError('persistent group changed storage observation shapes')
+            runner.env = env
+            runner.alg.storage.clear()
+            runner.alg.storage.spatial_groups = raw.spatial_groups
+            if runner.alg.symmetry:
+                runner.alg.symmetry['_env'] = env
+            # Logging from different physical episodes must not be combined.
+            runner.logger.cur_reward_sum.zero_()
+            runner.logger.cur_episode_length.zero_()
+            runner.logger.ep_extras.clear()
+        else:
+            runner = runner_type(env, agent, log_dir=str(output / "models"), device=cfg.sim.device)
+            if session is not None: session['runner'] = runner
         runner.hybrid_identity = experiment
         runner.hybrid_stage = stage
         # Keep the native per-update metrics, but display the absolute target
         # instead of misleadingly showing only this group's end boundary.
-        attach_global_logger(runner, frozen["configuration"]["rotation"]["total_updates"])
+        if not continuing:
+            attach_global_logger(runner, frozen["configuration"]["rotation"]["total_updates"])
         if a.execute and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
             raise ValueError("exact previous completed-stage checkpoint required; no scratch restart")
-        if a.resume_checkpoint:
+        if a.resume_checkpoint and not continuing:
             runner.restore_spatial(a.resume_checkpoint)
             saved=torch.load(a.resume_checkpoint,map_location=raw.device,weights_only=False)
             def same(left,right):
@@ -207,11 +245,34 @@ def main():
         traceback.print_exc()
         raise
     finally:
+        # SimulationApp.close may terminate the interpreter with status zero.
+        # Flush the authoritative traceback first and force a failing status,
+        # even when Kit exits during cleanup.
+        failed = sys.exc_info()[0] is not None
+        if failed:
+            import atexit
+            atexit.register(lambda: os._exit(1))
         if env is not None:
             env.close()
-        elif raw is not None:
+        elif raw is not None and hasattr(raw, '_is_closed'):
             raw.close()
-        app.close()
+        if session is None:
+            app.close()
+        else:
+            if session.get('runner') is not None:
+                session['runner'].env = None
+                if session['runner'].alg.symmetry:
+                    session['runner'].alg.symmetry['_env'] = None
+            # Keep Kit, policy, Adam and rollout allocations; remove old USD
+            # physics objects before the next real morphology group is built.
+            import omni.usd
+            from isaaclab.sensors import RayCaster
+            # RayCaster.meshes is a class-level Warp mesh cache. It references
+            # the old terrain/device runtime and is traversed by cfg.validate.
+            # New terrain MUST rebuild it; otherwise the next scene can also
+            # raycast the previous group's terrain.
+            RayCaster.meshes.clear()
+            omni.usd.get_context().new_stage()
 
 
 if __name__ == "__main__":

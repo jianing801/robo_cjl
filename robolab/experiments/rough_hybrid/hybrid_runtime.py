@@ -143,7 +143,13 @@ def configure_rough(options, bank, design, output):
     """Source RPO-Rough only; no task router, AMP configuration or old bank."""
     from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
     from hybrid_support import RECIPE, serializable, digest
-    cfg = load_cfg_from_registry("RPO-Rough", "env_cfg_entry_point")
+    # Manager initialization may replace cfg term classes with live instances
+    # referencing the environment. Never reuse that mutated configuration when
+    # rebuilding within the same interpreter.
+    global _pristine_rough_cfg
+    if '_pristine_rough_cfg' not in globals():
+        _pristine_rough_cfg = deepcopy(load_cfg_from_registry("RPO-Rough", "env_cfg_entry_point"))
+    cfg = deepcopy(_pristine_rough_cfg)
     # Preserve the validated copy's target without editing the original task.
     # base_link is fixed/merged; torso is the remaining base-mass target.
     cfg.events.add_base_mass.params["asset_cfg"].body_names = ["torso_link"]
