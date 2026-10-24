@@ -102,6 +102,14 @@ def load_plan(path,bank_path):
     bank=load_configurable_bank(bank_path)
     validate_config(plan['configuration'],bank)
     if plan['experiment']!=experiment_identity(bank_path,plan['configuration']):raise ValueError('bank/config/source identity changed')
+    if plan.get('start_stage',0):
+        root=Path(path).resolve().parent
+        if plan.get('execution_protocol')!='persistent_v1' or type(plan['start_stage']) is not int or plan['start_stage']<1:
+            raise ValueError('invalid upgrade start stage')
+        if sha(plan['bootstrap_checkpoint'])!=plan['bootstrap_sha256'] or sha(root/'upgrade_audit.json')!=plan['upgrade_audit_sha256']:
+            raise ValueError('upgrade bootstrap/audit identity changed')
+        validate_checkpoint(plan['bootstrap_checkpoint'],plan['experiment'],
+                            stage_spec(bank,plan['configuration'],plan['start_stage'])['first_update'])
     return plan
 
 def validate_checkpoint(path,experiment,expected_completed):

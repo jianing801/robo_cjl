@@ -79,7 +79,8 @@ def run_child(command,folder,env):
 
 def committed(root,plan,bank):
     commits=sorted((root/'commits').glob('stage_*.json'))
-    for index,path in enumerate(commits):
+    for index,path in enumerate(commits,start=plan.get('start_stage',0)):
+        if path.name != f'stage_{index:06d}.json':raise ValueError('noncontiguous commit filenames')
         value=json.loads(path.read_text())
         spec=stage_spec(bank,plan['configuration'],index)
         if value['stage']!=spec:raise ValueError('committed schedule changed')
@@ -101,6 +102,7 @@ def main(argv=None):
     p.add_argument('--gpu-min-free-gb',type=float,default=12.)
     p.add_argument('--gpu-max-utilization',type=int,default=30)
     p.add_argument('--asset-cache')
+    p.add_argument('--execution-mode',choices=['persistent','per-group'],default='persistent')
     a=p.parse_args(argv)
     config=json.loads(Path(a.config).read_text(encoding='utf8'))
     bank_path=Path(a.bank).resolve();bank=load_configurable_bank(bank_path)
@@ -112,7 +114,7 @@ def main(argv=None):
     else:
         root.mkdir(parents=True,exist_ok=False)
         plan=dict(configuration=config,experiment=experiment_identity(bank_path,config),bank=str(bank_path),
-            preflight_updates_per_new_layout=0,execution_protocol='direct_stage_v2',total_updates_are_absolute=True)
+            preflight_updates_per_new_layout=0,execution_protocol=('persistent_v1' if a.execution_mode=='persistent' else 'direct_stage_v2'),total_updates_are_absolute=True)
         write_new(root/'plan.json',plan)
         (root/'commits').mkdir();(root/'attempts').mkdir()
     if not a.execute:
@@ -121,14 +123,14 @@ def main(argv=None):
     with controller_lock(root):
         if (root/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED present; no automatic restart')
         commits=committed(root,plan,bank)
-        target=config['rotation']['total_updates'];index=len(commits)
+        target=config['rotation']['total_updates'];index=plan.get('start_stage',0)+len(commits)
         if commits and json.loads(commits[-1].read_text())['stage']['end_update']==target:
             last=json.loads(commits[-1].read_text())
             validate_checkpoint(last['checkpoint'],plan['experiment'],target)
             if not (root/'completed.json').exists():
                 write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
             print('TRAINING_ALREADY_COMPLETE_NOT_GAIT_VALIDATED');return
-        if not commits and any((root/'attempts').glob('*/train/launch.json')):
+        if not commits and not plan.get('bootstrap_checkpoint') and any((root/'attempts').glob('*/train/launch.json')):
             raise RuntimeError('initial stage interrupted with no committed checkpoint; inspect manually, no implicit scratch restart')
         from robolab.rough_gpu import query_gpus,candidates,gpu_lease,child_environment
         from hybrid_processes import reject_duplicate_bank_safely as reject_duplicate_bank
@@ -137,11 +139,25 @@ def main(argv=None):
         import psutil
         for proc in psutil.process_iter(['cmdline']):
             args=proc.info['cmdline'] or []
-            if any(Path(x).name=='train_stage.py' for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')
+            if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')
         choices=candidates(query_gpus(),os.environ,min_free_mib=a.gpu_min_free_gb*1024,max_utilization=a.gpu_max_utilization,requested=a.device)
         with gpu_lease(choices,ROOT/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
             env=child_environment(gpu,os.environ)
             kit=a.kit_args+f" --/renderer/activeGpu={gpu['index']} --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0"
+            if plan.get('execution_protocol')=='persistent_v1':
+                attempt=root/'attempts'/f'session_{datetime.now():%Y%m%d_%H%M%S_%f}'
+                attempt.mkdir()
+                command=[a.python,'-u',str(HERE/'persistent_worker.py'),'--bank',str(bank_path),
+                         '--root',str(root),'--result',str(attempt/'train/result'),'--kit-args',kit]
+                if a.asset_cache:command+=['--asset-cache',str(Path(a.asset_cache).resolve())]
+                run_child(command,attempt/'train',env)
+                rows=committed(root,plan,bank)
+                if not rows or json.loads(rows[-1].read_text())['stage']['end_update']!=target:
+                    raise ValueError('persistent worker did not commit exact absolute target')
+                last=json.loads(rows[-1].read_text())
+                validate_checkpoint(last['checkpoint'],plan['experiment'],target)
+                write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
+                return
             previous=json.loads(commits[-1].read_text()) if commits else None
             while index*config['rotation']['updates_per_stage']<target:
                 if (root/'USER_PAUSED').exists():raise RuntimeError('paused before next stage')

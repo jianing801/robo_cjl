@@ -198,7 +198,7 @@ def test_controller_stage_commit_failure_and_resume(tmp_path,monkeypatch):
             summary=dict(result='HYBRID_STAGE_COMPLETE_NOT_GAIT_VALIDATED',completed_updates=stage['end_update'])
         (out/'summary.json').write_text(json.dumps(summary))
     monkeypatch.setattr(module,'run_child',child)
-    args=['--config',str(config_path),'--bank',str(bank_path),'--output-root',str(root)]
+    args=['--config',str(config_path),'--bank',str(bank_path),'--output-root',str(root),'--execution-mode','per-group']
     module.main(args) # planning does not invoke a worker
     assert calls==[]
     with pytest.raises(RuntimeError,match='injected'):module.main(args+['--resume','--execute'])

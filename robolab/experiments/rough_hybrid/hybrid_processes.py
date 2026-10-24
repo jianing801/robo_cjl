@@ -13,7 +13,9 @@ def bank_process_snapshots():
         try:
             process = psutil.Process(pid)
             command = process.cmdline()
-            if not any(Path(x).name == 'train_spatial_rough.py' for x in command):
+            if not any(Path(x).name == 'train_spatial_rough.py' or
+                       ('rough_hybrid' in x.replace('\\','/') and Path(x).name in
+                        ('train.py','train_stage.py','persistent_worker.py','probe_persistent.py')) for x in command):
                 continue
             banks = [token.split('=', 1)[1] if token.startswith('--bank=') else command[i+1]
                      for i, token in enumerate(command)
@@ -39,4 +41,17 @@ def bank_process_snapshots():
 
 def reject_duplicate_bank_safely(bank):
     from robolab.rough_gpu import reject_duplicate_bank
-    reject_duplicate_bank(bank, processes=bank_process_snapshots())
+    import psutil
+    own={psutil.Process().pid,*[p.pid for p in psutil.Process().parents()]}
+    snapshots=list(bank_process_snapshots())
+    reject_duplicate_bank(bank, processes=snapshots)
+    target=Path(bank).resolve()
+    for process in snapshots:
+        if process.pid in own:continue
+        command=process.info['cmdline']
+        for i,token in enumerate(command):
+            value=token.split('=',1)[1] if token.startswith('--bank=') else command[i+1] if token=='--bank' and i+1<len(command) else None
+            if value is None:continue
+            path=Path(value)
+            if not path.is_absolute():path=Path(process.info['cwd'])/path
+            if path.resolve()==target:raise RuntimeError(f'same hybrid Rough bank active in PID {process.pid}; no duplicate launch')

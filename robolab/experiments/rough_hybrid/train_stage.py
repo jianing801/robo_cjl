@@ -21,6 +21,18 @@ def attach_global_logger(runner, target):
     runner.logger.log = log_global_update
 
 
+def capture_learning_rng(session):
+    import torch
+    if session is not None:
+        session['learning_rng']=(torch.get_rng_state(),torch.cuda.get_rng_state_all())
+
+
+def restore_learning_rng(session):
+    import torch
+    cpu,cuda=session['learning_rng']
+    torch.set_rng_state(cpu);torch.cuda.set_rng_state_all(cuda)
+
+
 def main(argv=None, session=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bank", required=True)
@@ -204,6 +216,10 @@ def main(argv=None, session=None):
             write_new(output/'restore_audit.json',dict(checkpoint=str(a.resume_checkpoint),next_update=runner.current_learning_iteration,
                 policy_and_normalization_exact=policy_equal,adam_exact=optimizer_equal,learning_rate=runner.alg.learning_rate))
         remaining = 0 if a.smoke_only else a.updates - runner.current_learning_iteration
+        if continuing:
+            # Rebuilding the environment seeds and consumes Torch RNG. Restore
+            # the learning stream after scene creation, as checkpoint resume did.
+            restore_learning_rng(session)
         if not a.smoke_only and remaining <= 0:
             raise ValueError("absolute update target already reached; do not add another budget")
         write_new(output / "manifest.json", dict(**experiment, actual_design_ids=actual_ids,
@@ -222,6 +238,7 @@ def main(argv=None, session=None):
                 raise RuntimeError("zero-update smoke changed optimizer")
         else:
             runner.learn(remaining)
+        capture_learning_rng(session)
         audit = {}
         for name in ("knees", "feet"):
             actuator = raw.robot.actuators[name]

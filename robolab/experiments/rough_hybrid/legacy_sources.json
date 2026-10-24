@@ -1,0 +1,26 @@
+{
+  "b313646_lf": {
+    "hybrid_bank.py": "889faf789b490c9a6b5d28cdeb8a620e2688b3f8786ec6b2d0893ae4988c635b",
+    "hybrid_contract.py": "fd5a785757483b98f5940ea04570995e2066d50ea638677fe73866d81eb8b416",
+    "hybrid_layout.py": "645712bf028a07c7002e47bf2b95c9711d57e4b984654d6529c4a937ab737a0b",
+    "hybrid_policy.py": "50d14fb1b692ea0a4538479939db55fbb8a17c46d090e3a48f881d636ae1c53f",
+    "hybrid_processes.py": "d92485161914006dc80c0faae2bd0b69a3d25e78f54a69cf5028a4f8029a0dd5",
+    "hybrid_runtime.py": "58b6b84996ba041ef6497adc89037d26aad393a31dd99b9f1684451828cd1238",
+    "hybrid_support.py": "8fa99e76018dc447793d034303522a07b8240c75c39afa66b1f5fe72f4d49316",
+    "prepare_bank.py": "ca5edd40372803235d85e8e5eb3791974eb1461d17cc0e8ff8b6b7f2e4443a45",
+    "train.py": "9afde111ef9a53c06426b548b562a7feaac31bb2cd9b483b98d762ca121e95d8",
+    "train_stage.py": "f2ac28da0809894c5ad347dca3364e5c196ca4a226a8b6d08ebcc782f32d9665"
+  },
+  "b313646_crlf": {
+    "hybrid_bank.py": "3609e3ebc6dc9bc4264fc4cbff431f1787389f24b2e37284c0fd4291e6828ad3",
+    "hybrid_contract.py": "7af67075da1cfa781d6695b51299e4f42b7c7587df2380c5340453e31d31c06c",
+    "hybrid_layout.py": "77a11b60ad2010993b2939a9711ecc8e87b691f8be707aaa01cd27a24d1999eb",
+    "hybrid_policy.py": "0d5a4051a05b3de94e9ed05dc5e4b545bf5aaec5e4402c751fbf0fd1e497a6f4",
+    "hybrid_processes.py": "30b647f07dd2d32c99f7fe186bba7ec100f6c0a8f011534475889e2e37416ced",
+    "hybrid_runtime.py": "120cc6669173d91d5ad636b80f287f12a2b9998ccdef27ec78ea3cba7c23d795",
+    "hybrid_support.py": "ce2f480ae638cedd7e302ca5a327c4c973ca90a5a7ae09b22568d4ba33e7c63a",
+    "prepare_bank.py": "6b7b5c93506a725aa76b00b371b0874779be7e89284b301bf99ea0eb840353ad",
+    "train.py": "ccd068a8f6a40cbb6518eb2c244065116518398d66d80370e0c257e4571794bf",
+    "train_stage.py": "aaa635b6d411b583e2cbfd177e9ac594e68dd60947d02c7a6913229a8b00c0ef"
+  }
+}
