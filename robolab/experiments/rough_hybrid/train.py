@@ -120,7 +120,8 @@ def main(argv=None):
             print('TRAINING_ALREADY_COMPLETE_NOT_GAIT_VALIDATED');return
         if not commits and any((root/'attempts').glob('*/train/launch.json')):
             raise RuntimeError('initial stage interrupted with no committed checkpoint; inspect manually, no implicit scratch restart')
-        from robolab.rough_gpu import query_gpus,candidates,gpu_lease,child_environment,reject_duplicate_bank
+        from robolab.rough_gpu import query_gpus,candidates,gpu_lease,child_environment
+        from hybrid_processes import reject_duplicate_bank_safely as reject_duplicate_bank
         reject_duplicate_bank(bank_path)
         # This isolated controller additionally rejects orphan workers from this new entry.
         import psutil

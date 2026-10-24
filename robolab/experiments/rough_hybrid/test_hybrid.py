@@ -250,6 +250,50 @@ def test_worker_has_no_preflight_execution_path():
     source=(HERE/'train_stage.py').read_text()
     assert '--preflight-only' not in source and '--preflight-report' not in source
 
+
+def test_process_exit_race_and_unrelated_cwd_not_read(tmp_path,monkeypatch):
+    import psutil
+    from hybrid_processes import bank_process_snapshots
+    bank=tmp_path/'bank.json'
+    def missing():raise FileNotFoundError('/proc/282642/cwd')
+    def never():raise AssertionError('unrelated cwd must never be queried')
+    rows={
+        1:SimpleNamespace(cmdline=lambda:['python','other.py'],cwd=never),
+        2:SimpleNamespace(cmdline=lambda:['python','train_spatial_rough.py','--bank','bank.json'],
+                          cwd=missing,is_running=lambda:False),
+        3:SimpleNamespace(cmdline=lambda:['python','train_spatial_rough.py','--bank',str(bank)],cwd=never),
+        4:SimpleNamespace(cmdline=lambda:['python','train_spatial_rough.py','--bank=bank.json'],cwd=lambda:str(tmp_path))}
+    monkeypatch.setattr(psutil,'pids',lambda:list(rows))
+    monkeypatch.setattr(psutil,'Process',lambda pid:rows[pid])
+    snapshots=list(bank_process_snapshots())
+    assert [p.pid for p in snapshots]==[3,4]
+    from robolab.rough_gpu import reject_duplicate_bank
+    with pytest.raises(RuntimeError,match='same Rough bank'):
+        reject_duplicate_bank(bank,processes=snapshots,own_tree=set())
+
+
+def test_disappearing_process_constructor_does_not_abort_scan(monkeypatch):
+    import psutil
+    from hybrid_processes import bank_process_snapshots
+    monkeypatch.setattr(psutil,'pids',lambda:[1,2])
+    def process(pid):
+        if pid==1:raise psutil.NoSuchProcess(pid)
+        return SimpleNamespace(cmdline=lambda:['python','other.py'])
+    monkeypatch.setattr(psutil,'Process',process)
+    assert list(bank_process_snapshots())==[]
+
+
+def test_live_relative_bank_cwd_unavailable_fails_closed(monkeypatch):
+    import psutil
+    from hybrid_processes import bank_process_snapshots
+    def missing():raise FileNotFoundError('/proc/42/cwd')
+    monkeypatch.setattr(psutil,'pids',lambda:[42])
+    monkeypatch.setattr(psutil,'Process',lambda pid:SimpleNamespace(
+        cmdline=lambda:['python','train_spatial_rough.py','--bank','bank.json'],
+        cwd=missing,is_running=lambda:True))
+    with pytest.raises(RuntimeError,match='Active Rough PID 42'):
+        list(bank_process_snapshots())
+
 def test_exact_900_group_uniformity_over_eight_cycles():
     from collections import Counter
     b=bank(1);b['configuration']={'num_envs':4096}

@@ -81,7 +81,7 @@ def main():
     if not a.smoke_only and not a.execute:
         print(json.dumps({k: v for k, v in layout.items() if k != "env_design_index"}, indent=2))
         return
-    from robolab.rough_gpu import reject_duplicate_bank
+    from hybrid_processes import reject_duplicate_bank_safely as reject_duplicate_bank
     reject_duplicate_bank(bank_path)
     a.task = task
     a.kit_args = (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable"

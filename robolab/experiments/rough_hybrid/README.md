@@ -57,6 +57,8 @@ python robolab/experiments/rough_hybrid/train.py \
 
 ## 暂停、恢复与输出
 
+共享服务器进程检查使用独立hybrid_processes：不通过process_iter预读所有进程的cwd；仅在匹配Rough命令且bank为相对路径时读取。进程退出竞争安全跳过，仍活跃但无法解析相对bank的进程则报告并停手。无须sudo，不杀其他用户进程。原rough_gpu及原空间Rough入口保持不变。
+
 - Ctrl+C中断controller，停止同链worker并创建本实验 `USER_PAUSED`。确认恢复前由用户移除该标记；不操作背包的暂停标记。
 - 只从最后完整提交阶段恢复，中断阶段最多重做50次；初始阶段无完整提交时拒绝隐式从头重跑。不选较大块内模型跳过调度。
 - `plan.json` 冻结配置、bank和代码身份；修改后拒绝原链恢复。用户已明确要求新版从头训练：使用全新实验目录，不带resume或旧模型，不升级旧的950代训练链；历史结果保留。新版自身未来中断后可按本节规则resume。
