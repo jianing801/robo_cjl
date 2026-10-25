@@ -8,12 +8,16 @@
     "ankle_motor_count": 3,
     "motor_seed": 42,
     "knee_pool": ["DM-J10010L-2EC", "RS04", "DM-J10010-2EC"],
-    "ankle_pool": ["DM-J4340P-2EC", "DM-J4310P-2EC-48V", "RS06"]
+    "ankle_pool": ["DM-J4340P-2EC", "DM-J6216P-2EC", "RS06"]
   },
   "rotation": {
     "active_designs": 30,
     "updates_per_stage": 50,
     "total_updates": 12000,
     "seed": 42
+  },
+  "torque_soft_constraint": {
+    "weight": -0.01,
+    "limit_ratio": 0.8
   }
 }

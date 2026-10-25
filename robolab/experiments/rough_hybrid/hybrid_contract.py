@@ -21,7 +21,10 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if set(config)!={'grid','rotation'}:raise ValueError('expected grid and rotation configuration')
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint'}:
+        raise ValueError('expected grid, rotation and optional torque_soft_constraint')
+    from hybrid_torque import validate_settings
+    validate_settings(config.get('torque_soft_constraint'))
     g,r=config['grid'],config['rotation']
     if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
     e=positive(g['num_envs'],'grid.num_envs')

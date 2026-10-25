@@ -189,6 +189,8 @@ def configure_rough(options, bank, design, output):
         context_width=len(design["context"]), context_is_known_design_not_sensor=True,
         stairs_height_range_m=[.05, .10], resolved_terrain=after["scene"]["terrain"],
         display_only_overrides=["remote terrain MDL and sky HDR removed", "command/raycaster debug disabled"])
+    from hybrid_torque import install_constraint
+    contract['torque_soft_constraint'] = install_constraint(cfg, getattr(options, 'torque_soft_constraint', None))
     return cfg, source_agent, contract
 
 
@@ -233,6 +235,10 @@ class SpatialVecEnv(RslRlVecEnvWrapper):
             ids = self.unwrapped.spatial_groups == i
             extras["log"][f"Spatial/{name}/reward"] = rewards[ids].mean()
             extras["log"][f"Spatial/{name}/forward_velocity"] = self.unwrapped.robot.data.root_lin_vel_b[ids, 0].mean()
+            # Episode-average reward overweights designs which reset often.
+            # Expose the actual per-step termination frequency for each design.
+            extras["log"][f"Spatial/{name}/termination_fraction"] = self.unwrapped.reset_terminated[ids].float().mean()
+            extras["log"][f"Spatial/{name}/reset_fraction"] = dones[ids].float().mean()
         return self._extend(obs), rewards, dones, extras
 
 

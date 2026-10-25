@@ -21,6 +21,17 @@ def attach_global_logger(runner, target):
     runner.logger.log = log_global_update
 
 
+def reset_group_logger(logger):
+    """A new physical group has no completed episodes from the previous group."""
+    import torch
+    with torch.inference_mode():
+        logger.cur_reward_sum.zero_()
+        logger.cur_episode_length.zero_()
+    logger.ep_extras.clear()
+    logger.rewbuffer.clear()
+    logger.lenbuffer.clear()
+
+
 def capture_learning_rng(session):
     import torch
     if session is not None:
@@ -66,6 +77,7 @@ def main(argv=None, session=None):
         raise ValueError("this independent copy supports Rough only")
     from hybrid_contract import load_plan, stage_spec
     frozen = load_plan(a.hybrid_plan, bank_path)
+    a.torque_soft_constraint = frozen['configuration'].get('torque_soft_constraint')
     stage = stage_spec(bank, frozen["configuration"], a.stage_index)
     if a.design_ids is not None and a.design_ids != stage["design_ids"]:
         raise ValueError("CLI design IDs differ from frozen schedule")
@@ -188,9 +200,7 @@ def main(argv=None, session=None):
             if runner.alg.symmetry:
                 runner.alg.symmetry['_env'] = env
             # Logging from different physical episodes must not be combined.
-            runner.logger.cur_reward_sum.zero_()
-            runner.logger.cur_episode_length.zero_()
-            runner.logger.ep_extras.clear()
+            reset_group_logger(runner.logger)
         else:
             runner = runner_type(env, agent, log_dir=str(output / "models"), device=cfg.sim.device)
             if session is not None: session['runner'] = runner
