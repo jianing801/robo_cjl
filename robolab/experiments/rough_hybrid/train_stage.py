@@ -119,6 +119,8 @@ def main(argv=None, session=None):
         import isaaclab_tasks
         import robolab.tasks
         import omni.usd
+        from hybrid_importer import install_local_importer_adapter
+        write_new(output / 'importer_audit.json', install_local_importer_adapter())
         from hybrid_runtime import configure_spatial, SpatialRoughEnv, SpatialVecEnv, SpatialRunner
         from hybrid_support import extend_agent, serializable
         from rsl_rl.utils import resolve_callable
@@ -280,9 +282,11 @@ def main(argv=None, session=None):
             import atexit
             atexit.register(lambda: os._exit(1))
         if env is not None:
-            env.close()
+            from hybrid_importer import close_without_masking
+            close_without_masking(env, failed)
         elif raw is not None and hasattr(raw, '_is_closed'):
-            raw.close()
+            from hybrid_importer import close_without_masking
+            close_without_masking(raw, failed)
         if session is None:
             app.close()
         else:

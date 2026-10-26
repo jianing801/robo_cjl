@@ -47,6 +47,8 @@
 
 ## 启动步骤
 
+服务器若本地安装URDF导入扩展2.4.30、IsaacLab却主动请求2.4.31，独立入口采用受限本地导入适配，不修改安装版本或IsaacLab文件；每组保存importer_audit.json，详见[LOCAL_IMPORTER.md](LOCAL_IMPORTER.md)。未知原生构造函数不替换，已启用其他版本则拒绝切换。
+
 从仓库根执行，需要已安装原RPO依赖及本机机器人URDF/mesh资源。以下路径换成服务器真实路径；不可复制Windows绝对路径。物理GP/电机曲线取仓库冻结SW快照，不使用旧策略。
 
 先预览配置（CPU，不启动Isaac）：
