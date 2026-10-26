@@ -135,6 +135,7 @@ def configure_spatial(options, bank, designs, output, configurator=None):
     cfg.spatial_compensations = [d["root_height_compensation_m"] for d in designs]
     cfg.spatial_contexts = [d["context"] for d in designs]
     cfg.spatial_design_ids = [d["id"] for d in designs]
+    cfg.spatial_health_designs = [{k: d[k] for k in ('knee_motor', 'ankle_motor')} for d in designs]
     if hasattr(cfg, "spatial_reference_designs"):
         cfg.spatial_reference_designs = designs
     contract.update(spatial_real_assets=True, single_actual_URDF_per_block=False,
@@ -198,6 +199,14 @@ def configure_rough(options, bank, design, output):
 
 
 class SpatialRoughEnv(BaseEnv):
+    def _get_rewards(self):
+        rewards = super()._get_rewards()
+        # BaseEnv invokes this after dones and before _reset_idx: terminal
+        # velocity/torque/actions must not be replaced by reset-state values.
+        from hybrid_health import motor_health
+        self._motor_health_log = motor_health(self, rewards)
+        return rewards
+
     def _setup_scene(self):
         # InteractiveScene already creates each heterogeneous environment before
         # spawning its assets. BaseEnv's extra single-source clone would replace
@@ -234,6 +243,7 @@ class SpatialVecEnv(RslRlVecEnvWrapper):
         obs, rewards, dones, extras = super().step(actions)
         # Every design contributes exactly its live environment count each step.
         extras.setdefault("log", {})
+        extras['log'].update(getattr(self.unwrapped, '_motor_health_log', {}))
         for i, name in enumerate(self.unwrapped.cfg.spatial_design_ids):
             ids = self.unwrapped.spatial_groups == i
             extras["log"][f"Spatial/{name}/reward"] = rewards[ids].mean()
