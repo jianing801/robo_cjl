@@ -17,7 +17,7 @@
     "seed": 42
   },
   "torque_soft_constraint": {
-    "weight": -0.01,
+    "weight": -4.0,
     "limit_ratio": 0.8
   }
 }

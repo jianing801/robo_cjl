@@ -7,7 +7,7 @@ import sys
 from types import SimpleNamespace
 import pytest
 import torch
-from hybrid_torque import design_motor_torque_limits, install_constraint, squared_torque_excess, validate_settings
+from hybrid_torque import design_motor_torque_limits, install_constraint, squared_torque_excess, validate_settings, dynamic_torque_excess
 from hybrid_contract import validate_config, experiment_identity
 from test_hybrid import bank, config
 
@@ -20,6 +20,9 @@ def fake_env():
                                                      [9.,11.,8.,10.,12.,20.,999.]]))
     actuators=dict(knees=SimpleNamespace(joint_indices=[0,1],effort_limit=torch.tensor([[10.,10.],[20.,20.]])),
                    feet=SimpleNamespace(joint_indices=[2,3,4,5],effort_limit=torch.tensor([[10.]*4,[40.]*4])))
+    for motor in actuators.values():
+        motor.dynamic_effort_limit=motor.effort_limit.clone()
+        motor.computed_effort=torch.zeros_like(motor.effort_limit)
     return SimpleNamespace(robot=SimpleNamespace(data=data,actuators=actuators),num_envs=2,device='cpu')
 
 
@@ -50,7 +53,7 @@ def test_matches_actual_parkour_formula():
 def test_live_limits_are_per_environment_and_other_joints_ignored():
     env=fake_env()
     cost=design_motor_torque_limits(env)
-    assert torch.equal(cost,torch.tensor([174.,0.]))
+    assert torch.allclose(cost,torch.tensor([1.74,0.]))
     assert env._design_torque_soft_limits[1][0,0]==10
     assert env._design_torque_soft_limits[1][1,0]==20
     old=env._design_torque_soft_limits
@@ -60,7 +63,8 @@ def test_live_limits_are_per_environment_and_other_joints_ignored():
     # New physical group gets its own table; no old-group cache is reused.
     other=fake_env()
     other.robot.actuators['feet'].effort_limit.fill_(100)
-    assert torch.equal(design_motor_torque_limits(other),torch.tensor([10.,0.]))
+    other.robot.actuators['feet'].dynamic_effort_limit.fill_(100)
+    assert torch.allclose(design_motor_torque_limits(other),torch.tensor([.10,0.]))
 
 
 def test_native_reward_manager_applies_weight_and_dt_once():
@@ -74,9 +78,9 @@ def test_native_reward_manager_applies_weight_and_dt_once():
     term=SimpleNamespace(func=design_motor_torque_limits,weight=-.01,params={'limit_ratio':.8})
     manager=SimpleNamespace(_env=fake_env(),_reward_buf=torch.zeros(2),_term_names=['torque'],
         _term_cfgs=[term],_episode_sums={'torque':torch.zeros(2)},_step_reward=torch.zeros(2,1))
-    assert torch.allclose(scope['compute'](manager,.02),torch.tensor([-.0348,0.]))
+    assert torch.allclose(scope['compute'](manager,.02),torch.tensor([-.000348,0.]))
     assert torch.equal(manager._episode_sums['torque'],manager._reward_buf)
-    assert torch.allclose(manager._step_reward[:,0],torch.tensor([-1.74,0.]))
+    assert torch.allclose(manager._step_reward[:,0],torch.tensor([-.0174,0.]))
 
 
 @pytest.mark.parametrize('value',[{'weight':.1,'limit_ratio':.8},{'weight':-.01,'limit_ratio':0},
@@ -106,7 +110,7 @@ def test_installs_only_one_native_reward_term(monkeypatch):
 def test_new_pool_and_frozen_settings_identity(tmp_path):
     c=json.loads((HERE/'config.local900.json').read_text())
     assert c['grid']['ankle_pool']==['DM-J4340P-2EC','DM-J6216P-2EC','RS06']
-    assert c['torque_soft_constraint']==dict(weight=-.01,limit_ratio=.8)
+    assert c['torque_soft_constraint']==dict(weight=-4.,limit_ratio=.8)
     b=bank();base=config(b);validate_config(base,b)
     base['torque_soft_constraint']=c['torque_soft_constraint'];validate_config(base,b)
     bp=tmp_path/'bank.json';bp.write_text(json.dumps(b))
@@ -123,3 +127,38 @@ def test_persistent_no_preflight_and_unchanged_action_path():
     node=next(n for n in ast.parse((HERE/'hybrid_runtime.py').read_text()).body
               if isinstance(n,ast.ClassDef) and n.name=='SpatialRoughEnv')
     assert not any(isinstance(n,ast.FunctionDef) and n.name=='_pre_physics_step' for n in node.body)
+
+
+def test_dynamic_fairness_speed_zero_and_calibration():
+    peak=torch.tensor([[12.5,40.,45.,20.,20.,20.]])
+    available=torch.tensor([[12.5,40.,22.5,0.,1.e-9,20.]])
+    applied=available*.9
+    cost,u,missing=dynamic_torque_excess(applied,available,peak)
+    assert torch.allclose(cost,torch.tensor([.04]))
+    assert missing.tolist()==[[False,False,False,True,True,False]]
+    assert torch.isfinite(u).all()
+    low=dynamic_torque_excess(torch.tensor([[18.]]),torch.tensor([[40.]]),torch.tensor([[40.]]))[0]
+    high=dynamic_torque_excess(torch.tensor([[18.]]),torch.tensor([[20.]]),torch.tensor([[40.]]))[0]
+    assert low.item()==0 and torch.allclose(high,torch.tensor([.01]))
+    # New -4 weight equals old -0.01 at a 20 Nm available ceiling.
+    a=torch.tensor([[18.]])
+    old=-.01*squared_torque_excess(a,torch.tensor([[20.]]))
+    assert torch.allclose(old,-4*high)
+
+
+def test_real_clip_method_exports_exact_limit_and_updates_each_step():
+    from hybrid_layout import interpolate_validated_envelope
+    tree=ast.parse((HERE/'hybrid_runtime.py').read_text())
+    cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='SpatialMotor')
+    fn=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_clip_effort')
+    scope=dict(torch=torch,interpolate_validated_envelope=interpolate_validated_envelope)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[])),'runtime-clip','exec'),scope)
+    motor=SimpleNamespace(spatial_curves=[(torch.tensor([0,1]),torch.tensor([[0.,40.],[10.,0.]]))],
+        _joint_vel=torch.tensor([[0.,5.],[10.,2.5]]),effort_limit=torch.tensor([[30.,30.],[30.,30.]]))
+    request=torch.full((2,2),100.)
+    actual=scope['_clip_effort'](motor,request)
+    assert torch.equal(actual,torch.tensor([[30.,20.],[0.,30.]]))
+    assert torch.equal(actual,motor.dynamic_effort_limit)
+    motor._joint_vel.zero_()
+    assert torch.equal(scope['_clip_effort'](motor,-request),torch.full((2,2),-30.))
+    assert torch.equal(motor.dynamic_effort_limit,torch.full((2,2),30.))

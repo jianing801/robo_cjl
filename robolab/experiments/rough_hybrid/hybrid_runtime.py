@@ -61,8 +61,11 @@ class SpatialMotor(TorqueSpeedEnvelopeActuator):
 
     def _clip_effort(self, effort):
         result = torch.empty_like(effort)
+        if not hasattr(self, 'dynamic_effort_limit'):
+            self.dynamic_effort_limit = torch.empty_like(effort)
         for ids, table in self.spatial_curves:
             limit = interpolate_validated_envelope(self._joint_vel[ids], table, self.effort_limit[ids])
+            self.dynamic_effort_limit[ids] = limit
             result[ids] = torch.clamp(effort[ids], -limit, limit)
         return result
 

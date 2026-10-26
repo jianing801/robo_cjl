@@ -1,13 +1,12 @@
-"""Parkour-style soft applied-torque constraint for Rough design motors only.
+"""Dynamic dimensionless torque utilization cost for six Rough design joints.
 
-Uses each live actuator's per-environment peak ceiling, not the first URDF's
-shared limits. The real speed-dependent hard envelope remains unchanged.
-Return an unweighted N^2 m^2 cost; native RewardManager applies weight * dt.
+Reuse the hard-envelope ceiling; native RewardManager applies weight * dt.
+The absolute-torque helper remains solely for baseline comparison tests.
 """
 import math
 
 GROUPS = ('knees', 'feet')
-DEFAULT = dict(weight=-0.01, limit_ratio=0.8)
+DEFAULT = dict(weight=-4.0, limit_ratio=0.8)
 
 
 def validate_settings(value):
@@ -32,7 +31,11 @@ def squared_torque_excess(applied, peak, limit_ratio=0.8):
 
 
 def design_motor_torque_limits(env, limit_ratio=0.8):
-    """Same squared excess as RPO Parkour, restricted to the six design joints."""
+    """Last physics substep utilization; reuse the actual hard-envelope limit.
+
+    Zero-capability entries are excluded from utilization, NOT declared healthy.
+    Their count and pre-clip demand remain available as separate diagnostics.
+    """
     import torch
     cached = getattr(env, '_design_torque_soft_limits', None)
     if cached is None:
@@ -52,7 +55,27 @@ def design_motor_torque_limits(env, limit_ratio=0.8):
         cached = env._design_torque_soft_limits = (ids, peak)
     ids, peak = cached
     # Read before auto-reset: native RewardManager.compute is inside env.step.
-    return squared_torque_excess(env.robot.data.applied_torque[:, ids], peak, limit_ratio)
+    dynamic = torch.cat([env.robot.actuators[name].dynamic_effort_limit for name in GROUPS], dim=-1)
+    applied = env.robot.data.applied_torque[:, ids]
+    cost, utilization, unavailable = dynamic_torque_excess(applied, dynamic, peak, limit_ratio)
+    requested = torch.cat([env.robot.actuators[name].computed_effort for name in GROUPS], dim=-1)
+    env._design_torque_soft_diagnostics = dict(
+        utilization=utilization.detach(), unavailable=unavailable.detach(),
+        requested_excess_nm=(requested.abs() - dynamic).clamp(min=0).detach())
+    return cost
+
+
+def dynamic_torque_excess(applied, available, peak, limit_ratio=0.8):
+    """Dimensionless squared excess, with explicit zero-capability mask."""
+    import torch
+    if applied.shape != available.shape or applied.shape != peak.shape or applied.ndim != 2:
+        raise ValueError('expected matching (environments, joints) arrays')
+    valid = available > peak * 1.e-6
+    safe = torch.where(valid, available, torch.ones_like(available))
+    utilization = torch.where(valid, applied.abs() / safe, torch.zeros_like(applied))
+    cost = torch.where(valid, (utilization - limit_ratio).clamp(min=0).square(),
+                       torch.zeros_like(applied)).sum(dim=-1)
+    return cost, utilization, ~valid
 
 
 def install_constraint(cfg, value):
@@ -64,8 +87,8 @@ def install_constraint(cfg, value):
         func=design_motor_torque_limits, weight=settings['weight'],
         params=dict(limit_ratio=settings['limit_ratio']))
     return dict(enabled=True, settings=settings, groups=list(GROUPS), joint_count=6,
-        torque='actual applied torque', limit='per-environment actuator peak effort_limit',
-        formula='sum_j relu(abs(applied_torque_j) - limit_ratio * peak_j)^2',
-        reference='RPO Parkour applied_torque_limits_by_ratio',
+        torque='actual applied torque at last physics substep', limit='same-substep hard-envelope dynamic_effort_limit',
+        formula='sum_valid_j relu(abs(applied_torque_j) / available_j - limit_ratio)^2',
+        reference='Parkour-inspired threshold, dimensionless dynamic utilization (not original Parkour formula)',
         weight_and_dt='native RewardManager only; no wrapper reward addition',
         dynamic_hard_envelope_unchanged=True, action_scale_and_pd_unchanged=True)
