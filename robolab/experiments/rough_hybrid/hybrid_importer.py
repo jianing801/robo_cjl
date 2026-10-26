@@ -1,7 +1,10 @@
 """Rough-only adapter for Lab's 2.4.31 pin on an installed 2.4.30.
 
 Never edits installed packages, downloads extensions, or falsifies versions.
-Other native converters and all physical conversion methods remain inherited.
+The native constructor's 2.4.31 switch is bypassed; the one native method that
+calls a 2.4.31-only import-config setter is overridden with the same settings
+plus a hasattr guard. Other native converters and physical conversion methods
+remain inherited.
 """
 import ast
 import inspect
@@ -9,6 +12,7 @@ from pathlib import Path
 import sysconfig
 import textwrap
 import tomllib
+import xml.etree.ElementTree as ET
 
 
 def has_known_constructor(constructor):
@@ -20,6 +24,22 @@ def has_known_constructor(constructor):
     expected=ast.parse('from isaacsim.asset.importer.urdf._urdf import acquire_urdf_interface\n'
         'self._urdf_interface = acquire_urdf_interface()\nsuper().__init__(cfg=cfg)').body
     return all(ast.dump(a)==ast.dump(b) for a,b in zip(body[1:],expected))
+
+
+def massive_fixed_joints(urdf_path):
+    root=ET.parse(urdf_path).getroot()
+    links={link.get('name'):link for link in root.findall('link')}
+    rows=[]
+    for joint in root.findall('joint'):
+        if joint.get('type')!='fixed':continue
+        child=joint.find('child')
+        link=links.get(child.get('link')) if child is not None else None
+        inertial=link.find('inertial') if link is not None else None
+        mass=inertial.find('mass') if inertial is not None else None
+        try:value=float(mass.get('value','0')) if mass is not None else 0.0
+        except (TypeError,ValueError):value=0.0
+        if value>0.0:rows.append((joint.get('name'),link.get('name'),value))
+    return rows
 
 
 def install_local_importer_adapter():
@@ -52,13 +72,37 @@ def install_local_importer_adapter():
         raise RuntimeError(f'URDF importer path mismatch: {actual}; refusing unknown package')
     from isaacsim.asset.importer.urdf._urdf import acquire_urdf_interface
     audit=dict(adapter=True,installed_version=version,enabled_id=enabled,path=str(actual),
-        native_pin_bypassed='2.4.31',installed_files_modified=False,physics_methods_unchanged=True)
+        native_pin_bypassed='2.4.31',installed_files_modified=False,physics_methods_unchanged=True,
+        import_config_overridden=True,merge_fixed_ignore_inertia='skipped-2.4.30',
+        massive_fixed_joint_guard=True)
     class LocalUrdfConverter(native):
         _rough_local_importer=True
         _rough_importer_audit=audit
         def __init__(self,cfg):
             self._urdf_interface=acquire_urdf_interface()
             AssetConverterBase.__init__(self,cfg=cfg)
+        def _get_urdf_import_config(self):
+            if getattr(self.cfg,'merge_fixed_joints',False):
+                blocked=massive_fixed_joints(self.cfg.asset_path)
+                if blocked:
+                    names=', '.join(f'{j}({m} kg)' for j,_,m in blocked)
+                    raise RuntimeError('Installed URDF importer 2.4.30 cannot merge fixed joints with mass: '+names)
+            import omni.kit.commands
+            _,import_config=omni.kit.commands.execute('URDFCreateImportConfig')
+            import_config.set_distance_scale(1.0)
+            import_config.set_make_default_prim(True)
+            import_config.set_create_physics_scene(False)
+            import_config.set_density(self.cfg.link_density)
+            import_config.set_convex_decomp(self.cfg.collider_type=='convex_decomposition')
+            import_config.set_collision_from_visuals(self.cfg.collision_from_visuals)
+            import_config.set_merge_fixed_joints(self.cfg.merge_fixed_joints)
+            if hasattr(import_config,'set_merge_fixed_ignore_inertia'):
+                import_config.set_merge_fixed_ignore_inertia(self.cfg.merge_fixed_joints)
+            import_config.set_fix_base(self.cfg.fix_base)
+            import_config.set_self_collision(self.cfg.self_collision)
+            import_config.set_parse_mimic(self.cfg.convert_mimic_joints_to_normal_joints)
+            import_config.set_replace_cylinders_with_capsules(self.cfg.replace_cylinders_with_capsules)
+            return import_config
     converters.UrdfConverter=LocalUrdfConverter
     return audit
 
