@@ -116,6 +116,8 @@ def main(argv=None, session=None):
     env = raw = None
     try:
         import torch
+        from hybrid_resources import prepare_scene, snapshot
+        prepare_scene(output / 'scene_memory.jsonl', torch)
         import isaaclab_tasks
         import robolab.tasks
         import omni.usd
@@ -143,6 +145,7 @@ def main(argv=None, session=None):
             check_cycles(cfg)
         raw = env_type.__new__(env_type)
         env_type.__init__(raw, cfg)
+        snapshot(output / 'scene_memory.jsonl', 'after_scene_initialization', torch)
         scene_stage = omni.usd.get_context().get_stage()
         # Never assume regex traversal and tensor environment ordering coincide.
         actual_ids = [scene_stage.GetPrimAtPath(f"/World/envs/env_{i}/Robot").GetAttribute("spatial:design_id").Get()
@@ -271,13 +274,21 @@ def main(argv=None, session=None):
     except BaseException:
         import traceback
         write_new(output / "failure.json", dict(traceback=traceback.format_exc()))
+        if session is not None and session.get('failure_signal'):
+            write_new(session['failure_signal'], dict(group_output=str(output),
+                traceback=traceback.format_exc()))
         traceback.print_exc()
+        sys.stderr.flush()
+        from hybrid_resources import arm_failed_cleanup_timeout
+        arm_failed_cleanup_timeout()
         raise
     finally:
         # SimulationApp.close may terminate the interpreter with status zero.
         # Flush the authoritative traceback first and force a failing status,
         # even when Kit exits during cleanup.
         failed = sys.exc_info()[0] is not None
+        if not failed:
+            snapshot(output / 'scene_memory.jsonl', 'before_scene_close', torch)
         if failed:
             import atexit
             atexit.register(lambda: os._exit(1))
@@ -304,6 +315,8 @@ def main(argv=None, session=None):
             # raycast the previous group's terrain.
             RayCaster.meshes.clear()
             omni.usd.get_context().new_stage()
+            if not failed:
+                snapshot(output / 'scene_memory.jsonl', 'after_scene_close', torch)
 
 
 if __name__ == "__main__":

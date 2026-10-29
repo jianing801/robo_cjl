@@ -1,0 +1,19 @@
+{
+  "grid": {
+    "num_envs": 4096,
+    "length_count": 10,
+    "thigh_range_m": [0.25, 0.40],
+    "calf_range_m": [0.30, 0.45],
+    "knee_motor_count": 3,
+    "ankle_motor_count": 3,
+    "motor_seed": 42,
+    "knee_pool": ["DM-J10010L-2EC", "RS04", "DM-J10010-2EC"],
+    "ankle_pool": ["DM-J4340P-2EC", "DM-J6216P-2EC", "RS06"]
+  },
+  "rotation": {
+    "active_designs": 30,
+    "updates_per_stage": 50,
+    "total_updates": 5000,
+    "seed": 42
+  }
+}

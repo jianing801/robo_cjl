@@ -45,6 +45,8 @@ def run_child(command,folder,env):
         worker=subprocess.Popen(command,**kwargs)
         write_new(folder/'launch.json',dict(pid=worker.pid,create_time=psutil.Process(worker.pid).create_time(),command=command))
         print('CHILD_START',worker.pid,str(folder),flush=True)
+        from hybrid_resources import watch_failed_worker
+        watchdog_stop, watchdog_thread = watch_failed_worker(worker, folder)
         # Interrupting a parent must never leave an automatically advancing sequence.
         try:
             for line in worker.stdout:
@@ -64,8 +66,13 @@ def run_child(command,folder,env):
                 try:remaining.kill()
                 except psutil.NoSuchProcess:pass
             raise
+        finally:
+            watchdog_stop.set()
+            watchdog_thread.join(timeout=1)
     # Kit shutdown can mask a Python exception with exit code zero.
     failure=folder/'result/failure.json'
+    if not failure.exists() and (folder/'result/cleanup_failure.json').exists():
+        failure=folder/'result/cleanup_failure.json'
     summary_exists=(folder/'result/summary.json').is_file()
     effective_code=code if code else (1 if failure.exists() or not summary_exists else 0)
     write_new(folder/'exit.json',dict(returncode=effective_code,raw_returncode=code,

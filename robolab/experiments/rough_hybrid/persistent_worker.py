@@ -24,7 +24,7 @@ def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_mai
     previous=json.loads(rows[-1].read_text())['checkpoint'] if rows else plan.get('bootstrap_checkpoint')
     if stage_main is None:
         from train_stage import main as stage_main
-    session={}
+    session={'failure_signal': result/'cleanup_failure.json'}
     failed=False
     result.mkdir(parents=True,exist_ok=False)
     try:
