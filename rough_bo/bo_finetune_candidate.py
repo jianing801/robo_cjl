@@ -44,6 +44,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--learning-rate", type=float, default=None,
                         help="Default: base-checkpoint LR (fresh Adam moments).")
+    parser.add_argument(
+        "--allow-source-matched-asset-hash-override",
+        action="store_true",
+        help="Permit differing raw checkpoint/bank hashes while retaining semantic and source audits.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.enable_cameras = False
@@ -115,9 +120,14 @@ def run(args, app) -> int:
     if not output.is_dir():
         raise FileNotFoundError(f"controller must create the candidate output directory first: {output}")
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    saved, bank, provenance = load_and_validate_assets(checkpoint, bank_path, root)
+    saved, bank, provenance = load_and_validate_assets(
+        checkpoint, bank_path, root,
+        allow_hash_override=args.allow_source_matched_asset_hash_override,
+    )
     if sha256_file(checkpoint) != request.get("checkpoint_sha256"):
         raise ValueError("base checkpoint changed after the controller created the candidate request")
+    if provenance["bank_sha256"] != request.get("bank_sha256"):
+        raise ValueError("replay bank changed after the controller created the candidate request")
 
     from hybrid_importer import install_local_importer_adapter
     from hybrid_runtime import configure_spatial, SpatialRoughEnv, SpatialVecEnv, SpatialRunner

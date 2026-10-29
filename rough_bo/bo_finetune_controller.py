@@ -80,6 +80,13 @@ def parse_args():
     parser.add_argument("--fine-tune-timeout", type=int, default=21600)
     parser.add_argument("--eval-timeout", type=int, default=1800)
     parser.add_argument("--kit-args", default="--/renderer/multiGpu/enabled=false")
+    parser.add_argument(
+        "--allow-source-matched-asset-hash-override",
+        action="store_true",
+        help=("Allow checkpoint/bank file SHA256 values to differ from the frozen local replay pair. "
+              "Checkpoint structure/iteration, bank semantics/native source hashes, and source-tree "
+              "identity are still validated."),
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -149,6 +156,7 @@ def build_protocol(args, provenance: dict[str, Any], bank: dict[str, Any],
         "base_completed_updates": provenance["completed_updates"],
         "bank": provenance["bank"],
         "bank_sha256": provenance["bank_sha256"],
+        "source_matched_asset_hash_override": bool(args.allow_source_matched_asset_hash_override),
         "code_root": provenance["code_root"],
         "source_mismatch_count": provenance["source_mismatch_count"],
         "design_csv_sha256": sha256_file(args.design_csv),
@@ -277,6 +285,8 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
     ]
     if args.learning_rate is not None:
         train_cmd += ["--learning-rate", str(args.learning_rate)]
+    if args.allow_source_matched_asset_hash_override:
+        train_cmd.append("--allow-source-matched-asset-hash-override")
     if kit_args:
         train_cmd += ["--kit-args", kit_args]
     atomic_json(attempt / "train_command.json", {"argv": train_cmd, "cwd": str(code_root.parent)})
@@ -305,6 +315,8 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
     ]
     if kit_args:
         eval_cmd += ["--kit-args", kit_args]
+    if args.allow_source_matched_asset_hash_override:
+        eval_cmd.append("--allow-source-matched-asset-hash-override")
     atomic_json(attempt / "evaluation_command.json", {"argv": eval_cmd, "cwd": str(code_root.parent)})
     run_child(eval_cmd, cwd=code_root.parent, env=env,
               stdout_path=attempt / "evaluation.stdout.log", stderr_path=attempt / "evaluation.stderr.log",
@@ -445,11 +457,15 @@ def main() -> int:
         raise FileNotFoundError(f"Isaac Lab Python not found: {args.python}")
 
     add_source_import_paths(args.code_root)
-    saved, bank, provenance = load_and_validate_assets(args.checkpoint, args.bank, args.code_root)
-    if provenance["checkpoint_sha256"] != EXPECTED_CHECKPOINT_SHA256:
-        raise ValueError("base model hash differs from the audited completed Rough checkpoint")
-    if provenance["bank_sha256"] != EXPECTED_BANK_SHA256:
-        raise ValueError("BO bank hash differs from the audited local replay bank")
+    saved, bank, provenance = load_and_validate_assets(
+        args.checkpoint, args.bank, args.code_root,
+        allow_hash_override=args.allow_source_matched_asset_hash_override,
+    )
+    if not args.allow_source_matched_asset_hash_override:
+        if provenance["checkpoint_sha256"] != EXPECTED_CHECKPOINT_SHA256:
+            raise ValueError("base model hash differs from the audited completed Rough checkpoint")
+        if provenance["bank_sha256"] != EXPECTED_BANK_SHA256:
+            raise ValueError("BO bank hash differs from the audited local replay bank")
     designs = read_designs(Path(args.design_csv).resolve(), bank)
     output = Path(args.output).resolve()
     plan_path = output / "plan.json"

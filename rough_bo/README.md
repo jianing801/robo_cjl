@@ -64,6 +64,65 @@ The default is 50 OCD observations followed by 50 GP proposals. Use
 Completed candidate results and incomplete attempt logs are retained in the run
 directory.
 
+### Linux server, explicitly using GPU 5
+
+From the repository root after the BO folder is present, use the server's
+checkpoint-matched Isaac Lab environment and original 12k checkpoint/bank. The
+server bank may have different file bytes from the Windows replay bank. The
+explicit hash-override flag below permits that only after the controller still
+passes checkpoint iteration/configuration, motor and morphology scope, native
+source-hash, and checkpoint-matched source-tree audits. Do not use the flag for
+an unrelated checkpoint or bank.
+
+```bash
+cd /data/chenjiale/robo_cjl
+conda activate robo_cjl
+set -o pipefail
+
+# Keep CUDA_VISIBLE_DEVICES unset so cuda:5 and Kit device 5 refer to the same GPU.
+unset CUDA_VISIBLE_DEVICES
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+CHECKPOINT=/data/chenjiale/robo_cjl/robolab/logs/rough_hybrid/persistent_20261026_194622/attempts/group_000141_20261027_235200_111604/result/models/model_11999.pt
+BANK=/data/chenjiale/robo_cjl/robolab/logs/rough_hybrid/dynamic_20261026_174456/bank/bank.json
+CODE_ROOT=/data/chenjiale/robo_cjl/robolab
+RUN_DIR=/data/chenjiale/robo_cjl/robolab/logs/rough_bo/bo_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$(dirname "$RUN_DIR")"
+
+# Require at least 12.5 GiB free immediately before launch. This is a guard,
+# not a reservation; another GPU process can still allocate memory afterward.
+FREE_MIB=$(nvidia-smi --id=5 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d ' ')
+if [ "$FREE_MIB" -lt 12800 ]; then
+  echo "GPU 5 has only ${FREE_MIB} MiB free; need at least 12800 MiB. Nothing was launched."
+  exit 1
+fi
+
+nohup python -u rough_bo/bo_finetune_controller.py \
+  --python "$(which python)" \
+  --checkpoint "$CHECKPOINT" \
+  --bank "$BANK" \
+  --code-root "$CODE_ROOT" \
+  --output "$RUN_DIR" \
+  --device cuda:5 \
+  --kit-args "--/renderer/activeGpu=5 --/physics/cudaDevice=5 --/renderer/multiGpu/enabled=false" \
+  --allow-source-matched-asset-hash-override \
+  --bo-trials 50 > "$RUN_DIR.console.log" 2>&1 &
+BO_PID=$!
+printf '%s\n' "$BO_PID" > "$RUN_DIR.pid"
+echo "BO controller PID=$BO_PID; logs: $RUN_DIR.console.log"
+
+# View progress without sending Ctrl+C to the training process:
+# tail -f "$RUN_DIR.console.log"
+```
+
+The controller is sequential: candidate 0 is fine-tuned and evaluated before
+candidate 1 starts. The detached `nohup` process writes a PID file and console
+log next to the run directory; the run directory stores commands, per-attempt
+logs, models, metrics, and the immutable protocol contract. Stop `tail -f`
+with Ctrl+C to leave training running. If card 5's existing workload grows or
+the free-memory guard fails, do not bypass it; check availability and relaunch
+with a new output directory only when ready.
+
 ## Output and audit
 
 The run directory contains an Optuna SQLite study, `trials.csv`, `summary.json`,

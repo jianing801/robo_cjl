@@ -36,6 +36,11 @@ def parse_args():
     parser.add_argument("--candidate-dir", required=True, help="Successful 200-update fine-tune directory")
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=EVAL_SEED)
+    parser.add_argument(
+        "--allow-source-matched-asset-hash-override",
+        action="store_true",
+        help="Permit differing raw checkpoint/bank hashes while retaining semantic and source audits.",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.enable_cameras = False
@@ -59,7 +64,10 @@ def main(args, app) -> int:
         raise FileExistsError(f"evaluation output already exists: {output}")
     output.mkdir(parents=True, exist_ok=False)
 
-    saved_base, bank, provenance = load_and_validate_assets(base_checkpoint, bank_path, root)
+    saved_base, bank, provenance = load_and_validate_assets(
+        base_checkpoint, bank_path, root,
+        allow_hash_override=args.allow_source_matched_asset_hash_override,
+    )
     fine_meta_path = candidate_dir / "finetune_complete.json"
     design_path = candidate_dir / "design.json"
     if not fine_meta_path.is_file() or not design_path.is_file():
@@ -72,6 +80,8 @@ def main(args, app) -> int:
         raise ValueError("fine-tune update count differs from the BO objective")
     if fine_meta.get("base_checkpoint_sha256") != provenance["checkpoint_sha256"]:
         raise ValueError("candidate was not initialized from the specified base model")
+    if fine_meta.get("base_bank_sha256") != provenance["bank_sha256"]:
+        raise ValueError("candidate was fine-tuned with a different replay bank")
     if sha256_file(fine_checkpoint) != fine_meta.get("checkpoint_sha256"):
         raise ValueError("fine-tuned model hash differs from its completion record")
     if not Path(design["urdf"]).is_file() or sha256_file(design["urdf"]) != design["urdf_sha256"]:

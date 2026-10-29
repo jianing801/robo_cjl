@@ -48,7 +48,7 @@ def load_and_validate_assets(checkpoint_path: str | Path, bank_path: str | Path,
                              expected_checkpoint_sha256: str = EXPECTED_CHECKPOINT_SHA256,
                              expected_bank_sha256: str = EXPECTED_BANK_SHA256,
                              allow_hash_override: bool = False) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Load the audited 12k checkpoint and exact replay bank; fail closed."""
+    """Load the audited 12k checkpoint and source-compatible replay bank; fail closed by default."""
     import torch
 
     root = add_source_import_paths(code_root)
