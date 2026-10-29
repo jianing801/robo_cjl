@@ -1,4 +1,4 @@
-"""CPU HHTools R2R for a new spatial AMP bank; no contact repair or PPO."""
+"""HHTools R2R for a spatial AMP bank; CPU or strict CUDA Graph, no PPO."""
 import argparse
 import importlib.util
 from pathlib import Path
@@ -15,6 +15,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bank", required=True); p.add_argument("--output", required=True)
     p.add_argument("--hhtools-root")
+    p.add_argument('--device',default='cpu',help='cpu or a visible cuda:N; CUDA requires Graph, no fallback')
+    p.add_argument('--warp-cache',default=str(ROOT/'logs/amp_hybrid/warp_reference_cache'))
     a = p.parse_args()
     bank = load_configurable_bank(a.bank)
     if bank.get("task_key") != "run":
@@ -36,13 +38,15 @@ def main():
     for name in weights:
         path = ROOT/"data/motions/rpo_lab"/(name+".pkl")
         source[name] = dict(path=str(path), sha256=sha(path))
-    plan = dict(joint_names=names, source_urdf=bank["original_template"], hhtools_root=str(hh))
+    plan = dict(joint_names=names, source_urdf=bank["original_template"], hhtools_root=str(hh),
+                device=a.device,warp_cache=str(Path(a.warp_cache).resolve()))
     from hhtools_backend import Backend
     backend = Backend(plan, out)
     cache, bindings = {}, {}
-    total_geometry=len({kinematic_signature(d['urdf']) for d in bank['designs']})
+    geometry_keys={d['id']:kinematic_signature(d['urdf']) for d in bank['designs']}
+    total_geometry=len(set(geometry_keys.values()))
     for design in bank["designs"]:
-        key = kinematic_signature(design["urdf"])
+        key = geometry_keys[design['id']]
         if key not in cache:
             print('AMP_REFERENCE_GEOMETRY_BEGIN',len(cache)+1,'/',total_geometry,design['id'],flush=True)
             directory = out/key; directory.mkdir()
@@ -69,6 +73,8 @@ def main():
     write_new(manifest, dict(kind="spatial_hhtools_library_v1", bank_sha256=sha(a.bank), source_clips=source,
         joint_names=names, key_bodies=list(KEY_BODIES), weights=weights, designs=bindings,
         unique_geometry_count=len(cache), contact_repair=False, actual_gait_validated=False,
+        reference_execution=dict(device=a.device,cuda_graph_required=backend.use_cuda,
+            warp_cache=str(Path(a.warp_cache).resolve())),
         hhtools_source_sha256={str(p.relative_to(hh)): sha(p) for p in sorted((hh/"hhtools").rglob("*.py"))},
         hhtools_template_sha256=sha(hh/"configs/robots/_template/robot.yaml")))
     validate_library(bank, a.bank, manifest)

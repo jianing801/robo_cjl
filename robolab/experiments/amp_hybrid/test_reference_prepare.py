@@ -84,3 +84,61 @@ def test_generation_failures_never_publish_library(tmp_path, monkeypatch, checke
 def test_explicit_python_does_not_use_conda():
     command = prepare.generation_command('bank', 'new', python='/separate/python')
     assert command[0] == '/separate/python' and 'conda' not in command
+
+
+def test_gpu_generator_receives_selected_mask_and_persistent_cache(tmp_path,monkeypatch,checked):
+    from contextlib import contextmanager
+    path=tmp_path/'refs/library.json'
+    events=[]
+    @contextmanager
+    def runtime(device,requested,min_free,max_util):
+        assert (device,requested,min_free,max_util)==('cuda','cuda:2',12.,30)
+        events.append('acquire')
+        yield 'cuda:0',{'CUDA_VISIBLE_DEVICES':'GPU-selected'}
+        events.append('release')
+    monkeypatch.setattr(prepare,'reference_runtime',runtime)
+    def generate(command,**kwargs):
+        assert kwargs['env']['CUDA_VISIBLE_DEVICES']=='GPU-selected'
+        assert command[command.index('--device')+1]=='cuda:0'
+        assert command[command.index('--warp-cache')+1]==str((tmp_path/'persistent-cache').resolve())
+        output=Path(command[command.index('--output')+1]);output.mkdir()
+        (output/'library.json').write_text(json.dumps({'bank':'correct',
+            'reference_execution':{'device':'cuda:0','cuda_graph_required':True}}))
+        events.append('generated')
+    monkeypatch.setattr(prepare.subprocess,'run',generate)
+    prepare.ensure_library({},'bank',path,execute=True,device='cuda',requested_gpu='cuda:2',
+                           warp_cache=tmp_path/'persistent-cache')
+    assert events==['acquire','generated','release'] and path.is_file()
+
+
+def test_gpu_library_without_graph_confirmation_not_published(tmp_path,monkeypatch,checked):
+    from contextlib import nullcontext
+    path=tmp_path/'refs/library.json'
+    monkeypatch.setattr(prepare,'reference_runtime',lambda *a:nullcontext(('cuda:0',{})))
+    def generate(command,**kwargs):
+        output=Path(command[command.index('--output')+1]);output.mkdir()
+        (output/'library.json').write_text('{"bank":"correct"}')
+    monkeypatch.setattr(prepare.subprocess,'run',generate)
+    with pytest.raises(ValueError,match='CUDA Graph'):
+        prepare.ensure_library({},'bank',path,execute=True,device='cuda')
+    assert not path.exists()
+
+
+@pytest.mark.parametrize('provenance',[
+    {'device_kind':'cpu','cuda_graph_used':True},
+    {'device_kind':'cuda','cuda_graph_used':False},
+    {'device_kind':'cuda','cuda_graph_used':True,'fallback_used':True},
+    {},
+])
+def test_cuda_and_graph_fallback_rejected(provenance):
+    from hhtools_backend import validate_execution
+    with pytest.raises(RuntimeError):
+        validate_execution(provenance,True)
+
+
+def test_strict_cuda_execution_and_explicit_cpu():
+    from hhtools_backend import validate_execution
+    validate_execution({'device_kind':'cuda','cuda_graph_used':True,'fallback_used':False},True)
+    validate_execution({'device_kind':'cpu'},False)
+    with pytest.raises(RuntimeError):
+        validate_execution({'device_kind':'cuda'},False)

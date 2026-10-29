@@ -1,4 +1,4 @@
-"""Pinned HHTools CPU adapter, isolated from the Isaac Python environment.
+"""Pinned HHTools adapter, isolated from the Isaac Python environment.
 
 Geometric R2R only. Does not claim contact dynamics or motor feasibility.
 """
@@ -19,17 +19,31 @@ class Backend:
             if versions[name] != expected:
                 raise ValueError(f"unvalidated HHTools dependency: {name} {versions[name]}")
         write_new(output / "runtime_versions.json", versions)
-        # Must be set before importing Warp/Newton/HHTools.
-        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-        os.environ["HHTOOLS_IK_USE_CUDA_GRAPH"] = "0"
-        for key, sub in (("WARP_CACHE_DIR", "warp"), ("HHTOOLS_ROBOT_DIR", "robots"),
+        device = plan.get('device', 'cpu')
+        if device != 'cpu' and not (device.startswith('cuda:') and device[5:].isdigit()):
+            raise ValueError('Reference device must be cpu or cuda:N')
+        self.use_cuda = device != 'cpu'
+        # Preserve the launcher's selected GPU UUID mask. Never silently fall back.
+        if not self.use_cuda:
+            os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        os.environ["HHTOOLS_IK_USE_CUDA_GRAPH"] = '1' if self.use_cuda else '0'
+        cache = Path(plan.get('warp_cache') or output/'runtime/warp').resolve()
+        cache = cache/'warp_1.12.1_newton_1.1.0'
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ['WARP_CACHE_DIR'] = str(cache)
+        for key, sub in (("HHTOOLS_ROBOT_DIR", "robots"),
                          ("HHTOOLS_CACHE_DIR", "cache"), ("XDG_CONFIG_HOME", "config")):
             os.environ[key] = str(output / "runtime" / sub)
         import warp as wp
-        wp.config.enable_cuda = False
+        wp.config.enable_cuda = self.use_cuda
         wp.config.kernel_cache_dir = os.environ["WARP_CACHE_DIR"]
         wp.init()
-        wp.set_device("cpu")
+        wp.set_device(device)
+        actual = wp.get_device()
+        if bool(actual.is_cuda) != self.use_cuda:
+            raise RuntimeError('Requested reference device was not activated')
+        write_new(output/'reference_device.json', dict(device=str(actual),
+            device_name=actual.name, cuda_graph_required=self.use_cuda, warp_cache=str(cache)))
         from hhtools.retarget import robot_to_robot as r2r
         from scipy.spatial.transform import Rotation
         import yaml
@@ -163,7 +177,7 @@ class Backend:
         reference_key = "robot_"+self.source.preset.name
         cfg = replace(build_pipeline_config_for_preset(target.preset, reference_key, ik_iterations=24),
                       max_joint_velocity=0., smooth_joint_filter_weight=0., apply_feet_stabilizer=False,
-                      post_ik_foot_clamps=False, clip_floor_snap=False)
+                      post_ik_foot_clamps=False, clip_floor_snap=False, ik_use_cuda_graph=self.use_cuda)
         pipe = NewtonBasicPipeline(target, scaler_config=scaler, pipeline_config=cfg,
             feet_stabilizer_config=build_feet_stabilizer_config(target.preset, reference_key, model=target),
             human_height=float(ref.height_m), source_to_canonical={n:n for n in ref.joint_names}, configure_warp=False)
@@ -171,7 +185,16 @@ class Backend:
                                                    if e.canonical_name in target.preset.ik_map))
         result = pipe.run(motion, progress_callback=lambda cur, total:
                           print(clip, cur, total, flush=True) if cur == total or cur % 200 == 0 else None)
+        validate_execution(result.meta.get('execution_provenance', {}), self.use_cuda)
         canonical = reorder_solver(result.joint_q, list(result.dof_names), self.names)
         return canonical, {"scaler": asdict(scaler), "pipeline": asdict(cfg),
                            "rest_collision_sole_height_offset_m": geometric_height_offset,
                            "solver_joint_names": list(result.dof_names), "metadata": result.meta}
+
+
+def validate_execution(provenance, require_cuda):
+    expected = 'cuda' if require_cuda else 'cpu'
+    if provenance.get('device_kind') != expected:
+        raise RuntimeError(f'Reference execution device mismatch: {provenance}')
+    if require_cuda and (not provenance.get('cuda_graph_used') or provenance.get('fallback_used')):
+        raise RuntimeError(f'CUDA Graph was not used; refusing slow fallback: {provenance}')

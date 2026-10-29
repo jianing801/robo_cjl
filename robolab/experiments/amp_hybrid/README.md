@@ -53,7 +53,11 @@ python -u robolab/experiments/amp_hybrid/train.py \
   --output-root "$AMP_ROOT/train" --execute
 ```
 
-默认参考清单是输出目录同级references/library.json。存在就严格校验并复用；缺失则先用conda run -n amp_hhtools调用CPU生成器，再校验完整参考，最后创建训练计划和申请GPU。屏幕会逐几何/逐动作显示准备进度。参考准备不占用训练GPU锁。可用--reference-library指定其他清单，--hhtools-python指定独立Python，或--hhtools-env更换环境名。
+默认参考清单是输出目录同级references/library.json。存在就严格校验并复用；缺失则先用conda run -n amp_hhtools调用GPU＋CUDA Graph生成器，校验完整参考后再创建训练计划、进入Isaac训练。屏幕会逐几何/逐动作显示准备进度。生成阶段按--device及现有显存/利用率门槛选择显卡，使用与Rough/AMP训练共用的GPU协作锁；子进程只看到选中GPU的UUID，在内部使用cuda:0。生成进程退出后释放锁，训练阶段重新检查/申请显卡；锁不阻止不遵守该协议的其他用户占卡。
+
+默认内核缓存固定在robolab/logs/amp_hybrid/warp_reference_cache/warp_1.12.1_newton_1.1.0，跨新建实验/进程复用；Warp会区分内核代码和GPU架构。新求解器仍需捕获Graph。每段动作必须确认实际device_kind=cuda、cuda_graph_used=true且无fallback，否则停止，不退回普通GPU或CPU继续。reference_device.json与逐动作diagnostics记录设备、缓存和Graph事实。
+
+可用--reference-library指定其他清单，--hhtools-python指定独立Python，--hhtools-env更换环境名，--reference-warp-cache指定固定缓存根目录。只有显式传--reference-device cpu才在缺失参考时使用CPU；已有合格CPU参考仍可复用，不会因设备选项重新生成。
 
 失败的参考生成目录保留，下次采用新的generated_*目录，不覆盖旧产物；清单中的绝对路径指向该目录，必须保留。已有清单损坏/身份不匹配时直接报错，不静默重生成。续训必须使用原清单，缺失时拒绝自动生成。未传--execute时仅打印待准备信息，不生成参考、不启动训练。环境安装仍是一次性setup_hhtools.py步骤。
 
@@ -97,7 +101,7 @@ conda run --no-capture-output -n amp_hhtools python robolab/experiments/amp_hybr
   --hhtools-root robolab/experiments/amp_hybrid/vendor/hhtools
 ```
 
-需要现有经过验证的HHTools 0.1.0 / Newton 1.1.0 / Warp 1.12.1环境，脚本会检查版本并强制CPU离线转换。初次可能耗时；未生成参考就不能训练。
+需要经过验证的HHTools 0.1.0 / Newton 1.1.0 / Warp 1.12.1环境。手动prepare_references.py默认CPU；自动训练入口默认GPU＋Graph并管理显卡协作锁，推荐使用自动入口。原动作帧数、24次IK迭代、缩放、后处理及权重不因设备改变。首次GPU编译可能耗时，后续同架构/代码可复用缓存；未生成合格参考就不能训练。
 
 训练使用Isaac Python：
 ```bash

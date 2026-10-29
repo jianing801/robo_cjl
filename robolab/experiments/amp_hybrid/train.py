@@ -102,6 +102,8 @@ def main(argv=None):
     p.add_argument('--hhtools-env',default='amp_hhtools',help='Separate conda env used only for missing reference generation')
     p.add_argument('--hhtools-python',help='Explicit HHTools Python instead of conda run')
     p.add_argument('--hhtools-root',help='HHTools source; defaults to bundled snapshot')
+    p.add_argument('--reference-device',choices=['cuda','cpu'],default='cuda',help='Missing references use GPU + CUDA Graph by default')
+    p.add_argument('--reference-warp-cache',default=str(ROOT/'logs/amp_hybrid/warp_reference_cache'))
     p.add_argument('--output-root',required=True)
     p.add_argument('--execute',action='store_true')
     p.add_argument('--resume',action='store_true')
@@ -122,7 +124,9 @@ def main(argv=None):
     from amp_reference_prepare import ensure_library
     library_path=Path(a.reference_library).resolve() if a.reference_library else root.parent/'references/library.json'
     library=ensure_library(bank,bank_path,library_path,execute=a.execute,resume=a.resume,
-        python=a.hhtools_python,env_name=a.hhtools_env,source=a.hhtools_root)
+        python=a.hhtools_python,env_name=a.hhtools_env,source=a.hhtools_root,
+        device=a.reference_device,requested_gpu=a.device,min_free_gb=a.gpu_min_free_gb,
+        max_utilization=a.gpu_max_utilization,warp_cache=a.reference_warp_cache)
     if library is None:
         print(json.dumps(dict(output=str(root),reference_library=str(library_path),
             reference_generation_required=True,simulation_started=False),indent=2));return

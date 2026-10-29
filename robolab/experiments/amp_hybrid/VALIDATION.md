@@ -88,3 +88,17 @@ AMP与Rough联合CPU回归96项通过（最终65.25秒），包含参数转发�
 train.py现在可省略--reference-library。--execute时缺失参考先调用独立amp_hhtools环境生成，完整校验后发布清单，再创建训练计划和申请GPU。已有清单仅校验复用；续训缺失原清单拒绝生成；预览不创建参考目录；失败产物保留，禁止覆盖已有参考。生成器增加逐几何/动作进度输出。
 
 AMP与Rough联合回归113项通过（21.89秒）：包括此前训练/恢复测试、8项HHTools安装保护，以及9项自动准备测试，覆盖预览无副作用、已有库身份错误拒绝、续训保护、生成后校验与路径保留、非零退出/缺失清单/错误身份/validation-only均不发布清单、显式Python选择。新增准备过程以替身生成器验证控制逻辑；本次没有再次生成全库参考或重跑GPU训练。此前真实Isaac三组短测和8段真实HHTools生成结果仍是物理/生成器验证依据。
+
+## 默认GPU＋CUDA Graph与固定缓存（2026-10-29）
+
+自动入口缺失参考时默认GPU＋Graph，沿用--device和训练显存/利用率门槛选卡，并持有共用GPU协作锁；隔离环境子进程按UUID只看到该卡。参考完成并释放锁后，Isaac训练重新申请GPU。每段动作必须实际使用cuda和Graph且无fallback，否则不生成合格清单、不启动训练。默认固定Warp缓存跨实验和新进程复用。既有合格参考不重生成；显式--reference-device cpu保留CPU选项。
+
+回归120项通过（11.88秒），新增GPU可见性/缓存传参、Graph未确认不发布以及CPU/普通GPU/Graph回退拒绝测试。未升级任何Isaac/HHTools依赖版本或修改任务奖励、物理、动作帧数/权重和IK迭代。
+
+真实RTX3060验证：18环境、9种中点腿长/电机结构，自动GPU生成全部8段完整参考（1套独立几何），8段全部确认Graph启用且无fallback；相对既有CPU参考，最大关节差0.000450 rad、最大逐段关键点位置RMS差约0.0061 mm，帧数和fps一致。验证事先阈值为最大关节差0.01 rad、关键点RMS及根位置最大差各0.001 m，全部通过。
+
+首次自动流程成功生成参考并自动进入Isaac，完成前两组4次更新，但第三组停在原生USD导出left_arm_yaw_link.tmp.usd处。人工结束此次短测，原进程/日志保留，run标记USER_PAUSED；不把停滞当作完整训练成功。随后使用同一GPU参考、已核验的同资产USD缓存另建run_cached复测，三组/6次更新全部通过；同PID和学习对象续接，Actor/Critic/判别器均更新，两套Adam步数40→80→120，几何和参考路由审计、有限值及完成模型检查通过。此处没有修复原生USD冷导出偶发停滞，也没有自动重启机制。
+
+另外在全新HHTools进程中复用固定缓存生成一段完整362帧动作，关键Warp模块均显示cached，Graph仍实际启用；不是只在同一进程内重复求解的缓存测试。本次不代表4096环境、100套几何、完整长训或步态质量已验证。
+
+证据目录：工作区amp_gpu_auto_smoke_20261029（references_verification.json、run_cached_verification.json、cache_stdout.log及全部原始日志/模型）；此前设备对照tmp/amp_gpu_reference_probe_20261029显示第二次求解CPU15.95s、普通GPU26.62s、GPU Graph5.77s。模型、参考和编译缓存不纳入Git。
