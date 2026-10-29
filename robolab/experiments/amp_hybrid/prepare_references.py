@@ -40,13 +40,16 @@ def main():
     from hhtools_backend import Backend
     backend = Backend(plan, out)
     cache, bindings = {}, {}
+    total_geometry=len({kinematic_signature(d['urdf']) for d in bank['designs']})
     for design in bank["designs"]:
         key = kinematic_signature(design["urdf"])
         if key not in cache:
+            print('AMP_REFERENCE_GEOMETRY_BEGIN',len(cache)+1,'/',total_geometry,design['id'],flush=True)
             directory = out/key; directory.mkdir()
             target = backend.model(key, design["urdf"])
             hashes = {}
             for name, record in source.items():
+                print('AMP_REFERENCE_CLIP',len(cache)+1,'/',total_geometry,name,flush=True)
                 payload = load_payload(record["path"], names, record["sha256"])
                 q = validate_payload(payload, names)
                 solved, diagnostic = backend.solve(target, q, float(payload["fps"]), name)

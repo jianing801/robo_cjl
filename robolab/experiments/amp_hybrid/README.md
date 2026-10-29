@@ -42,6 +42,21 @@
 
 ## 使用
 
+### 一条命令自动准备参考再训练
+
+安装过独立环境amp_hhtools并生成AMP bank后，可直接启动，不再手工调用prepare_references.py：
+
+```bash
+python -u robolab/experiments/amp_hybrid/train.py \
+  --config robolab/experiments/amp_hybrid/config.local900.json \
+  --bank "$AMP_ROOT/bank/bank.json" \
+  --output-root "$AMP_ROOT/train" --execute
+```
+
+默认参考清单是输出目录同级references/library.json。存在就严格校验并复用；缺失则先用conda run -n amp_hhtools调用CPU生成器，再校验完整参考，最后创建训练计划和申请GPU。屏幕会逐几何/逐动作显示准备进度。参考准备不占用训练GPU锁。可用--reference-library指定其他清单，--hhtools-python指定独立Python，或--hhtools-env更换环境名。
+
+失败的参考生成目录保留，下次采用新的generated_*目录，不覆盖旧产物；清单中的绝对路径指向该目录，必须保留。已有清单损坏/身份不匹配时直接报错，不静默重生成。续训必须使用原清单，缺失时拒绝自动生成。未传--execute时仅打印待准备信息，不生成参考、不启动训练。环境安装仍是一次性setup_hhtools.py步骤。
+
 在仓库根执行。先复制配置模板或使用示例；所有输出必须新目录。这里只给命令模板，不表示已经准备900组参考或启动训练。
 
 CPU预览：

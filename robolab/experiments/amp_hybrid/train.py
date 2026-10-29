@@ -98,7 +98,10 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--config',required=True)
     p.add_argument('--bank',required=True)
-    p.add_argument('--reference-library',required=True)
+    p.add_argument('--reference-library',help='Existing library or destination; default: output-root/../references/library.json')
+    p.add_argument('--hhtools-env',default='amp_hhtools',help='Separate conda env used only for missing reference generation')
+    p.add_argument('--hhtools-python',help='Explicit HHTools Python instead of conda run')
+    p.add_argument('--hhtools-root',help='HHTools source; defaults to bundled snapshot')
     p.add_argument('--output-root',required=True)
     p.add_argument('--execute',action='store_true')
     p.add_argument('--resume',action='store_true')
@@ -113,11 +116,16 @@ def main(argv=None):
     config=json.loads(Path(a.config).read_text(encoding='utf8'))
     bank_path=Path(a.bank).resolve();bank=load_configurable_bank(bank_path)
     validate_config(config,bank)
-    from amp_references import validate_library
-    library_path=Path(a.reference_library).resolve()
-    library=validate_library(bank,bank_path,library_path)
-    if library.get("validation_only"):raise ValueError("validation-only library cannot train")
     root=Path(a.output_root).resolve()
+    if (root/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED present; no automatic restart')
+    if not a.resume and root.exists():raise FileExistsError(f'Output already exists; use --resume only for the same experiment: {root}')
+    from amp_reference_prepare import ensure_library
+    library_path=Path(a.reference_library).resolve() if a.reference_library else root.parent/'references/library.json'
+    library=ensure_library(bank,bank_path,library_path,execute=a.execute,resume=a.resume,
+        python=a.hhtools_python,env_name=a.hhtools_env,source=a.hhtools_root)
+    if library is None:
+        print(json.dumps(dict(output=str(root),reference_library=str(library_path),
+            reference_generation_required=True,simulation_started=False),indent=2));return
     if a.resume:
         plan=load_plan(root/'plan.json',bank_path)
         if config!=plan['configuration']:raise ValueError('resume configuration differs')
