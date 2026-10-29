@@ -1,0 +1,272 @@
+{
+  "result": "OCD_50_POINT_MIXED_DESIGN_PILOT_COMPLETE",
+  "method": "Yi, Pan & Chen (2025), Optimal Coverage Design, strength s=2",
+  "paper_doi": "10.1080/00224065.2025.2551916",
+  "sample_size": 50,
+  "seed": 20261029,
+  "factors": {
+    "continuous": {
+      "thigh_m": [
+        0.25,
+        0.4
+      ],
+      "calf_m": [
+        0.3,
+        0.45
+      ]
+    },
+    "nominal": {
+      "knee_motor": [
+        "RS04",
+        "DM-J10010-2EC",
+        "DM-J10010L-2EC"
+      ],
+      "ankle_motor": [
+        "DM-J6216P-2EC",
+        "DM-J4340P-2EC",
+        "RS06"
+      ]
+    }
+  },
+  "coverage": {
+    "distance": "Euclidean on normalized [0,1]^2 leg-length domain",
+    "radius": 0.1,
+    "radius_rule": "sqrt(p)/(2*n^(1/p)), paper numerical-study q=1; p=2,n=50",
+    "probe_method": "fixed 2D Latin-hypercube Monte Carlo probes",
+    "probe_count": 4096,
+    "independent_validation_probe_count": 64000,
+    "objective": "0.5 * (global continuous volumetric coverage + strength-2 synthesis coverage); synthesis coverage averages pair-sliced coverage and divides by 1 + (max pair count - min pair count)/n",
+    "note": "This short computational pilot uses 4,096 probes and the article's practical 1,000-proposal inner-loop cap. It is an approximate design-score run, not a simulator run or proof of a global optimum."
+  },
+  "independent_validation": {
+    "probe_seed": 20261030,
+    "probe_count": 64000,
+    "initial_objective": 0.46598499939083815,
+    "final_objective": 0.5544592354302832,
+    "initial_details": {
+      "objective": 0.46598499939083815,
+      "global_leg_coverage": 0.805515625,
+      "mean_pair_leg_coverage": 0.1441579861111111,
+      "synthesis_coverage_after_count_penalty": 0.1264543737816764,
+      "pair_count_range": 7,
+      "pair_counts": [
+        [
+          7,
+          6,
+          4
+        ],
+        [
+          7,
+          7,
+          3
+        ],
+        [
+          3,
+          3,
+          10
+        ]
+      ],
+      "pair_coverages": [
+        [
+          0.174765625,
+          0.143515625,
+          0.11621875
+        ],
+        [
+          0.18065625,
+          0.2045,
+          0.081515625
+        ],
+        [
+          0.07434375,
+          0.089640625,
+          0.232265625
+        ]
+      ],
+      "knee_counts": [
+        17,
+        17,
+        16
+      ],
+      "ankle_counts": [
+        17,
+        16,
+        17
+      ]
+    },
+    "final_details": {
+      "objective": 0.5544592354302832,
+      "global_leg_coverage": 0.952671875,
+      "mean_pair_leg_coverage": 0.15937152777777777,
+      "synthesis_coverage_after_count_penalty": 0.15624659586056644,
+      "pair_count_range": 1,
+      "pair_counts": [
+        [
+          6,
+          6,
+          5
+        ],
+        [
+          6,
+          5,
+          6
+        ],
+        [
+          5,
+          5,
+          6
+        ]
+      ],
+      "pair_coverages": [
+        [
+          0.188125,
+          0.18234375,
+          0.156796875
+        ],
+        [
+          0.155703125,
+          0.13378125,
+          0.16278125
+        ],
+        [
+          0.12890625,
+          0.153828125,
+          0.172078125
+        ]
+      ],
+      "knee_counts": [
+        17,
+        17,
+        16
+      ],
+      "ankle_counts": [
+        17,
+        16,
+        17
+      ]
+    },
+    "approximate_worst_pair_binomial_cov": 0.01027555941115233,
+    "note": "Independent LHS probes are used only to audit the chosen design's coverage estimate; they were not used by the annealing search."
+  },
+  "annealing": {
+    "initial_temperature": 10000.0,
+    "cooling_factor": 0.95,
+    "final_temperature": 0.01,
+    "inner_iteration_cap": 1000,
+    "early_stopping": false,
+    "stalled_round_improvement_tolerance": 0.0001,
+    "proposals": 270000,
+    "accepted_moves": 267341,
+    "best_updates": 53,
+    "temperature_rounds": 270,
+    "terminal_consecutive_stalled_rounds": 14,
+    "last_temperature": 0.010177704155697685,
+    "initial_objective": 0.46587480392604774,
+    "final_objective": 0.5593732447406046,
+    "initial_details": {
+      "objective": 0.46587480392604774,
+      "global_leg_coverage": 0.805419921875,
+      "mean_pair_leg_coverage": 0.1440158420138889,
+      "synthesis_coverage_after_count_penalty": 0.1263296859770955,
+      "pair_count_range": 7,
+      "pair_counts": [
+        [
+          7,
+          6,
+          4
+        ],
+        [
+          7,
+          7,
+          3
+        ],
+        [
+          3,
+          3,
+          10
+        ]
+      ],
+      "pair_coverages": [
+        [
+          0.17822265625,
+          0.139404296875,
+          0.1142578125
+        ],
+        [
+          0.179443359375,
+          0.205078125,
+          0.07958984375
+        ],
+        [
+          0.076171875,
+          0.09326171875,
+          0.230712890625
+        ]
+      ],
+      "knee_counts": [
+        17,
+        17,
+        16
+      ],
+      "ankle_counts": [
+        17,
+        16,
+        17
+      ]
+    },
+    "final_details": {
+      "objective": 0.5593732447406046,
+      "global_leg_coverage": 0.960693359375,
+      "mean_pair_leg_coverage": 0.16121419270833334,
+      "synthesis_coverage_after_count_penalty": 0.15805313010620917,
+      "pair_count_range": 1,
+      "pair_counts": [
+        [
+          6,
+          6,
+          5
+        ],
+        [
+          6,
+          5,
+          6
+        ],
+        [
+          5,
+          5,
+          6
+        ]
+      ],
+      "pair_coverages": [
+        [
+          0.1875,
+          0.17822265625,
+          0.154052734375
+        ],
+        [
+          0.15869140625,
+          0.138671875,
+          0.171630859375
+        ],
+        [
+          0.135009765625,
+          0.150146484375,
+          0.177001953125
+        ]
+      ],
+      "knee_counts": [
+        17,
+        17,
+        16
+      ],
+      "ankle_counts": [
+        17,
+        16,
+        17
+      ]
+    }
+  },
+  "ideal_pair_frequency_pattern_not_forced": "five cells with 6 runs and four cells with 5 runs; the published OCD penalizes imbalance but does not impose this as a hard quota",
+  "elapsed_seconds": 43.524,
+  "design_csv": "C:\\Users\\Admin\\Documents\\Codex\\2026-10-29\\rough-12000-rough-bo\\ocd_mixed_design_50_full_cooling\\ocd_design_50.csv"
+}
