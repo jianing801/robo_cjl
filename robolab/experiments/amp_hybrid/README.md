@@ -30,7 +30,7 @@
 
 同步使用最新版Rough的本地URDF导入适配（不升级软件）、换组前未使用缓存释放、scene_memory.jsonl和失败后120秒清理保护；控制器另监视本次会话失败信号，防止worker卡在关闭阶段。实际returncode与有效失败码分别记录，不再把原始0码当作成功。共享的两个Rough辅助源码哈希纳入AMP实验身份，改变后不能静默续训。此处仍没有完整自动重启/续训循环。
 
-当前验证限于CPU真实PPO+AMP连续更新、缓存清理和调度中断恢复；尚未执行新版Isaac连续换场景或4096环境显存测试，不能称为正式GPU验证完成。背包训练运行期间不并发启动AMP验证。
+本机已完成18环境、9种中点腿长/电机结构的真实Isaac三组/六次更新短测，以及96项AMP+Rough CPU回归；两套Adam连续、参考路由和几何审计通过。4096环境显存、长训和步态质量仍待验证。详见VALIDATION.md的最新记录。
 
 ## 参考动作
 
@@ -68,11 +68,18 @@ python robolab/experiments/amp_hybrid/prepare_bank.py \
   --output-dir /data/amp_hybrid/bank --generate-assets
 ```
 
-在已有HHTools独立Python中离线生成参考（不改Isaac Python的依赖）：
+仓库已附带本机短测验证过的HHTools 0.1.0源码、许可证和逐文件校验清单，无需手动上传或另行克隆HHTools。在当前训练环境中执行以下命令，自动创建独立的Python 3.12环境amp_hhtools并安装固定版本依赖；需要服务器能访问Python包源，但不升级训练环境或Isaac：
+
 ```bash
-/path/to/hhtools/python robolab/experiments/amp_hybrid/prepare_references.py \
+python robolab/experiments/amp_hybrid/setup_hhtools.py
+```
+
+随后在该独立环境中离线生成参考（以下路径按自己新建的AMP_ROOT填写）：
+```bash
+conda run --no-capture-output -n amp_hhtools python robolab/experiments/amp_hybrid/prepare_references.py \
   --bank /data/amp_hybrid/bank/bank.json \
-  --output /data/amp_hybrid/references --hhtools-root /actual/HHTools
+  --output /data/amp_hybrid/references \
+  --hhtools-root robolab/experiments/amp_hybrid/vendor/hhtools
 ```
 
 需要现有经过验证的HHTools 0.1.0 / Newton 1.1.0 / Warp 1.12.1环境，脚本会检查版本并强制CPU离线转换。初次可能耗时；未生成参考就不能训练。
@@ -109,4 +116,4 @@ CPU测试：
 python -m pytest robolab/experiments/amp_hybrid/test_amp_hybrid.py -q
 ```
 
-已验证真实PPOAMP小规模CPU更新、三组完整恢复、判别器双Adam/归一化、缓冲区清空、参考路由/哈希、调度中断恢复、原生AMPRunner构造和结构后缀隔离。尚未做Isaac真实仿真、全规模HHTools生成或长训，不宣称跑步效果/遗忘或计算收益已验证。详见VALIDATION.md。
+已验证真实PPOAMP小规模CPU更新、三组完整恢复、判别器双Adam/归一化、缓冲区清空、参考路由/哈希、调度中断恢复、原生AMPRunner构造和结构后缀隔离；真实Isaac三组短测也已通过。未做全规模HHTools生成或长训，不宣称跑步效果/遗忘或计算收益已验证。详见VALIDATION.md。
