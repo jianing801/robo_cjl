@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from typing import Any
@@ -231,19 +232,55 @@ def next_attempt_dir(output: Path, trial_number: int) -> Path:
 
 def run_child(command: list[str], *, cwd: Path, env: dict[str, str], stdout_path: Path,
               stderr_path: Path, timeout: int, label: str) -> None:
+    """Run one Isaac child in the foreground, teeing live output to terminal and files."""
     started = time.monotonic()
-    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+    console_lock = threading.Lock()
+
+    def pump(source, path: Path, console) -> None:
+        with path.open("w", encoding="utf-8", errors="replace", buffering=1) as log:
+            for line in iter(source.readline, ""):
+                log.write(line)
+                log.flush()
+                with console_lock:
+                    try:
+                        console.write(line)
+                        console.flush()
+                    except (BrokenPipeError, OSError):
+                        # Keep preserving per-attempt logs if the terminal disconnects.
+                        pass
+
+    process = subprocess.Popen(
+        command, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    stdout_thread = threading.Thread(
+        target=pump, args=(process.stdout, stdout_path, sys.stdout), daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=pump, args=(process.stderr, stderr_path, sys.stderr), daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.terminate()
         try:
-            result = subprocess.run(command, cwd=str(cwd), env=env, stdout=stdout, stderr=stderr,
-                                    timeout=timeout, check=False)
-        except subprocess.TimeoutExpired as exc:
-            atomic_json(stderr_path.with_suffix(stderr_path.suffix + ".timeout.json"), {
-                "label": label, "timeout_seconds": timeout, "elapsed_wall_s": time.monotonic() - started,
-                "error": str(exc),
-            })
-            raise RuntimeError(f"{label} timed out after {timeout}s; logs: {stdout_path}, {stderr_path}") from exc
-    if result.returncode != 0:
-        raise RuntimeError(f"{label} failed with rc={result.returncode}\n{tail(stderr_path)}")
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        atomic_json(stderr_path.with_suffix(stderr_path.suffix + ".timeout.json"), {
+            "label": label, "timeout_seconds": timeout, "elapsed_wall_s": time.monotonic() - started,
+            "error": str(exc),
+        })
+        raise RuntimeError(f"{label} timed out after {timeout}s; logs: {stdout_path}, {stderr_path}") from exc
+    stdout_thread.join()
+    stderr_thread.join()
+    if returncode != 0:
+        raise RuntimeError(f"{label} failed with rc={returncode}\\n{tail(stderr_path)}")
 
 
 def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[str, Any],
@@ -517,15 +554,25 @@ def main() -> int:
             continue
         trial_number = index
         metrics = find_metrics(output, trial_number, params)
+        total_candidates = len(designs) + args.bo_trials
+        completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
         if metrics is None:
-            print(f"[bo-finetune] OCD {index + 1}/50 params={params}", flush=True)
+            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+                  f"phase=OCD design={index + 1}/{len(designs)} trial={trial_number} params={params}",
+                  flush=True)
             metrics = run_candidate(args, output, provenance, {**row, **params}, trial_number, "ocd50")
+        else:
+            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} REUSE "
+                  f"phase=OCD design={index + 1}/{len(designs)} trial={trial_number}",
+                  flush=True)
         attrs = result_attrs(metrics, phase="ocd50", design_id=row["design_id"])
         study.add_trial(create_trial(params=params, distributions=distributions,
                                      values=[float(metrics["objective_value"])], user_attrs=attrs))
         write_results(output, study, provenance, protocol)
-        print(f"[bo-finetune] OCD COMPLETE trial={trial_number} "
-              f"MAE={metrics['objective_value']:.6f} fell={metrics['fell']}", flush=True)
+        completed_after = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
+        print(f"[BO_PROGRESS] {completed_after}/{total_candidates} COMPLETE "
+              f"phase=OCD trial={trial_number} MAE={metrics['objective_value']:.6f} "
+              f"fell={metrics['fell']}", flush=True)
 
     # Recover any adaptive trial interrupted after ask() by rerunning the same
     # request or importing its already-written summary, never another model.
@@ -541,7 +588,10 @@ def main() -> int:
         params = dict(frozen.params)
         metrics = find_metrics(output, frozen.number, params)
         if metrics is None:
-            print(f"[bo-finetune] resume pending GP trial={frozen.number} params={params}", flush=True)
+            completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
+            total_candidates = len(designs) + args.bo_trials
+            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+                  f"phase=GP trial={frozen.number} (resume pending) params={params}", flush=True)
             metrics = run_candidate(args, output, provenance, params, frozen.number, "gp")
         for name, value in result_attrs(metrics, phase="gp", design_id=f"gp_{frozen.number:05d}").items():
             study._storage.set_trial_user_attr(frozen._trial_id, name, value)
@@ -567,7 +617,10 @@ def main() -> int:
         if key in unique_keys:
             study.tell(trial, state=TrialState.PRUNED)
             continue
-        print(f"[bo-finetune] GP {completed_gp + 1}/{args.bo_trials} trial={trial.number} params={params}",
+        total_candidates = len(designs) + args.bo_trials
+        completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
+        print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+              f"phase=GP adaptive={completed_gp + 1}/{args.bo_trials} trial={trial.number} params={params}",
               flush=True)
         metrics = run_candidate(args, output, provenance, params, trial.number, "gp")
         attrs = result_attrs(metrics, phase="gp", design_id=f"gp_{trial.number:05d}")
@@ -577,8 +630,9 @@ def main() -> int:
         unique_keys.add(key)
         completed_gp += 1
         write_results(output, study, provenance, protocol)
-        print(f"[bo-finetune] GP COMPLETE trial={trial.number} "
-              f"MAE={metrics['objective_value']:.6f} fell={metrics['fell']}", flush=True)
+        print(f"[BO_PROGRESS] {len(designs) + completed_gp}/{len(designs) + args.bo_trials} COMPLETE "
+              f"phase=GP trial={trial.number} MAE={metrics['objective_value']:.6f} "
+              f"fell={metrics['fell']}", flush=True)
     if completed_gp < args.bo_trials:
         raise RuntimeError(f"obtained {completed_gp}/{args.bo_trials} unique adaptive BO observations")
 
