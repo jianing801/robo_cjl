@@ -341,7 +341,7 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
     if args.allow_source_matched_asset_hash_override:
         train_cmd.append("--allow-source-matched-asset-hash-override")
     if kit_args:
-        train_cmd += ["--kit-args", kit_args]
+        train_cmd += [f"--kit_args={kit_args}"]
     atomic_json(attempt / "train_command.json", {"argv": train_cmd, "cwd": str(code_root.parent)})
     run_child(train_cmd, cwd=code_root.parent, env=env,
               stdout_path=attempt / "finetune.stdout.log", stderr_path=attempt / "finetune.stderr.log",
@@ -367,7 +367,7 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
         "--headless",
     ]
     if kit_args:
-        eval_cmd += ["--kit-args", kit_args]
+        eval_cmd += [f"--kit_args={kit_args}"]
     if args.allow_source_matched_asset_hash_override:
         eval_cmd.append("--allow-source-matched-asset-hash-override")
     atomic_json(attempt / "evaluation_command.json", {"argv": eval_cmd, "cwd": str(code_root.parent)})
