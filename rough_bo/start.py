@@ -12,6 +12,8 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime
 
+from source_snapshot import prepare_checkpoint_source
+
 
 BO_WORKERS = {"bo_finetune_controller.py", "bo_finetune_candidate.py", "bo_finetune_evaluate.py"}
 
@@ -138,6 +140,7 @@ def main(argv=None):
         raise FileExistsError(f"Output already exists: {output}")
     with launch_lock(root / "robolab/logs/rough_bo/.foreground_launcher.lock"):
         reject_running_bo()
+        args.code_root = prepare_checkpoint_source(args.checkpoint, args.code_root, root)
         gpu = choose_gpu(query_gpus(), args.gpu, int(args.min_free_gb * 1024), args.max_utilization)
         command = build_command(args, root, gpu, output)
         print(f"GPU {gpu['index']}: {gpu['free_mib']} MiB free, utilization {gpu['utilization']}%", flush=True)

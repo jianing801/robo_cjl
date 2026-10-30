@@ -144,6 +144,7 @@ class LaunchTests(unittest.TestCase):
             root = Path(tmp)
             argv = self.fake_repo(root)
             with patch.object(start, "__file__", str(root / "rough_bo/start.py")), \
+                 patch.object(start, "prepare_checkpoint_source", return_value=root / "robolab"), \
                  patch.object(start, "query_gpus", return_value=self.gpus), \
                  patch.object(start, "reject_running_bo"), \
                  patch.object(start.subprocess, "Popen") as process, redirect_stdout(io.StringIO()):
@@ -155,6 +156,7 @@ class LaunchTests(unittest.TestCase):
             root = Path(tmp)
             argv = self.fake_repo(root)
             with patch.object(start, "__file__", str(root / "rough_bo/start.py")), \
+                 patch.object(start, "prepare_checkpoint_source", return_value=root / "robolab"), \
                  patch.object(start, "query_gpus", return_value=self.gpus), \
                  patch.object(start, "reject_running_bo"), \
                  patch.dict(start.os.environ, {"CUDA_VISIBLE_DEVICES": "2"}), \

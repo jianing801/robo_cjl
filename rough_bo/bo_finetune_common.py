@@ -92,7 +92,8 @@ def load_and_validate_assets(checkpoint_path: str | Path, bank_path: str | Path,
 
     runtime_audit = audit_source_files(root, identity)
     if runtime_audit.get("mismatch_count") != 0:
-        raise ValueError(f"checkpoint source audit failed ({runtime_audit.get('mismatch_count')} mismatches)")
+        raise ValueError(f"checkpoint source audit failed ({runtime_audit.get('mismatch_count')} mismatches): "
+                         + ", ".join(runtime_audit.get("mismatches", [])))
 
     bank = load_configurable_bank(bank_file)
     if (bank.get("context_width") != EXPECTED_CONTEXT_WIDTH

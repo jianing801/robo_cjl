@@ -666,6 +666,8 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except BaseException:
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception:
         traceback.print_exc()
-        raise
+        raise SystemExit(1)

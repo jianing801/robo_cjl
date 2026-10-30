@@ -91,6 +91,17 @@ These are launch-time checks, not a GPU memory reservation.
 
 The launcher uses the current environment's Python, the original server
 `model_11999.pt` and bank paths, and a new timestamped output directory.
+Before selecting a GPU, it audits the checkpoint's recorded source files. If
+only `train.py`, `train_stage.py` and/or `persistent_worker.py` differ, it builds
+a separate source directory under `robolab/logs/rough_bo/source_snapshots`.
+The three archived originals in `checkpoint_sources` must match the exact
+SHA256 recorded by this checkpoint. All recorded source files are verified
+again before BO can start. Other mismatches stop the launch and name the files.
+The source snapshot copies code from Git and the audited working files; data
+and vendor assets remain at their existing paths through directory links.
+Its `source_snapshot_audit.json` records the restored files and full hash audit.
+An incomplete or modified cached snapshot is retained and rejected.
+
 It sets the selected index consistently for Torch, Kit rendering and PhysX;
 the child environment clears `CUDA_VISIBLE_DEVICES` to keep those physical
 indices consistent. The source-matched asset hash override still requires
