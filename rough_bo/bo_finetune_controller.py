@@ -248,6 +248,7 @@ def run_child(command: list[str], *, cwd: Path, env: dict[str, str], stdout_path
                     except (BrokenPipeError, OSError):
                         # Keep preserving per-attempt logs if the terminal disconnects.
                         pass
+        source.close()
 
     process = subprocess.Popen(
         command, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -263,6 +264,21 @@ def run_child(command: list[str], *, cwd: Path, env: dict[str, str], stdout_path
     stderr_thread.start()
     try:
         returncode = process.wait(timeout=timeout)
+    except KeyboardInterrupt:
+        # The foreground terminal sends SIGINT to the whole process group.
+        # Reap the worker before the controller exits, including native hangs.
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        raise
     except subprocess.TimeoutExpired as exc:
         process.terminate()
         try:
@@ -280,7 +296,7 @@ def run_child(command: list[str], *, cwd: Path, env: dict[str, str], stdout_path
     stdout_thread.join()
     stderr_thread.join()
     if returncode != 0:
-        raise RuntimeError(f"{label} failed with rc={returncode}\\n{tail(stderr_path)}")
+        raise RuntimeError(f"{label} failed with rc={returncode}\n{tail(stderr_path)}")
 
 
 def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[str, Any],
@@ -557,12 +573,12 @@ def main() -> int:
         total_candidates = len(designs) + args.bo_trials
         completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
         if metrics is None:
-            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+            print(f"\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
                   f"phase=OCD design={index + 1}/{len(designs)} trial={trial_number} params={params}",
                   flush=True)
             metrics = run_candidate(args, output, provenance, {**row, **params}, trial_number, "ocd50")
         else:
-            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} REUSE "
+            print(f"\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} REUSE "
                   f"phase=OCD design={index + 1}/{len(designs)} trial={trial_number}",
                   flush=True)
         attrs = result_attrs(metrics, phase="ocd50", design_id=row["design_id"])
@@ -590,7 +606,7 @@ def main() -> int:
         if metrics is None:
             completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
             total_candidates = len(designs) + args.bo_trials
-            print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+            print(f"\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
                   f"phase=GP trial={frozen.number} (resume pending) params={params}", flush=True)
             metrics = run_candidate(args, output, provenance, params, frozen.number, "gp")
         for name, value in result_attrs(metrics, phase="gp", design_id=f"gp_{frozen.number:05d}").items():
@@ -619,7 +635,7 @@ def main() -> int:
             continue
         total_candidates = len(designs) + args.bo_trials
         completed_before = sum(t.state == TrialState.COMPLETE for t in study.get_trials(deepcopy=False))
-        print(f"\\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
+        print(f"\n[BO_PROGRESS] {completed_before + 1}/{total_candidates} START "
               f"phase=GP adaptive={completed_gp + 1}/{args.bo_trials} trial={trial.number} params={params}",
               flush=True)
         metrics = run_candidate(args, output, provenance, params, trial.number, "gp")

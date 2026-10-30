@@ -64,63 +64,63 @@ The default is 50 OCD observations followed by 50 GP proposals. Use
 Completed candidate results and incomplete attempt logs are retained in the run
 directory.
 
-### Linux server: foreground output on GPU 5
+### Linux server: one foreground launch command
 
-Run from the repository root using the checkpoint-matched Isaac Lab environment.
-The controller stays attached to this terminal. It prints a global BO counter
-(`1/100`, `2/100`, ...) before every candidate, then streams that candidate's
-ordinary PPO iteration output live. Per-attempt stdout/stderr are also saved.
-Do not launch a second copy. Pressing Ctrl+C interrupts the active BO process;
-it is not just a log viewer.
-
-The server bank can have different file bytes from the Windows replay bank. The
-explicit hash-override below permits that only after checkpoint iteration,
-configuration, motor/morphology scope, native source-hash, and checkpoint-matched
-source-tree audits pass. Do not use it for an unrelated checkpoint or bank.
+Activate the checkpoint-matched Isaac Lab environment in the repository root:
 
 ```bash
 cd /data/chenjiale/robo_cjl
 conda activate robo_cjl
-set -o pipefail
-
-# Keep CUDA_VISIBLE_DEVICES unset so cuda:5 and Kit device 5 refer to the same GPU.
-unset CUDA_VISIBLE_DEVICES
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-CHECKPOINT=/data/chenjiale/robo_cjl/robolab/logs/rough_hybrid/persistent_20261026_194622/attempts/group_000141_20261027_235200_111604/result/models/model_11999.pt
-BANK=/data/chenjiale/robo_cjl/robolab/logs/rough_hybrid/dynamic_20261026_174456/bank/bank.json
-CODE_ROOT=/data/chenjiale/robo_cjl/robolab
-RUN_DIR=/data/chenjiale/robo_cjl/robolab/logs/rough_bo/bo_$(date +%Y%m%d_%H%M%S)
-
-mkdir -p "$(dirname "$RUN_DIR")"
-if [ ! -s "$CHECKPOINT" ] || [ ! -s "$BANK" ]; then
-  echo "Checkpoint or bank file is missing; nothing was launched."
-elif [ -e "$RUN_DIR" ] || [ -e "$RUN_DIR.console.log" ]; then
-  echo "Output path already exists; choose a new timestamp; nothing was launched."
-else
-  FREE_MIB=$(nvidia-smi --id=5 --query-gpu=memory.free --format=csv,noheader,nounits | tr -d ' ')
-  if [[ "$FREE_MIB" =~ ^[0-9]+$ ]] && [ "$FREE_MIB" -ge 12800 ]; then
-    echo "Starting BO in the foreground on GPU 5; free memory: ${FREE_MIB} MiB"
-    python -u rough_bo/bo_finetune_controller.py \
-      --python "$(which python)" \
-      --checkpoint "$CHECKPOINT" \
-      --bank "$BANK" \
-      --code-root "$CODE_ROOT" \
-      --output "$RUN_DIR" \
-      --device cuda:5 \
-      --kit-args "--/renderer/activeGpu=5 --/physics/cudaDevice=5 --/renderer/multiGpu/enabled=false" \
-      --allow-source-matched-asset-hash-override \
-      --bo-trials 50 2>&1 | tee "$RUN_DIR.console.log"
-  else
-    echo "GPU 5 has only ${FREE_MIB:-unknown} MiB free; need at least 12800 MiB. Nothing was launched."
-  fi
-fi
+python rough_bo/start.py
 ```
 
-This is a foreground run, not a detached job. Keep this terminal open to see
-candidate progress and PPO output. The run directory retains all results and
-attempt logs; a failed run can be resumed with the same `--output` and
-`--resume` after its cause is fixed.
+Omit `--gpu` to automatically select a GPU with at least 12.5 GiB free and
+utilization at most 20%. Among eligible GPUs, select the one with the most free
+memory, breaking ties by lower utilization and then lower GPU index.
+If none qualifies, print the reason and return to the terminal without training.
+
+To specify a physical GPU index, use:
+
+```bash
+python rough_bo/start.py --gpu 5
+```
+
+An explicitly chosen GPU must still have at least 12.5 GiB free; its utilization
+is displayed but is not subject to the automatic-selection utilization limit.
+These are launch-time checks, not a GPU memory reservation.
+
+The launcher uses the current environment's Python, the original server
+`model_11999.pt` and bank paths, and a new timestamped output directory.
+It sets the selected index consistently for Torch, Kit rendering and PhysX;
+the child environment clears `CUDA_VISIBLE_DEVICES` to keep those physical
+indices consistent. The source-matched asset hash override still requires
+checkpoint/source/configuration audits to pass. Existing BO processes belonging
+to this user and simultaneous launchers are rejected.
+
+The run stays in the foreground. The terminal shows `BO_PROGRESS 1/100`
+before the first candidate and its ordinary PPO iteration output, followed by
+evaluation and the next candidate. Each candidate trains for 200 updates;
+the default plan is 50 initial designs plus 50 GP candidates.
+Per-attempt stdout/stderr and results are also saved. Ctrl+C interrupts training
+and reaps the active worker; keep the terminal open while it runs.
+
+Check inputs and GPU selection without starting training:
+
+```bash
+python rough_bo/start.py --check-only
+```
+
+Resume a previously initialized run:
+
+```bash
+python rough_bo/start.py --resume /absolute/path/to/bo_run --gpu 5
+```
+
+Omit `--gpu` when resuming to select a GPU automatically. The controller still
+checks the immutable run contract; use the original device if that contract
+rejects a device change. Override `--checkpoint`, `--bank` or `--code-root`
+only when their audited files moved.
+
 ## Output and audit
 
 The run directory contains an Optuna SQLite study, `trials.csv`, `summary.json`,
