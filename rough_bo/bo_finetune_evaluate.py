@@ -49,7 +49,20 @@ def parse_args():
     return args
 
 
-def main(args, app) -> int:
+def prepare_output_dir(output: Path, *, already_prepared: bool = False) -> None:
+    """Create the evaluation output directory exactly once.
+
+    The __main__ entry point creates it before starting Kit so that the
+    --portable-root path exists.  main() must therefore accept that
+    pre-created directory instead of rejecting it as a duplicate run.
+    """
+    if output.exists() and not already_prepared:
+        raise FileExistsError(f"evaluation output already exists: {output}")
+    if not output.exists():
+        output.mkdir(parents=True, exist_ok=False)
+
+
+def main(args, app, *, output_prepared: bool = False) -> int:
     root = add_source_import_paths(args.code_root)
     import torch
     import isaaclab_tasks  # noqa: F401
@@ -60,9 +73,7 @@ def main(args, app) -> int:
     bank_path = Path(args.bank).resolve()
     candidate_dir = Path(args.candidate_dir).resolve()
     output = Path(args.output).resolve()
-    if output.exists():
-        raise FileExistsError(f"evaluation output already exists: {output}")
-    output.mkdir(parents=True, exist_ok=False)
+    prepare_output_dir(output, already_prepared=output_prepared)
 
     saved_base, bank, provenance = load_and_validate_assets(
         base_checkpoint, bank_path, root,
@@ -306,9 +317,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     output = Path(args.output).resolve()
-    if output.exists():
-        raise FileExistsError(f"evaluation output already exists: {output}")
-    output.mkdir(parents=True, exist_ok=False)
+    prepare_output_dir(output)
     args.kit_args = (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
     application = AppLauncher(args).app
-    raise SystemExit(main(args, application))
+    raise SystemExit(main(args, application, output_prepared=True))

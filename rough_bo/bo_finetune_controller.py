@@ -376,7 +376,9 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
               timeout=args.eval_timeout, label=f"trial {trial_number} evaluation")
     summary_path = eval_dir / "summary.json"
     if not summary_path.is_file():
-        raise RuntimeError(f"evaluation exited without summary: {summary_path}")
+        detail = tail(attempt / "evaluation.stderr.log")
+        suffix = f"\n{detail}" if detail else ""
+        raise RuntimeError(f"evaluation exited without summary: {summary_path}{suffix}")
     metrics = json.loads(summary_path.read_text(encoding="utf-8"))
     expected = {
         "result": "ROUGH_CANDIDATE_200_UPDATE_SPEED_TRACKING_EVALUATED",
