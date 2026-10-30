@@ -35,6 +35,7 @@ from bo_finetune_common import (
     EXPECTED_CHECKPOINT_SHA256,
     add_source_import_paths,
     atomic_json,
+    disable_extension_fs_watcher,
     load_and_validate_assets,
     sha256_file,
 )
@@ -321,7 +322,9 @@ def run_candidate(args, output: Path, provenance: dict[str, Any], params: dict[s
     env["PYTHONUTF8"] = "1"
     code_root = Path(args.code_root).resolve()
     python = str(Path(args.python).resolve())
-    kit_args = args.kit_args.strip()
+    # Resolve per attempt, after the run protocol is frozen: changing args.kit_args
+    # earlier would make --resume reject an existing run_contract.json.
+    kit_args = disable_extension_fs_watcher(args.kit_args.strip())
 
     train_cmd = [
         python, "-u", str(HERE / "bo_finetune_candidate.py"),

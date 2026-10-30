@@ -11,7 +11,8 @@ FILES = ["robolab/rough_contract.py", "robolab/rough_geometry.py", "robolab/conf
          "scripts/tools/train_spatial_rough.py", "scripts/tools/spatial_rough_runtime.py"]
 ALLOWED = {"robolab.rough_contract", "robolab.rough_geometry", "robolab.configurable_morphology",
            "robolab.spatial_morphology", "robolab.spatial_policy", "robolab.physical_snapshot", "robolab.rough_gpu",
-           "robolab.tasks", "robolab.tasks.direct.base.base_env", "robolab.actuators.torque_speed_envelope"}
+           "robolab.tasks", "robolab.tasks.direct.base.base_env", "robolab.actuators.torque_speed_envelope",
+           "robolab.kit_args"}
 
 
 def test_no_historical_local_imports():

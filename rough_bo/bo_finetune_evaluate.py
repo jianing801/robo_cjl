@@ -15,6 +15,7 @@ from bo_finetune_common import (
     add_source_import_paths,
     apply_fixed_stair_task,
     atomic_json,
+    disable_extension_fs_watcher,
     load_and_validate_assets,
     sha256_file,
 )
@@ -318,6 +319,7 @@ if __name__ == "__main__":
     args = parse_args()
     output = Path(args.output).resolve()
     prepare_output_dir(output)
-    args.kit_args = (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
+    args.kit_args = disable_extension_fs_watcher(
+        (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable")
     application = AppLauncher(args).app
     raise SystemExit(main(args, application, output_prepared=True))

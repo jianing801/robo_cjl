@@ -13,6 +13,12 @@ import unittest
 from unittest.mock import patch
 
 BO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BO))
+
+from bo_finetune_common import (  # noqa: E402
+    DISABLE_EXTENSION_FS_WATCHER,
+    disable_extension_fs_watcher,
+)
 
 
 def load_function(filename, name, namespace):
@@ -38,6 +44,8 @@ class WorkerArgumentTests(unittest.TestCase):
             app_module = types.ModuleType("isaaclab.app")
             app_module.AppLauncher = AppLauncher
         kit = "--/renderer/activeGpu=5 --/physics/cudaDevice=5 --/renderer/multiGpu/enabled=false"
+        expected_kit = disable_extension_fs_watcher(kit)
+        self.assertTrue(expected_kit.endswith(DISABLE_EXTENSION_FS_WATCHER))
         parsed = []
         with tempfile.TemporaryDirectory(dir=BO / "tests") as tmp:
             root = Path(tmp)
@@ -59,11 +67,11 @@ class WorkerArgumentTests(unittest.TestCase):
                 with patch.dict(sys.modules, {"isaaclab.app": app_module}), patch.object(sys, "argv", command[2:]):
                     value = parser()
                 parsed.append(value)
-                self.assertEqual(value.kit_args, kit)
+                self.assertEqual(value.kit_args, expected_kit)
                 self.assertEqual(value.device, "cuda:5")
                 self.assertTrue(value.headless)
                 self.assertNotIn("--kit-args", command)
-                self.assertIn("--kit_args=" + kit, command)
+                self.assertIn("--kit_args=" + expected_kit, command)
                 if filename == "bo_finetune_candidate.py":
                     atomic(attempt / "finetune/finetune_complete.json", {"fine_tune_updates": 200, "checkpoint": str(root / "model_199.pt")})
                 else:
@@ -73,7 +81,8 @@ class WorkerArgumentTests(unittest.TestCase):
                         "fine_tune_updates": 200, "objective_value": 0.1})
             namespace = dict(Path=Path, os=os, json=json, math=math, HERE=BO,
                 DEFAULT_FINETUNE_UPDATES=200, next_attempt_dir=lambda *a: attempt,
-                atomic_json=atomic, run_child=run_child)
+                atomic_json=atomic, run_child=run_child,
+                disable_extension_fs_watcher=disable_extension_fs_watcher)
             run = load_function("bo_finetune_controller.py", "run_candidate", namespace)
             result = run(args, root, provenance, request, 0, "ocd50")
             self.assertEqual(len(parsed), 2)

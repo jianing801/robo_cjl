@@ -34,6 +34,8 @@ from robolab.assets.rpo_motor_catalog import (  # noqa: E402
     KNEE_MOTOR_CHOICES,
 )
 
+from robolab.kit_args import disable_extension_fs_watcher
+
 from isaaclab.app import AppLauncher
 
 
@@ -121,6 +123,7 @@ if args_cli.video:
 # Clear command-line arguments before Hydra/RSL-RL imports inspect sys.argv.
 sys.argv = [sys.argv[0]]
 
+args_cli.kit_args = disable_extension_fs_watcher(args_cli.kit_args)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 

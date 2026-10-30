@@ -8,6 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT.parent / "rsl_rl")]
 from robolab.backpack_distribution import sha, write_new, validate_checkpoint, validate_plan
+from robolab.kit_args import disable_extension_fs_watcher
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--plan", required=True)
@@ -26,7 +27,8 @@ if sha(design["urdf"]) != design["urdf_sha256"]:
     raise ValueError("URDF identity changed")
 output = Path(args.output).resolve()
 output.mkdir(parents=True, exist_ok=False)
-args.kit_args = (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
+args.kit_args = disable_extension_fs_watcher(
+    (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable")
 app = AppLauncher(args).app
 
 import torch

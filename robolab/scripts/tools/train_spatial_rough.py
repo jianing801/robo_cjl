@@ -11,6 +11,8 @@ import os
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT.parent / "rsl_rl")]
 
+from robolab.kit_args import disable_extension_fs_watcher
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -79,7 +81,8 @@ def main():
     from robolab.rough_gpu import reject_duplicate_bank
     reject_duplicate_bank(bank_path)
     a.task = "stairs"
-    a.kit_args = (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
+    a.kit_args = disable_extension_fs_watcher(
+        (a.kit_args or "") + f" --portable-root {output / 'portable'} --portable")
     app = AppLauncher(a).app
     env = raw = None
     try:

@@ -17,6 +17,7 @@ def main():
     from isaaclab.app import AppLauncher
     from robolab.morph_experiments import load_bank, write_new, execution_budget
     from robolab.mxt_design_transfer import file_sha
+    from robolab.kit_args import disable_extension_fs_watcher
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bank", required=True)
     parser.add_argument("--task", choices=("run", "stairs"), required=True)
@@ -60,7 +61,8 @@ def main():
         args.num_envs = args.smoke_num_envs
     args.physics_profile = "source_native"
     # Evaluation values must never flow into native training commands/resets.
-    args.kit_args = (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
+    args.kit_args = disable_extension_fs_watcher(
+        (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable")
     sys.argv = [sys.argv[0]]
     app = AppLauncher(args).app
     env = None

@@ -21,6 +21,23 @@ EXPECTED_CONTEXT_WIDTH = 24
 DEFAULT_NUM_ENVS = 4096
 DEFAULT_FINETUNE_UPDATES = 200
 DEFAULT_TRAINING_LR = 5.0625000000000024e-05
+DISABLE_EXTENSION_FS_WATCHER = "--/app/extensions/fsWatcherEnabled=false"
+_FS_WATCHER_SETTING = "--/app/extensions/fsWatcherEnabled"
+
+
+def disable_extension_fs_watcher(kit_args: str | None) -> str:
+    """Disable Kit's extension file watcher without overriding an explicit choice.
+
+    The Linux inotify watch limit is easily exhausted by the isaacsim extension
+    cache; BO workers never use extension hot reload. Kept local because this
+    module is imported before the checkpoint-matched RoboLab tree is on sys.path.
+    """
+    tokens = (kit_args or "").split()
+    if any(token == _FS_WATCHER_SETTING or token.startswith(_FS_WATCHER_SETTING + "=")
+           for token in tokens):
+        return " ".join(tokens)
+    tokens.append(DISABLE_EXTENSION_FS_WATCHER)
+    return " ".join(tokens)
 
 
 def sha256_file(path: str | Path) -> str:
