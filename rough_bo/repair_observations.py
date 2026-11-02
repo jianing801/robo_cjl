@@ -60,6 +60,16 @@ def convert_summary(summary: dict, contract: dict) -> dict:
     return {**summary, **corrected, "original_objective_value": summary["objective_value"]}
 
 
+def initial_observations(observations: list[dict]) -> list[dict]:
+    """Discard legacy adaptive proposals; keep the complete original OCD-50."""
+    selected = [o for o in observations if o["original_trial_number"] < 50]
+    if [o["original_trial_number"] for o in selected] != list(range(50)):
+        raise ValueError("requires all original 50 initial observations")
+    if any(o["phase"] != "ocd50" for o in selected):
+        raise ValueError("initial observations must be original OCD designs")
+    return selected
+
+
 def build_observations(run: Path) -> dict:
     run = run.resolve()
     contract_path, summary_path = run / "run_contract.json", run / "summary.json"
@@ -101,9 +111,12 @@ def build_observations(run: Path) -> dict:
         "bank_sha256": contract["bank_sha256"], "seed": 42,
         "eval_seed": contract["evaluation"]["seed"],
         "optimizer_initial_learning_rate": contract["fine_tuning"]["optimizer_initial_learning_rate"],
-        "observations": observations,
+        "observations": initial_observations(observations),
+        "selection": "initial_ocd50_only",
+        "excluded_original_trial_numbers": [o["original_trial_number"] for o in observations if o["original_trial_number"] >= 50],
         "old_run_modified": False,
         "historical_gp_was_selected_with_legacy_objective": True,
+        "historical_gp_imported": False,
         "not_a_retroactive_correction_of_the_search_path": True,
     }
 
@@ -120,6 +133,11 @@ def load_observations(path: Path, provenance: dict, *, seed: int, eval_seed: int
     if (document["seed"] != seed or document["eval_seed"] != eval_seed
             or not math.isclose(document["optimizer_initial_learning_rate"], learning_rate, rel_tol=1e-12)):
         raise ValueError("warm-start seeds or fine-tuning learning rate differ")
+    selected = initial_observations(document["observations"])
+    document["excluded_original_trial_numbers"] = sorted(set(document.get("excluded_original_trial_numbers", [])) | {o["original_trial_number"] for o in document["observations"] if o["original_trial_number"] >= 50})
+    document["observations"] = selected
+    document["selection"] = "initial_ocd50_only"
+    document["historical_gp_imported"] = False
     seen = set()
     for i, observation in enumerate(document["observations"]):
         metrics = validate_metrics(observation["metrics"])

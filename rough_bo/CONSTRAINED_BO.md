@@ -48,7 +48,7 @@ is required throughout the new controller.
   stays in m/s. A WhiteKernel accounts for small observation/modeling noise.
 * Feasibility: GaussianProcessClassifier with Bernoulli labels and a logistic
   Laplace approximation, trained on **all** evaluated success/fall outcomes.
-* Both use a Matérn-5/2 kernel on two normalized leg lengths, multiplied by an
+* Both use a Mat茅rn-5/2 kernel on two normalized leg lengths, multiplied by an
   exponential Hamming kernel on knee/ankle motor identities. Motor identifiers
   are compared for equality, never treated as ordered numeric distances.
 * Kernel hyperparameters are fitted by marginal likelihood. Bounds and any
@@ -93,7 +93,7 @@ python -m pip install -r rough_bo/requirements-bo.txt
 No `--upgrade` and no Isaac/PPO package changes are required. The additional
 modeling dependency is scikit-learn. Existing satisfactory versions are retained.
 
-## Reuse the old 100 evaluations without retraining them
+## Reuse only the original 50 initial evaluations
 
 Never use `--resume` on an old v1 run. Its GP proposals were selected using the
 wrong objective, and the old database must remain an immutable experimental
@@ -112,8 +112,10 @@ MAE, retains failed observations without an objective, and records source hashes
 and old scores. No simulator, model loading or database rewrite occurs. It stops
 on missing/ambiguous/mismatched evaluations rather than inventing data.
 
-For the reviewed run: 94 successful objective observations and 100 feasibility
-observations (including 6 falls). The initial 50 provide 46 successes and 4 falls.
+Only original trials 0–49 are imported: 46 successful objective observations and
+50 feasibility labels (including 4 falls). Original adaptive trials 50–99 are
+excluded from both models and final ranking. Even an older 100-point manifest
+is filtered at loading. Original experiment files remain available for audit.
 
 When you explicitly want new training evaluations, launch a **new** run:
 
@@ -128,10 +130,9 @@ physical GPU 5. The original training checkpoint/bank defaults still apply.
 The controller checks imported checkpoint/bank/seeds/LR against the actual
 current artifacts and validates the initial design table. Imported candidates
 are not retrained. Here `--bo-trials 50` means **50 NEW** constrained-BO proposals
-on top of the old 100, with total progress `101/150` through `150/150`.
-Historical adaptive points are labelled `historical_gp`, not misrepresented as
-having been chosen by the corrected algorithm. This cannot retroactively repair
-the old GP search path.
+on top of the initial 50, with total progress `51/100` through `100/100`.
+All 50 adaptive proposals are generated anew using the corrected criterion.
+The old adaptive search path is discarded from this run.
 
 For a CPU-only proposal preview (no training, no Isaac, no GPU requirement):
 

@@ -275,3 +275,16 @@ def test_new_start_rejects_old_run_before_gpu_lookup():
                 start.main(["--checkpoint",str(root/"base.pt"),"--bank",str(root/"bank.json"),
                             "--code-root",str(root/"code"),"--resume",str(old)])
             gpu.assert_not_called(); launch.assert_not_called()
+
+
+def test_only_initial_50_retained_from_old_100():
+    from repair_observations import initial_observations
+    rows = [dict(original_trial_number=i, phase="ocd50" if i < 50 else "historical_gp") for i in range(100)]
+    before = copy.deepcopy(rows)
+    assert initial_observations(rows) == rows[:50]
+    assert rows == before
+    with pytest.raises(ValueError, match="all original 50"):
+        initial_observations(rows[1:])
+    rows[2]["phase"] = "historical_gp"
+    with pytest.raises(ValueError, match="original OCD"):
+        initial_observations(rows)
