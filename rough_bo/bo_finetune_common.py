@@ -194,8 +194,21 @@ def make_candidate_design(request: dict[str, Any], bank: dict[str, Any], output:
     return design
 
 
+# Broadphase pair capacity is a count, not a byte budget. Set before scene creation.
+BO_AGGREGATE_PAIRS_CAPACITY = 2**23
+
+
+def configure_bo_physx(cfg: Any) -> dict:
+    physx = cfg.sim.physx
+    before = int(physx.gpu_total_aggregate_pairs_capacity)
+    physx.gpu_total_aggregate_pairs_capacity = max(before, BO_AGGREGATE_PAIRS_CAPACITY)
+    return {"gpu_total_aggregate_pairs_capacity": physx.gpu_total_aggregate_pairs_capacity,
+            "previous_capacity": before}
+
+
 def apply_fixed_stair_task(cfg: Any, *, seed: int = 42) -> None:
     """Pin the adaptation/evaluation task to the existing 10 cm stair test."""
+    configure_bo_physx(cfg)
     import isaaclab.terrains as terrains
     from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 

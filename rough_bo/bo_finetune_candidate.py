@@ -154,6 +154,7 @@ def run(args, app) -> int:
     cfg.seed = args.seed
     cfg.sim.device = args.device
     apply_fixed_stair_task(cfg, seed=42)
+    atomic_json(output / "physx_capacity.json", {"gpu_total_aggregate_pairs_capacity": int(cfg.sim.physx.gpu_total_aggregate_pairs_capacity)})
     cfg.capture_terminal_state = True
 
     env = raw = runner = None

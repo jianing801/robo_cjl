@@ -169,3 +169,23 @@ wiring, and the existing source-recovery/worker-argument/foreground tests.
 This implementation uses binary feasibility classification, not a fabricated
 continuous safety-margin measurement or a claim to reproduce every detail of
 the cited papers. No long training is part of the code-fix validation.
+
+
+## PhysX aggregate-pair capacity
+
+Before constructing either BO scene, set
+`cfg.sim.physx.gpu_total_aggregate_pairs_capacity` to at least `2**23`
+(8,388,608 pairs), preserving larger existing values. This is the broadphase
+buffer named by `totalAggregatePairsCapacity` overflow messages, independent of
+rigid contact/patch limits. Each worker writes `physx_capacity.json`.
+
+This reserves additional GPU capacity. It does not change the 4096 environments,
+rewards, terrain, motors, timestep, collision filtering or PPO. The existing
+spatial runtime already calls environment collision filtering; it is preserved.
+Native messages remain visible without automatic abort on a PhysX log line.
+
+Only newly constructed scenes receive the setting. CPU tests verify configuration
+and both worker paths; actual server load must confirm overflow is eliminated.
+Existing run contracts hash the modified files, so use a new run with the
+initial-50 manifest instead of silently resuming an old contract. Historical
+results are not automatically certified free of warnings by this change.

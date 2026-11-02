@@ -132,6 +132,7 @@ def main(args, app, *, output_prepared: bool = False) -> int:
     )
     cfg, source, _contract = configure_spatial(options, bank, [design], output)
     apply_fixed_stair_task(cfg, seed=args.seed)
+    atomic_json(output / "physx_capacity.json", {"gpu_total_aggregate_pairs_capacity": int(cfg.sim.physx.gpu_total_aggregate_pairs_capacity)})
     cfg.noise.add_noise = False
     cfg.capture_terminal_state = True
     for name, event in list(vars(cfg.events).items()):
