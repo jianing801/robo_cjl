@@ -29,6 +29,8 @@ def load_function(filename, name, namespace):
     return namespace[name]
 
 
+from bo_metrics import score_rollout, validate_metrics
+
 class WorkerArgumentTests(unittest.TestCase):
     def test_actual_train_and_evaluation_commands(self):
         try:
@@ -78,10 +80,12 @@ class WorkerArgumentTests(unittest.TestCase):
                     atomic(attempt / "evaluation/summary.json", {
                         "result": "ROUGH_CANDIDATE_200_UPDATE_SPEED_TRACKING_EVALUATED",
                         "trial_number": 0, "base_checkpoint_sha256": "basehash", "bank_sha256": "bankhash",
-                        "fine_tune_updates": 200, "objective_value": 0.1})
+                        "fine_tune_updates": 200, "params": request, "horizon_s": 20.,
+                        "elapsed_s": 20., "fell": False, **score_rollout(100., 1000, .02, 20., False)})
             namespace = dict(Path=Path, os=os, json=json, math=math, HERE=BO,
                 DEFAULT_FINETUNE_UPDATES=200, next_attempt_dir=lambda *a: attempt,
-                atomic_json=atomic, run_child=run_child,
+                atomic_json=atomic, run_child=run_child, validate_metrics=validate_metrics,
+                params_key=lambda p: tuple(sorted(p.items())),
                 disable_extension_fs_watcher=disable_extension_fs_watcher)
             run = load_function("bo_finetune_controller.py", "run_candidate", namespace)
             result = run(args, root, provenance, request, 0, "ocd50")

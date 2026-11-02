@@ -101,7 +101,8 @@ def build_command(args, root, gpu, output):
             "--output", str(output), "--device", f"cuda:{index}",
             "--kit-args", f"--/renderer/activeGpu={index} --/physics/cudaDevice={index} --/renderer/multiGpu/enabled=false",
             "--allow-source-matched-asset-hash-override", "--bo-trials", str(args.bo_trials),
-            *(["--resume"] if args.resume else [])]
+            *(["--resume"] if args.resume else []),
+            *(["--observations", str(args.observations)] if args.observations else [])]
 
 
 def main(argv=None):
@@ -110,7 +111,10 @@ def main(argv=None):
     parser.add_argument("--gpu", type=int, help="Physical nvidia-smi GPU index; default: automatically choose")
     parser.add_argument("--min-free-gb", type=float, default=12.5)
     parser.add_argument("--max-utilization", type=int, default=20, help="Automatic selection utilization limit")
-    parser.add_argument("--bo-trials", type=int, default=50)
+    parser.add_argument("--bo-trials", type=int, default=50,
+                        help="New constrained-GP evaluations, in addition to imported historical GP points")
+    parser.add_argument("--observations", type=Path,
+                        help="Converted legacy observation manifest; starts a new v2 run")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path, help="Resume this existing BO directory")
     parser.add_argument("--checkpoint", type=Path, default=root / "robolab/logs/rough_hybrid/persistent_20261026_194622/attempts/group_000141_20261027_235200_111604/result/models/model_11999.pt")
@@ -126,11 +130,23 @@ def main(argv=None):
     required = [args.checkpoint, args.bank, args.code_root / "scripts/tools/pretrained_rough_source_audit.py",
                 *[root / "rough_bo" / filename for filename in (
                     "bo_finetune_controller.py", "bo_finetune_candidate.py",
-                    "bo_finetune_evaluate.py", "bo_finetune_common.py")],
+                    "bo_finetune_evaluate.py", "bo_finetune_common.py",
+                    "bo_metrics.py", "constrained_gp.py", "repair_observations.py")],
                 root / "rough_bo/ocd_mixed_design_50_full_cooling/ocd_design_50.csv"]
     for path in required:
         if not path.is_file() or path.stat().st_size == 0:
             raise FileNotFoundError(f"Required file is missing or empty: {path}")
+    if args.resume:
+        contract_file = args.resume / "run_contract.json"
+        if not contract_file.is_file():
+            raise RuntimeError(f"Resume directory has no run_contract.json: {args.resume}")
+        contract = json.loads(contract_file.read_text(encoding="utf-8"))
+        if contract.get("metrics_schema") != "rough_complete_rollout_mae_v2":
+            raise ValueError("Old BO scoring cannot be resumed; convert it with repair_observations.py and start a NEW run")
+        if args.observations is None and contract.get("warm_start_observations"):
+            args.observations = Path(contract["warm_start_observations"]["path"])
+    if args.observations and not args.observations.is_file():
+        raise FileNotFoundError(args.observations)
     output = (args.resume or args.output or root / "robolab/logs/rough_bo" /
               f"bo_{datetime.now():%Y%m%d_%H%M%S_%f}").resolve()
     if args.resume:
@@ -144,7 +160,9 @@ def main(argv=None):
         gpu = choose_gpu(query_gpus(), args.gpu, int(args.min_free_gb * 1024), args.max_utilization)
         command = build_command(args, root, gpu, output)
         print(f"GPU {gpu['index']}: {gpu['free_mib']} MiB free, utilization {gpu['utilization']}%", flush=True)
-        print(f"BO: 50 initial designs + {args.bo_trials} GP candidates; each fine-tuned for 200 updates", flush=True)
+        print(f"BO: 50 initial designs + {args.bo_trials} NEW constrained-GP candidates; each fine-tuned for 200 updates", flush=True)
+        if args.observations:
+            print(f"WARM_START={args.observations} (old evaluations are reused, not retrained)", flush=True)
         print(f"OUTPUT={output}", flush=True)
         if args.check_only:
             print(json.dumps(command, ensure_ascii=False), flush=True)

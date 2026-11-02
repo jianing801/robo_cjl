@@ -6,3 +6,6 @@ docs/examples/**/*.step -text -diff
 
 # These vendored bytes are verified against upstream Git blob hashes.
 vendor/physical_1450a51/** -text
+
+# Checkpoint source repair payloads are SHA256-verified literal Git bytes.
+rough_bo/checkpoint_sources/** -text

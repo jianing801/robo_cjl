@@ -55,7 +55,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_physical_gpu_indices_match(self):
         args = Mock(checkpoint=Path("checkpoint.pt"), bank=Path("bank.json"),
-                    code_root=Path("code"), bo_trials=50, resume=None)
+                    code_root=Path("code"), bo_trials=50, resume=None, observations=None)
         command = start.build_command(args, Path("repo"), self.gpus[2], Path("output"))
         self.assertEqual(command[command.index("--device") + 1], "cuda:5")
         kit = command[command.index("--kit-args") + 1]
@@ -131,6 +131,7 @@ class LaunchTests(unittest.TestCase):
     def fake_repo(self, root):
         relative = ["rough_bo/bo_finetune_controller.py", "rough_bo/bo_finetune_candidate.py",
                     "rough_bo/bo_finetune_evaluate.py", "rough_bo/bo_finetune_common.py",
+                    "rough_bo/bo_metrics.py", "rough_bo/constrained_gp.py", "rough_bo/repair_observations.py",
                     "rough_bo/ocd_mixed_design_50_full_cooling/ocd_design_50.csv",
                     "robolab/scripts/tools/pretrained_rough_source_audit.py", "checkpoint.pt", "bank.json"]
         for name in relative:

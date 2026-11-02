@@ -21,6 +21,8 @@ from bo_finetune_common import (
 )
 
 
+from bo_metrics import score_rollout
+
 COMMAND_MPS = 0.5
 HORIZON_S = 20.0
 EVAL_SEED = 42
@@ -237,15 +239,10 @@ def main(args, app, *, output_prepared: bool = False) -> int:
             if fell or timed_out or bool(dones[0]):
                 break
 
-        # Fixed-horizon metric: after an early fall, count the unobserved tail
-        # as standing still (vx=0), so early termination cannot improve MAE by
-        # shortening the measurement window.
-        remaining_steps = max(0, max_steps - actual_steps)
-        total_abs_error = actual_abs_error_sum + remaining_steps * abs(COMMAND_MPS) \
-            * float(raw.step_dt)
-        tracking_mae = total_abs_error / HORIZON_S
-        observed_mae = actual_abs_error_sum / max(actual_steps, 1)
-        feasible = not fell and elapsed_s >= HORIZON_S - float(raw.step_dt) - 1e-6
+        # Full-rollout MAE is sum(error)/sample_count, NOT sum(error)/seconds.
+        # Early termination contributes a feasibility label, not a fabricated tail.
+        scoring = score_rollout(actual_abs_error_sum, actual_steps, float(raw.step_dt),
+                                HORIZON_S, fell, timed_out)
         module_audit = audit_loaded_modules(root, saved_base["hybrid_identity"], [
             "hybrid_bank", "hybrid_importer", "hybrid_policy", "hybrid_runtime",
             "robolab.physical_snapshot", "robolab.rough_geometry",
@@ -281,12 +278,9 @@ def main(args, app, *, output_prepared: bool = False) -> int:
             "elapsed_s": elapsed_s,
             "fell": fell,
             "timed_out": timed_out,
-            "feasible": feasible,
-            "tracking_mae_observed_mps": observed_mae,
-            "tracking_mae_fixed_horizon_mps": tracking_mae,
-            "objective_value": tracking_mae,
+            **scoring,
             "objective_direction": "minimize",
-            "failure_tail_rule": "after early fall, remaining horizon contributes |0 m/s - command|",
+            "failure_tail_rule": "none; infeasible rollout trains feasibility model only",
             "episode_return_diagnostic": episode_return,
             "ankle_clipping_fraction": clip_sum / max(actual_steps, 1),
             "max_abs_action": max_action,
@@ -295,7 +289,7 @@ def main(args, app, *, output_prepared: bool = False) -> int:
         }
         atomic_json(output / "summary.json", summary)
         print(f"BO_FINETUNE_EVAL_COMPLETE trial={fine_meta['trial_number']} "
-              f"mae={tracking_mae:.6f} fell={fell} feasible={feasible}", flush=True)
+              f"mae={scoring['objective_value']} fell={fell} feasible={scoring['feasible']}", flush=True)
         return 0
     except BaseException:
         failed = True
