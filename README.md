@@ -1,6 +1,6 @@
 # roboparty_train
 
-> **当前项目入口：** 请先阅读 [入口索引](ENTRYPOINTS.md)。三任务跨形态专家与共享策略使用 `robolab/experiments/multitask_morphology/`；下文保留上游通用说明，旧 Flat BO 顶层脚本已归档。
+> **当前项目入口：** 请先阅读 [入口索引](ENTRYPOINTS.md)。三任务跨形态专家与共享策略使用 `robolab/experiments/multitask_morphology/`；下文保留上游通用说明，旧 Flat BO 顶层脚本和旧专家入口已归档。
 
 [![IsaacSim](https://img.shields.io/badge/IsaacSim-5.1.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
 [![Isaac Lab](https://img.shields.io/badge/IsaacLab-2.3.2-silver)](https://isaac-sim.github.io/IsaacLab)

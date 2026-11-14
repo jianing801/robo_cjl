@@ -10,7 +10,7 @@ python /tmp/robo_api_update.py --repo /data/chenjiale/robo_cjl --apply
 
 具体行为：
 
-1. 要求分支正确、工作区干净、没有未完成的am/rebase/merge，也没有正在使用本仓库相关源码的训练/控制器。
+1. 要求分支正确、工作区干净、没有未完成的am/rebase/merge，也没有正在使用本仓库相关源码的训练、参考动作生成、资产准备或控制器。
 2. 读取GitHub提交的tree SHA；在内存/临时文件中处理快照，不向工作区解压。不执行下载内容。
 3. 按原始文件字节、可执行位和符号链接重新写入Git对象并构建tree；必须与GitHub的tree SHA完全相同。对不完整快照、Git子模块缺失、导出过滤导致的不一致均拒绝合并。
 4. 以本地已有的origin跟踪分支与当前HEAD的共同祖先作为导入基线，创建明确标注 `Import verified GitHub API snapshot ...` 的导入提交及 `api-snapshot/...` 分支。
@@ -21,3 +21,5 @@ python /tmp/robo_api_update.py --repo /data/chenjiale/robo_cjl --apply
 后续普通Git网络恢复时，应先获取并检查远端历史，再正常合并，不能期待存在本地提交的分支始终支持 `pull --ff-only`。不要把API导入分支当作远端原始提交。历史实验、模型和视频不由脚本清理；Git本身在合并时修改的是受版本管理的源码。
 
 本地验证包含：精确tree重建、错误SHA拒绝、非冲突更新保留本地提交、冲突时保留HEAD/备份/合并现场、origin跟踪分支不变。没有声称已经代替用户在服务器执行。
+
+旧专家源码归档期间，若正在生成AMP参考动作，应先让它完成。更新器现在也会检查参考动作/资产准备进程，遇到活动任务会拒绝更新，不会停止任务。

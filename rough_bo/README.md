@@ -1,5 +1,7 @@
 # Rough BO: 12k shared policy + per-design adaptation
 
+> 历史专家源码整理：旧Rough代码已归档，当前BO教师及其物理不变。推荐用 `start.py`，它按检查点SHA将所需历史源码恢复到独立审计缓存；已有冻结源码树继续直接使用。底层控制器的 `--code-root` 必须指向通过审计的树，不要指向源码档案。详见仓库 `legacy/expert_sources_20261114/README.md`。
+
 This folder contains the BO workflow that starts from the completed 12,000-update
 morphology-conditioned Rough policy, fine-tunes a separate policy for each
 candidate design, then scores it by forward-speed tracking error. It is isolated

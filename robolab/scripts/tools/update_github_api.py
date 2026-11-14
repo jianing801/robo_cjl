@@ -86,6 +86,14 @@ def import_archive(repo,stream,expected_tree):
             return tree,count
 
 
+def uses_source_tree(command,cwd,repo):
+    paths=[x.replace('\\','/') for x in command]
+    matching=any(any(p in x for p in ('multitask_morphology/','rough_hybrid/','amp_hybrid/','rough_bo/'))
+        and any(y in Path(x).name for y in ('train','worker','controller','prepare_references','prepare_assets','prepare_bank'))
+        for x in paths)
+    return matching and (cwd==repo or repo in cwd.parents or any(str(repo) in x for x in paths))
+
+
 def check_idle(repo):
     proc=Path('/proc')
     if not proc.is_dir():return
@@ -94,12 +102,9 @@ def check_idle(repo):
         try:
             if folder.stat().st_uid!=os.getuid():continue
             command=(folder/'cmdline').read_bytes().decode('utf8','replace').split('\0')
-            paths=[x.replace('\\','/') for x in command]
-            matching=any(any(p in x for p in ('multitask_morphology/','rough_hybrid/','amp_hybrid/','rough_bo/'))
-                and any(y in Path(x).name for y in ('train','worker','controller')) for x in paths)
             cwd=(folder/'cwd').resolve()
-            if matching and (cwd==repo or repo in cwd.parents or any(str(repo) in x for x in paths)):
-                raise RuntimeError(f'Related training/controller PID {folder.name} is active; no code update performed')
+            if uses_source_tree(command,cwd,repo):
+                raise RuntimeError(f'Related training/reference/asset/controller PID {folder.name} is active; no code update performed')
         except (PermissionError,FileNotFoundError,ProcessLookupError):continue
 
 

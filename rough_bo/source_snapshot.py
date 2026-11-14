@@ -17,6 +17,8 @@ EXPECTED_REPAIRS = {
     "hybrid:train_stage.py": "88648149221118542cbb986d14005d0008a5e96fa23d2fc52aab848bc2714108",
 }
 
+EXPERT_ARCHIVE = Path('legacy/expert_sources_20261114')
+
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -66,7 +68,7 @@ def extract_code_archive(repo, destination):
 
 
 def ensure_source_snapshot(code_root, identity, cache_root, bundle_root, repo_root):
-    """Recover only three known orchestration files; reject any other mismatch.
+    """Restore exact archived hybrid bytes or three known repairs, failing closed.
 
     All checkpoint-identified files are copied with their verified original
     bytes. Assets remain in their existing locations, linked read-only by use.
@@ -77,13 +79,32 @@ def ensure_source_snapshot(code_root, identity, cache_root, bundle_root, repo_ro
     mismatches = {key: value for key, value in rows.items() if not value["match"]}
     if not mismatches:
         return code_root
-    unknown = sorted(set(mismatches) - set(EXPECTED_REPAIRS))
+    replacements = {}
+    archived_files = []
+    archive = (repo_root / EXPERT_ARCHIVE).resolve()
+    for key, row in mismatches.items():
+        if not key.startswith('hybrid:'):
+            continue
+        # Do not disguise changed live physics/runtime as an archival recovery.
+        # Only absent files may be restored from an exact historical archive.
+        if row['actual'] is not None:
+            continue
+        candidate = source_path(archive / 'robolab', key).resolve()
+        if not candidate.is_relative_to(archive):
+            raise ValueError(f'Archived source path escapes its root: {key}')
+        if candidate.is_file():
+            data = candidate.read_bytes()
+            if sha(data) == row['expected']:
+                replacements[key] = data
+                archived_files.append(key)
+    unknown = sorted(set(mismatches) - set(EXPECTED_REPAIRS) - set(replacements))
     if unknown:
         raise ValueError("Unrecognized checkpoint source changes; no snapshot built: " + ", ".join(unknown))
     if code_root != repo_root / "robolab":
         raise ValueError("Automatic recovery requires this repository's robolab directory")
-    replacements = {}
     for key, row in mismatches.items():
+        if key in replacements:
+            continue
         data = (Path(bundle_root) / key.split(":", 1)[1]).read_bytes()
         if row["expected"] != EXPECTED_REPAIRS[key] or sha(data) != row["expected"]:
             raise ValueError(f"Bundled source does not match checkpoint: {key}")
@@ -126,6 +147,7 @@ def ensure_source_snapshot(code_root, identity, cache_root, bundle_root, repo_ro
     manifest.write_text(json.dumps({
         "result": "CHECKPOINT_SOURCE_SNAPSHOT_VERIFIED", "original_code_root": str(code_root),
         "code_root": str(target_root), "restored_files": sorted(replacements),
+        "archived_source_files": sorted(archived_files),
         "matched_sources": len(verified), "source_mismatches": 0, "files": verified,
     }, indent=2), encoding="utf-8")
     print(f"SOURCE_SNAPSHOT: restored {', '.join(sorted(replacements))}; "

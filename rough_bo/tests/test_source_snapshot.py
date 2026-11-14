@@ -94,6 +94,45 @@ class SourceSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "escapes"):
             self.recover()
 
+    def archive_runtime(self, data=b'original_runtime = 1\n', expected=None):
+        relative = 'hybrid_runtime.py'
+        self.identity['hybrid_sources'][relative] = expected or snapshot.sha(data)
+        archive = self.repo / snapshot.EXPERT_ARCHIVE / 'robolab/experiments/rough_hybrid' / relative
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(data)
+        return archive
+
+    def test_missing_archived_runtime_is_restored_by_exact_checkpoint_hash(self):
+        archive = self.archive_runtime()
+        before = archive.read_bytes()
+        target = self.recover()
+        self.assertEqual((target / 'experiments/rough_hybrid/hybrid_runtime.py').read_bytes(), before)
+        self.assertFalse((self.code / 'experiments/rough_hybrid/hybrid_runtime.py').exists())
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertTrue(all(row['match'] for row in snapshot.audit(target, self.identity).values()))
+        report = json.loads((target.parent / 'source_snapshot_audit.json').read_text())
+        self.assertEqual(report['archived_source_files'], ['hybrid:hybrid_runtime.py'])
+        self.assertEqual(target, self.recover())
+
+    def test_tampered_archive_is_rejected_before_building_snapshot(self):
+        self.archive_runtime(b'tampered\n', expected=snapshot.sha(b'original_runtime = 1\n'))
+        with self.assertRaisesRegex(ValueError, 'Unrecognized'):
+            self.recover()
+        self.assertFalse((self.base / 'cache').exists())
+
+    def test_archive_does_not_mask_a_changed_live_runtime(self):
+        self.archive_runtime()
+        (self.code / 'experiments/rough_hybrid/hybrid_runtime.py').write_bytes(b'changed live physics\n')
+        with self.assertRaisesRegex(ValueError, 'Unrecognized'):
+            self.recover()
+        self.assertFalse((self.base / 'cache').exists())
+
+    def test_missing_known_orchestration_still_uses_verified_repair_bundle(self):
+        for key in snapshot.EXPECTED_REPAIRS:
+            snapshot.source_path(self.code, key).unlink()
+        target = self.recover()
+        self.assertTrue(all(row['match'] for row in snapshot.audit(target, self.identity).values()))
+
 
 if __name__ == "__main__":
     unittest.main()

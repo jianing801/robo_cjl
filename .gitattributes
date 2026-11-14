@@ -18,3 +18,6 @@ robolab/experiments/multitask_morphology/scheduling/formal_schedule.json text eo
 
 # Historical launchers retain their original Git bytes and archived SHA256.
 legacy/flat_co_design_2026/** -text
+
+# Archived expert source identities are byte-exact, independent of checkout OS.
+legacy/expert_sources_20261114/** -text

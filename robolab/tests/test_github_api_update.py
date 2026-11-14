@@ -11,6 +11,19 @@ spec=importlib.util.spec_from_file_location('github_api_update',path)
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
 
+@pytest.mark.parametrize('script,subdir,expected',[
+    ('robolab/experiments/multitask_morphology/train.py','',True),
+    ('experiments/multitask_morphology/amp_engine/prepare_references.py','robolab',True),
+    ('experiments/amp_hybrid/prepare_references.py','robolab',True),
+    ('rough_bo/bo_finetune_controller.py','',True),
+    ('robolab/scripts/tools/update_github_api.py','',False),
+])
+def test_code_update_waits_for_reference_and_training_processes(tmp_path,script,subdir,expected):
+    repo=tmp_path/'repo'
+    assert module.uses_source_tree(['python',script],repo/subdir,repo)==expected
+    assert not module.uses_source_tree(['python',script],tmp_path/'unrelated',repo)
+
+
 def init(tmp_path):
     root=tmp_path/'repo';root.mkdir()
     subprocess.run(['git','init','-q',str(root)],check=True)

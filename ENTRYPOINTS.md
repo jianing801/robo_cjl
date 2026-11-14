@@ -25,8 +25,15 @@
 
 它们绑定旧Flat Optuna研究、旧服务器目录和旧评估批次，不属于当前Rough BO或三任务方案。原始版本与SHA256记录一并保留，可追溯；未删除数据库、实验、模型或视频。旧cron/外部自动化若仍指向这些根目录文件，需要单独核实，不能自动转接成新训练。
 
-## 仍保留的历史兼容目录
+## 已归档的四套旧专家与蒸馏源码
 
-`rough_hybrid`、`amp_hybrid`、`backpack_hybrid`、`rough_backpack_distill` 暂不搬动、不删除、不重定向。它们包含历史训练与蒸馏代码、源码身份和测试依赖。新实验使用 `multitask_morphology`，历史模型使用它训练时对应的冻结版本，不能仅因入口相似就换成新引擎。
+完整源码已移至 [历史专家档案](legacy/expert_sources_20261114/README.md)，原始Git字节及SHA256记录保留：`rough_hybrid`、`amp_hybrid`、`backpack_hybrid`、`rough_backpack_distill`。不要在档案目录直接执行旧脚本；需要历史复现时，使用记录的源提交建立独立checkout。
+
+experiments中仅特意保留两处兼容依赖：
+
+- `rough_hybrid/full_body_torque.py`：旧负重分布工具按原路径读取，原字节不变，已没有旧专家训练入口。
+- `amp_hybrid/vendor/`：现有HHTools editable环境可能指向它，暂时保留，不影响正在生成的参考动作；已没有旧AMP专家训练入口。
+
+旧Rough BO的检查点源码恢复器会按检查点SHA从档案恢复所需旧Rough文件到独立审计缓存，不改用新引擎。已有冻结代码树、所有模型、结构库、参考动作、录像和实验记录未移动或删除。
 
 历史 `HANDOFF.md` 保留为研究过程记录，不作为当前默认配置或启动规范。根目录中英文README下方仍含上游通用介绍，应以本入口索引和对应工作流文档为准。
