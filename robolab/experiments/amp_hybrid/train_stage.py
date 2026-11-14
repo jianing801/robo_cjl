@@ -109,6 +109,7 @@ def main(argv=None, session=None):
         importer = rough_module('hybrid_importer')
         write_new(output/'importer_audit.json', importer.install_local_importer_adapter())
         write_new(output/'morphology_alignment_audit.json', validate_bound_bank(bank))
+        a.full_body_torque = frozen['configuration'].get('full_body_torque', False)
         from amp_mixed_runtime import configure_spatial, SpatialVecEnv
         from amp_runtime import SpatialAmpEnv, SpatialAMPRunner, configure_amp
         from amp_support import extend_agent, serializable
@@ -237,13 +238,18 @@ def main(argv=None, session=None):
             runner.learn(remaining)
         capture_rng(session)
         audit = {}
-        for name in ("knees", "feet"):
+        audit_groups=tuple(raw.robot.actuators) if a.full_body_torque else ('knees','feet')
+        for name in audit_groups:
             actuator = raw.robot.actuators[name]
-            error = (actuator._clip_effort(actuator.computed_effort) - actuator.applied_effort).abs().max().item()
+            with torch.inference_mode():
+                error = (actuator._clip_effort(actuator.computed_effort) - actuator.applied_effort).abs().max().item()
             if error > 1e-4 or not torch.isfinite(actuator.applied_effort).all():
                 raise ValueError("live grouped motor clipping mismatch")
             audit[name] = dict(clipping_max_error=error, armature=actuator.armature.cpu().tolist(),
-                motor_groups=actuator.groups.cpu().tolist())
+                motor_groups=actuator.groups.cpu().tolist(),joint_names=list(actuator.joint_names))
+        if a.full_body_torque:
+            joints=sum((v['joint_names'] for v in audit.values()),[])
+            if len(joints)!=23 or len(set(joints))!=23:raise ValueError('full-body audit requires 23 unique joints')
         result = ("HYBRID_PHYSICS_SMOKE_PASSED" if a.smoke_only else
                   "AMP_HYBRID_STAGE_COMPLETE_NOT_GAIT_VALIDATED")
         write_new(output / "summary.json", dict(result=result,

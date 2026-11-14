@@ -26,7 +26,7 @@ class SpatialActorCritic(ActorCritic):
     def __init__(self, *args, native_config, **kwargs):
         self.native_config = deepcopy(native_config)
         width = native_config["context_width"]
-        if type(width) is not int or width < 20 or native_config.get("role") != "stairs":
+        if type(width) is not int or width < 20 or native_config.get("role") not in ("stairs", "backpack"):
             raise ValueError("explicit independent expert spatial context schema required")
         super().__init__(*args, **kwargs)
         if self.actor_obs_normalization:

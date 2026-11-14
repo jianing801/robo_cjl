@@ -62,6 +62,8 @@ def adopt_rough_bank(rough_path, grid):
     bank.update(kind=KIND, task_key='run')
     bank['training'] = dict(recipe=RECIPE, authorized_tasks=['run'],
         source_hashes=source_identity('run'), retargeted_references=True)
+    if rough['configuration'].get('gp_extrapolation'):
+        bank['training']['gp_extrapolation']=deepcopy(rough['training']['gp_extrapolation'])
     bank['rough_morphology_binding'] = dict(kind=BINDING_KIND,
         rough_bank=str(path), rough_bank_sha256=sha(path),
         read_only_asset_reuse=True)
@@ -81,4 +83,4 @@ def validate_bound_bank(bank):
 def shared_runtime_sources():
     """Include external helper dependencies in the strict experiment identity."""
     return {name: sha(ROUGH/name) for name in
-        ('hybrid_importer.py', 'hybrid_resources.py')}
+        ('hybrid_importer.py', 'hybrid_resources.py','hybrid_native_cache.py','prepare_native_cache.py','native_cache_coordinator.py','hybrid_assets.py')}

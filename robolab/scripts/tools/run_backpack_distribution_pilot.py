@@ -81,6 +81,7 @@ def main():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--full-body-torque", action="store_true")
     args = parser.parse_args()
     root = Path(args.root).resolve()
     plan_path = root / "plan.json"
@@ -93,6 +94,19 @@ def main():
             parser.error("new experiments require --template and --mesh-dir")
         plan = prepare(root, args.template.resolve(), args.mesh_dir.resolve())
     validate_plan(plan)
+    constraint_path = root / 'torque_constraint.json'
+    constraint = dict(full_body_torque=args.full_body_torque)
+    if args.full_body_torque:
+        sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
+        from full_body_torque import source_identity
+        constraint['sources'] = source_identity()
+    if constraint_path.exists():
+        if json.loads(constraint_path.read_text(encoding='utf8')) != constraint:
+            raise ValueError('existing experiment has different full-body torque settings/sources')
+    else:
+        if args.full_body_torque and any(root.glob('stage*_*/models/model_*.pt')):
+            raise ValueError('cannot change old backpack physics/rewards by resuming with new full-body constraints')
+        write_new(constraint_path, constraint)
     validate_physical_model(plan["physical_model"])
     print(json.dumps(dict(plan=str(plan_path), stages=plan["stages"], execute=args.execute), indent=2), flush=True)
     if not args.execute:
@@ -151,6 +165,8 @@ def main():
             "--kit_args=" + args.kit_args]
         if checkpoint:
             command += ["--resume-checkpoint", checkpoint]
+        if args.full_body_torque:
+            command += ['--full-body-torque']
         if args.smoke_only:
             command += ["--smoke-only"]
         environment = os.environ.copy()

@@ -12,7 +12,8 @@ def motor_health(env, rewards):
     names = env.reward_manager._term_names
     # Native _step_reward is already weighted, but is a reward RATE (no dt).
     terms = env.reward_manager._step_reward
-    soft_index = names.index('design_motor_torque_limits') if 'design_motor_torque_limits' in names else None
+    soft_name='full_body_torque_limits' if 'full_body_torque_limits' in names else 'design_motor_torque_limits'
+    soft_index = names.index(soft_name) if soft_name in names else None
     soft = terms[:, soft_index] * env.step_dt if soft_index is not None else torch.zeros_like(rewards)
     absolute_budget = terms.abs().sum(-1) * env.step_dt
     if not hasattr(env, '_motor_health_masks'):
@@ -52,4 +53,9 @@ def motor_health(env, rewards):
                 prefix + 'soft_reward_per_step': soft[selected].mean(),
                 prefix + 'soft_share_abs_reward_budget': soft[selected].abs().sum() / absolute_budget[selected].sum().clamp(min=1.e-12),
                 prefix + 'nonfinite_fraction': (~torch.isfinite(applied[selected]) | ~torch.isfinite(requested[selected]) | ~torch.isfinite(available[selected])).float().mean()})
+    if hasattr(env,'_full_body_torque_diagnostics'):
+        diag=env._full_body_torque_diagnostics
+        result['Health/full_body/soft_reward_per_step']=soft.mean()
+        result['Health/full_body/unavailable_fraction']=diag['unavailable'].float().mean()
+        result['Health/full_body/over_80_fraction']=(diag['utilization']>.8).float().mean()
     return {key: value.detach().clone() for key, value in result.items()}

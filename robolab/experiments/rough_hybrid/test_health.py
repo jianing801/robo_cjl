@@ -53,6 +53,15 @@ def test_disabled_penalty_and_new_scene_masks():
     other=fake_env();motor_health(other,torch.zeros(4))
     assert other._motor_health_masks is not first
 
+def test_full_body_penalty_is_not_reported_as_disabled():
+    env=fake_env();env.reward_manager._term_names=['tracking','full_body_torque_limits']
+    env._full_body_torque_diagnostics=dict(utilization=torch.ones(4,23)*.9,
+        unavailable=torch.zeros(4,23,dtype=torch.bool))
+    log=motor_health(env,torch.zeros(4))
+    torch.testing.assert_close(log['Health/full_body/soft_reward_per_step'],torch.tensor(-.02))
+    assert log['Health/full_body/over_80_fraction']==1
+    assert log['Health/full_body/unavailable_fraction']==0
+
 
 def test_native_reward_hook_captures_terminal_state_before_reset():
     source=Path(__file__).with_name('hybrid_runtime.py').read_text()

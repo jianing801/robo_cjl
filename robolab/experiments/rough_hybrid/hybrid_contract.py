@@ -21,8 +21,10 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint'}:
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint','full_body_torque'}:
         raise ValueError('expected grid, rotation and optional torque_soft_constraint')
+    if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
+    if config.get('full_body_torque') and config.get('torque_soft_constraint') not in (None,{'weight':0,'limit_ratio':.8}):raise ValueError('full-body and six-joint penalties cannot both be active')
     from hybrid_torque import validate_settings
     validate_settings(config.get('torque_soft_constraint'))
     g,r=config['grid'],config['rotation']
@@ -95,9 +97,16 @@ def stage_spec(bank,config,index):
 
 def experiment_identity(bank_path,config):
     from hybrid_support import source_identity
-    return dict(kind=KIND,task='stairs',bank_sha256=sha(bank_path),configuration=config,
-        native_sources=source_identity('stairs'),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
+    task=json.loads(Path(bank_path).read_text(encoding='utf8')).get('task_key','stairs')
+    result = dict(kind=KIND,task=task,bank_sha256=sha(bank_path),configuration=config,
+        native_sources=source_identity(task),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
         full_bank_context_is_stable=True,no_forgetting_metrics=True)
+    if config.get('full_body_torque'):
+        from full_body_torque import source_identity as torque_identity
+        result['full_body_sources']=torque_identity()
+        from hybrid_assets import mesh_sources
+        result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')))
+    return result
 
 def load_plan(path,bank_path):
     from hybrid_bank import load_configurable_bank
@@ -126,7 +135,7 @@ def validate_checkpoint(path,experiment,expected_completed):
     from hybrid_layout import identity
     extra=weights.get('_extra_state',{})
     native=extra.get('config',{})
-    if native.get('spatial_identity')!=identity(experiment) or native.get('role')!='stairs':raise ValueError('policy extra-state identity mismatch')
+    if native.get('spatial_identity')!=identity(experiment) or native.get('role')!=experiment.get('task','stairs'):raise ValueError('policy extra-state identity mismatch')
     if not any(k.startswith('actor.') for k in weights) or not any(k.startswith('critic.') for k in weights):raise ValueError('actor/critic missing')
     def finite(value):
         if isinstance(value,torch.Tensor):

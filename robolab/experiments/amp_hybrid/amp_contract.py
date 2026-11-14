@@ -21,7 +21,8 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if set(config)!={'grid','rotation'}:raise ValueError('expected grid and rotation configuration')
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque'}:raise ValueError('expected grid, rotation and optional full_body_torque')
+    if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
     g,r=config['grid'],config['rotation']
     if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
     e=positive(g['num_envs'],'grid.num_envs')
@@ -93,11 +94,16 @@ def stage_spec(bank,config,index):
 def experiment_identity(bank_path,config,reference_library):
     from amp_support import source_identity
     from amp_rough_alignment import shared_runtime_sources
-    return dict(kind=KIND,task='run',bank_sha256=sha(bank_path),configuration=config,
+    result = dict(kind=KIND,task='run',bank_sha256=sha(bank_path),configuration=config,
         native_sources=source_identity('run'),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
         full_bank_context_is_stable=True,no_forgetting_metrics=True,reference_library_sha256=sha(reference_library),
         local_assets={'native_ground.usda':sha(HERE/'native_ground.usda')},
         shared_rough_runtime_helpers=shared_runtime_sources())
+    if config.get('full_body_torque'):
+        from amp_rough_alignment import rough_module
+        result['full_body_sources']=rough_module('full_body_torque').source_identity()
+        result['mesh_sources']=rough_module('hybrid_assets').mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')))
+    return result
 
 def load_plan(path,bank_path):
     from amp_bank import load_configurable_bank

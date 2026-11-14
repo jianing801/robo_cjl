@@ -31,7 +31,7 @@ def serializable(value):
 
 def source_identity(task="stairs"):
     """Freeze only shared dependencies used by this independent Rough copy."""
-    if task != "stairs":
+    if task not in ("stairs", "backpack"):
         raise ValueError("hybrid training supports Rough only")
     paths = {"robolab/rough_geometry.py", "robolab/physical_snapshot.py",
              "robolab/rough_gpu.py", "robolab/spatial_spawn.py",
@@ -40,6 +40,10 @@ def source_identity(task="stairs"):
     for folder in ("robolab/tasks/direct/base", "robolab/actuators", "../rsl_rl/rsl_rl"):
         paths.update(folder+"/"+p.relative_to(ROOT/folder).as_posix()
                      for p in (ROOT/folder).rglob("*.py"))
+    if task == 'backpack':
+        paths.add('data/native_probe_ground.usda')
+        for folder in ('robolab/tasks/direct/backpack_rpo_flat','robolab/tasks/direct/backpack_walk'):
+            paths.update(p.relative_to(ROOT).as_posix() for p in (ROOT/folder).rglob('*.py'))
     return {p: hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in sorted(paths)}
 
 def interpolate(points, x):
@@ -52,7 +56,7 @@ def interpolate(points, x):
 
 
 def extend_agent(source, *, bank_sha, context_width, task="stairs"):
-    if task != "stairs":
+    if task not in ("stairs", "backpack"):
         raise ValueError("hybrid training supports Rough only")
     agent = deepcopy(source)
     agent["policy"].update(class_name="hybrid_policy:SpatialActorCritic",

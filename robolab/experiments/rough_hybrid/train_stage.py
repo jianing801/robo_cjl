@@ -73,11 +73,12 @@ def main(argv=None, session=None):
         raise ValueError("hybrid worker requires its independently generated hybrid bank; old banks remain untouched")
     bank = load_configurable_bank(bank_path)
     task = bank.get("task_key", "stairs")
-    if task != "stairs":
+    if task not in ("stairs", "backpack"):
         raise ValueError("this independent copy supports Rough only")
     from hybrid_contract import load_plan, stage_spec
     frozen = load_plan(a.hybrid_plan, bank_path)
     a.torque_soft_constraint = frozen['configuration'].get('torque_soft_constraint')
+    a.full_body_torque = frozen['configuration'].get('full_body_torque', False)
     stage = stage_spec(bank, frozen["configuration"], a.stage_index)
     if a.design_ids is not None and a.design_ids != stage["design_ids"]:
         raise ValueError("CLI design IDs differ from frozen schedule")
@@ -128,6 +129,9 @@ def main(argv=None, session=None):
         from rsl_rl.utils import resolve_callable
         torch.set_num_threads(2)
         env_type, runner_type, configurator = SpatialRoughEnv, SpatialRunner, None
+        if task == 'backpack':
+            from hybrid_backpack import configure_backpack, SpatialBackpackEnv
+            env_type,configurator = SpatialBackpackEnv,configure_backpack
         cfg, source, contract = configure_spatial(a, bank, designs, output, configurator=configurator)
         if session is not None:
             def check_cycles(obj, path='', ancestors=None):
@@ -245,6 +249,9 @@ def main(argv=None, session=None):
             body_names=list(raw.robot.body_names),
             actor_observation_width=runner.alg.storage.observations["policy"].shape[-1]))
         if a.smoke_only:
+            if task == 'backpack':
+                from hybrid_backpack import apply_payload
+                apply_payload(raw,output,stage['first_update'])
             with torch.inference_mode():
                 obs = env.get_observations()
                 for _ in range(8):
@@ -252,16 +259,25 @@ def main(argv=None, session=None):
             if len(runner.alg.optimizer.state):
                 raise RuntimeError("zero-update smoke changed optimizer")
         else:
-            runner.learn(remaining)
+            if task == 'backpack':
+                from hybrid_backpack import learn_payload
+                learn_payload(runner,raw,output,a.updates)
+            else:
+                runner.learn(remaining)
         capture_learning_rng(session)
         audit = {}
-        for name in ("knees", "feet"):
+        audit_groups = tuple(raw.robot.actuators) if a.full_body_torque else ('knees','feet')
+        for name in audit_groups:
             actuator = raw.robot.actuators[name]
-            error = (actuator._clip_effort(actuator.computed_effort) - actuator.applied_effort).abs().max().item()
+            with torch.inference_mode():
+                error = (actuator._clip_effort(actuator.computed_effort) - actuator.applied_effort).abs().max().item()
             if error > 1e-4 or not torch.isfinite(actuator.applied_effort).all():
                 raise ValueError("live grouped motor clipping mismatch")
             audit[name] = dict(clipping_max_error=error, armature=actuator.armature.cpu().tolist(),
-                motor_groups=actuator.groups.cpu().tolist())
+                motor_groups=actuator.groups.cpu().tolist(),joint_names=list(actuator.joint_names))
+        if a.full_body_torque:
+            joints=sum((v['joint_names'] for v in audit.values()),[])
+            if len(joints)!=23 or len(set(joints))!=23:raise ValueError('full-body audit requires 23 unique joints')
         result = ("HYBRID_PHYSICS_SMOKE_PASSED" if a.smoke_only else
                   "HYBRID_STAGE_COMPLETE_NOT_GAIT_VALIDATED")
         write_new(output / "summary.json", dict(result=result,
@@ -269,6 +285,7 @@ def main(argv=None, session=None):
             optimizer_updates=0 if a.smoke_only else remaining,
             completed_updates=0 if a.smoke_only else runner.current_learning_iteration + 1,
             absolute_target_updates=a.updates, stage=stage, layout=layout, motor_audit=audit,
+            task=task,full_body_torque=a.full_body_torque,
             no_serial_checkpoint_loaded=True, requires_gait_evaluation=not a.smoke_only))
         print("SPATIAL_COMPLETE", output, flush=True)
     except BaseException:

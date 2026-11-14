@@ -61,8 +61,11 @@ class SpatialMotor(TorqueSpeedEnvelopeActuator):
 
     def _clip_effort(self, effort):
         result = torch.empty_like(effort)
+        if not hasattr(self, 'dynamic_effort_limit'):
+            self.dynamic_effort_limit = torch.empty_like(effort)
         for ids, table in self.spatial_curves:
             limit = interpolate_validated_envelope(self._joint_vel[ids], table, self.effort_limit[ids])
+            self.dynamic_effort_limit[ids] = limit
             result[ids] = torch.clamp(effort[ids], -limit, limit)
         return result
 
@@ -78,9 +81,10 @@ def configure_spatial(options, bank, designs, output, configurator=None):
     cache = {}
     if options.asset_cache:
         from isaaclab.sim.converters.asset_converter_base import AssetConverterBase
-        for entry in Path(options.asset_cache).resolve().rglob(".asset_hash"):
-            if (entry.parent / "config.yaml").is_file() and any(entry.parent.glob("*.usd")):
-                cache.setdefault(entry.read_text().strip(), entry.parent)
+        from amp_rough_alignment import rough_module
+        for directory in rough_module('hybrid_native_cache').cache_directories(Path(options.asset_cache).resolve(),options.bank,
+                [d['id'] for d in designs],require_complete=getattr(options,'full_body_torque',False)):
+            cache.setdefault((directory/'.asset_hash').read_text().strip(),directory)
     assets, robots = [], []
     for d in designs:
         robot = cfg.scene.robot.copy()
@@ -126,6 +130,12 @@ def configure_spatial(options, bank, designs, output, configurator=None):
         values = deepcopy(vars(first))
         values.pop("class_type", None)
         mixed.actuators[name] = SpatialMotorCfg(**values, spatial_parameters=params)
+    if getattr(options, 'full_body_torque', False):
+        from amp_rough_alignment import rough_module
+        module=rough_module('full_body_torque')
+        contract['full_body_motor_curves']=module.install_fixed_motor_curves(mixed,SpatialMotorCfg,len(designs))
+        module.install_full_body_reward(cfg)
+        contract['full_body_torque']=dict(weight=-12.,threshold=.8,joint_count=23)
     cfg.scene.replicate_physics = False
     if hasattr(cfg, "scene_context"):
         cfg.scene_context.robot = mixed

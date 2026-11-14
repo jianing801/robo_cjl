@@ -1,0 +1,241 @@
+"""Frozen native AMP teacher sampling or shared-student evaluation, no PPO."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import threading
+import traceback
+from types import SimpleNamespace
+
+HERE=Path(__file__).resolve().parent
+from contract import load_plan,sha,write_new,graph_features,unified_context
+
+def main():
+    from isaaclab.app import AppLauncher
+    p=argparse.ArgumentParser(description=__doc__)
+    for name in ('plan','design-ids','output'):p.add_argument('--'+name,required=True)
+    p.add_argument('--student');p.add_argument('--mode',choices=['collect','evaluate'],default='collect')
+    p.add_argument('--steps',type=int,default=1000);p.add_argument('--stride',type=int,default=2)
+    p.add_argument('--seed',type=int,default=20261030);p.add_argument('--speed',type=float,default=2.)
+    p.add_argument('--reset-yaw-range',type=float,default=.05)
+    p.add_argument('--ppo-channel')
+    p.add_argument('--full-body-torque',action='store_true')
+    p.add_argument('--video',action='store_true')
+    AppLauncher.add_app_launcher_args(p);a=p.parse_args()
+    if a.video:a.enable_cameras=True
+    if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
+    plan=load_plan(a.plan);spec=plan['teachers']['run'];code=Path(spec['code_root'])
+    sys.path[:0]=[str(code/'experiments/amp_hybrid'),str(code),str(code.parent/'rsl_rl')]
+    out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=False)
+    if a.video:
+        from shared_video import reuse_shader_cache
+        reuse_shader_cache(out)
+    a.kit_args=(a.kit_args or '')+f' --vulkan --/renderer/multiGpu/enabled=false --portable-root {out/"portable"} --portable'
+    app=AppLauncher(a).app;raw=None;status=1
+    try:
+        import torch
+        torch.set_num_threads(2)
+        import isaaclab_tasks,robolab.tasks
+        from amp_bank import load_configurable_bank
+        from amp_references import validate_library
+        from amp_rough_alignment import rough_module
+        from amp_mixed_runtime import configure_spatial,SpatialVecEnv
+        from amp_runtime import SpatialAmpEnv,configure_amp
+        from amp_policy import SpatialActorCritic
+        from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+        from rollout import reuse_assets,canonical_input
+        from amp_adapter import decode_amp_frames,StreamingHistory
+        from student import load_student
+        write_new(out/'importer_audit.json',rough_module('hybrid_importer').install_local_importer_adapter())
+        bank=load_configurable_bank(spec['bank']);ids=a.design_ids.split(',')
+        if len(ids)!=len(set(ids)) or not set(ids)<=set(spec['design_ids']):raise ValueError('Unknown or duplicate AMP design')
+        by_id={d['id']:d for d in bank['designs']};designs=[by_id[i] for i in ids];n=len(ids)*spec['copies']
+        if sha(spec['reference_library'])!=spec['reference_library_sha256']:raise ValueError('Reference manifest changed')
+        library=validate_library(bank,spec['bank'],spec['reference_library'],ids)
+        options=SimpleNamespace(num_envs=n,device=a.device,asset_cache=None,allow_cache_misses=True,
+            reference_library=spec['reference_library'])
+        cfg,agent,source_contract=configure_spatial(options,bank,designs,out,configurator=configure_amp)
+        cfg.seed=a.seed;cfg.observations.policy.enable_corruption=False
+        for name,event in list(vars(cfg.events).items()):
+            if getattr(event,'mode',None) in ('startup','interval'):setattr(cfg.events,name,None)
+        cfg.events.reset_base.params['pose_range']={k:(-.01,.01) if k in ('x','y') else (-a.reset_yaw_range,a.reset_yaw_range) if k=='yaw' else (0.,0.)
+            for k in cfg.events.reset_base.params['pose_range']}
+        cfg.events.reset_base.params['velocity_range']={k:(0.,0.) for k in cfg.events.reset_base.params['velocity_range']}
+        if cfg.events.reset_robot_joints.func.__name__!='reset_joints_by_scale':
+            raise ValueError('Unknown native AMP reset semantics')
+        cfg.events.reset_robot_joints.params.update(position_range=(.99,1.01),velocity_range=(0.,0.))
+        for actuator in cfg.scene.robot.actuators.values():
+            if hasattr(actuator,'min_delay'):actuator.min_delay=0;actuator.max_delay=0
+        command=cfg.commands.base_velocity
+        command.resampling_time_range=(1000.,1000.);command.rel_standing_envs=0.;command.rel_heading_envs=1.
+        command.ranges.lin_vel_x=(a.speed,a.speed);command.ranges.lin_vel_y=(0.,0.)
+        command.ranges.ang_vel_z=(-.4,.4);command.ranges.heading=(0.,0.)
+        expected_terms=['base_ang_vel','projected_gravity','velocity_commands','joint_pos','joint_vel','actions']
+        for name in expected_terms:
+            term=getattr(cfg.observations.policy,name)
+            if term.scale not in (None,1.):raise ValueError('AMP physical observation scale differs')
+            if term.clip is not None:raise ValueError('AMP observation clipping needs explicit reconciliation')
+        if cfg.observations.policy.history_length!=3:raise ValueError('AMP native history changed')
+        cfg.sim.render_interval=1000000
+        if a.full_body_torque:
+            import importlib.util as _importlib
+            _spec=_importlib.spec_from_file_location('_smoke_full_body',HERE.parent/'rough_hybrid/full_body_torque.py')
+            _full=_importlib.module_from_spec(_spec);_spec.loader.exec_module(_full)
+            from amp_mixed_runtime import SpatialMotorCfg as FullMotorCfg
+            write_new(out/'full_body_configuration.json',_full.activate_for_config(cfg,FullMotorCfg,len(designs)))
+        cache=reuse_assets(cfg,spec['asset_cache'],out,'run',designs);write_new(out/'asset_cache_audit.json',cache)
+        if a.video:cfg.viewer.resolution=(960,540)
+        raw=SpatialAmpEnv(cfg,render_mode='rgb_array' if a.video else None)
+        class SamplingVecEnv(SpatialVecEnv):
+            def step(self,actions):
+                obs,rewards,dones,extras=RslRlVecEnvWrapper.step(self,actions)
+                return self._extend(obs),rewards,dones,extras
+        env=SamplingVecEnv(raw,None,agent.get('clip_actions'))
+        names=bank['canonical_semantic_contract']['joint_names'];q0=bank['canonical_semantic_contract']['default_joint_pos']
+        if list(raw.robot.joint_names)!=names or raw.step_dt!=.02:raise ValueError('AMP joint/control contract differs')
+        if list(raw.observation_manager.active_terms['policy'])!=expected_terms:raise ValueError('AMP term order differs')
+        action_term=raw.action_manager.get_term('joint_pos')
+        if not torch.as_tensor(action_term._scale).eq(.25).all():raise ValueError('AMP action scale differs')
+        if not torch.allclose(raw.robot.data.default_joint_pos,torch.tensor(q0,device=raw.device).expand(n,-1),atol=1e-6):
+            raise ValueError('AMP default pose differs')
+        import omni.usd
+        stage=omni.usd.get_context().get_stage()
+        routed=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
+        if routed!=[ids[i%len(ids)] for i in range(n)]:raise ValueError('AMP physical/context routing differs')
+        motion=raw.motion_data_manager.get_term('motion_dataset')
+        actual_libraries=[motion.terms[i].cfg.motion_data_dir for i in motion.env_library.cpu().tolist()]
+        if actual_libraries!=[library['designs'][i]['directory'] for i in routed]:raise ValueError('AMP reference routing differs')
+        from amp_fast_reference import install_verified
+        routing=install_verified(motion,raw.animation_manager.get_term('animation'))
+        write_new(out/'reference_cache_parity.json',dict(native_outputs_exact=True,
+            packed_native_lookup_verified=routing.merged_verified,packed_fallback_reason=routing.merge_fallback_reason,
+            changed='Native reference values/interpolation retained; deterministic table lookup or membership cache; sampling order/RNG unchanged'))
+        masses=raw.robot.root_physx_view.get_masses().sum(-1)
+        for i,d in enumerate(designs):
+            if abs(float(masses[i])-d['total_mass_kg'])>2e-4:raise ValueError('AMP actual physical mass differs')
+        import xml.etree.ElementTree as ET
+        geometry=[]
+        for i,d in enumerate(designs):
+            tree=ET.parse(d['urdf']).getroot()
+            for name in ('left_knee_joint','right_knee_joint','left_ankle_pitch_joint','right_ankle_pitch_joint'):
+                joint=tree.find(f"joint[@name='{name}']")
+                parent=raw.robot.body_names.index(joint.find('parent').get('link'))
+                child=raw.robot.body_names.index(joint.find('child').get('link'))
+                length=sum(float(v)**2 for v in joint.find('origin').get('xyz').split())**.5
+                error=abs(float((raw.robot.data.body_pos_w[i,parent]-raw.robot.data.body_pos_w[i,child]).norm())-length)
+                if error>2e-4:raise ValueError('AMP real geometry differs from URDF')
+                geometry.append(dict(design=d['id'],joint=name,error_m=error))
+        write_new(out/'geometry_audit.json',dict(verified=True,joints=geometry))
+        write_new(out/'reference_routing_audit.json',dict(verified=True,design_ids=routed,per_env_libraries=actual_libraries))
+        obs=env.get_observations();state=torch.load(spec['checkpoint'],map_location='cpu',weights_only=False)
+        config=dict(agent['policy']);config.pop('class_name',None)
+        config['native_config']=state['model_state_dict']['_extra_state']['config']
+        teacher=SpatialActorCritic(obs,{'policy':['policy'],'critic':['critic']},env.num_actions,**config).to(raw.device)
+        teacher.load_state_dict(state['model_state_dict'],strict=True);teacher.eval();teacher.requires_grad_(False)
+        student=load_student(a.student,raw.device)[0] if a.student else None
+        if student and student.schema!=plan['schema']:raise ValueError('Student schema differs')
+        normalization_before={k:v.clone() for k,v in teacher.actor_obs_normalizer.state_dict().items()}
+        import random,numpy as np
+        random.seed(a.seed+999);np.random.seed(a.seed+999);torch.manual_seed(a.seed+999);torch.cuda.manual_seed_all(a.seed+999)
+        with torch.inference_mode():
+            obs=env.get_observations();groups=torch.arange(n,device=raw.device)%len(ids)
+            copies=torch.arange(n,device=raw.device)//len(ids);validation=copies==spec['copies']-1
+            static=torch.tensor([[v for row in graph_features(d['urdf'],names,q0) for v in row]+
+                unified_context(bank,d,plan['schema']) for d in designs],device=raw.device)
+            io=dict(joint_names=names,default_joint_pos=q0,action_scale=.25,step_dt=.02,
+                observation_scales={k:1. for k in ('lin_vel','ang_vel','projected_gravity','commands','joint_pos','joint_vel','actions','height_scan')},
+                history_layout='frame_major_oldest_to_newest',history_width=780)
+            write_new(out/'io_contract.json',io)
+            if a.mode=='evaluate':
+                with (out/'initial_state.pt').open('xb') as stream:torch.save(dict(root_pos_w=raw.robot.data.root_pos_w.cpu().clone(),
+                    root_quat_w=raw.robot.data.root_quat_w.cpu().clone(),joint_pos=raw.robot.data.joint_pos.cpu().clone(),
+                    joint_vel=raw.robot.data.joint_vel.cpu().clone()),stream)
+            history=StreamingHistory(n,raw.device);reset=None
+            data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation')}
+            alive=torch.ones(n,device=raw.device,dtype=torch.bool);elapsed=torch.zeros(n,device=raw.device)
+            forward=elapsed.clone();side=elapsed.clone();fell=~alive.clone();native_clip=agent.get('clip_actions')
+            if a.ppo_channel:
+                from ppo_channel import serve
+                from rsl_rl.modules.amp import AMPDiscriminator,LossType
+                amp=agent['algorithm']['amp_cfg'];disc_cfg=amp['amp_discriminator']
+                discriminator=AMPDiscriminator(67,3,agent['obs_groups'],
+                    loss_type=LossType[amp['loss_type']],device=str(raw.device),**disc_cfg).to(raw.device)
+                discriminator.load_state_dict(state['amp_discriminator_state_dict'],strict=True)
+                discriminator.disc_obs_normalizer.load_state_dict(state['amp_discriminator_normalizer_state_dict'],strict=True)
+                discriminator.eval();discriminator.requires_grad_(False)
+                def canonical(o,r):
+                    latest=decode_amp_frames(o['policy'][:,:234])[:,-1]
+                    return canonical_input(history.append(latest,r),plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))
+                def amp_reward(o,reward):
+                    style,_=discriminator.predict_style_reward(discriminator.get_disc_obs(o),dt=raw.step_dt)
+                    return discriminator.lerp_reward(task_reward=reward,style_reward=style)
+                serve(a.ppo_channel,'run',env,raw,obs,canonical,native_clip,amp_reward)
+                status=0
+                return
+            recorder=None
+            if a.video:
+                from shared_video import Recorder
+                recorder=Recorder(raw,out/'evaluation.mp4')
+            for step in range(a.steps):
+                native=obs['policy']
+                if native.shape!=(n,258):raise ValueError('AMP native actor width differs')
+                latest=decode_amp_frames(native[:,:234])[:,-1]
+                expected=torch.cat((raw.robot.data.root_ang_vel_b,raw.robot.data.projected_gravity_b,
+                    raw.command_manager.get_command('base_velocity'),raw.robot.data.joint_pos-raw.robot.data.default_joint_pos,
+                    raw.robot.data.joint_vel-raw.robot.data.default_joint_vel,raw.action_manager.action),-1)
+                if not torch.allclose(latest,expected,atol=2e-5,rtol=1e-5):raise ValueError('AMP history decoder differs from actual physical observations')
+                base=history.append(latest,reset);label=teacher.act_inference(obs).detach()
+                if not torch.isfinite(label).all():raise ValueError('Nonfinite AMP teacher labels')
+                if native_clip is not None:label=label.clamp(-native_clip,native_clip)
+                if a.mode=='collect' and step%a.stride==0:
+                    for k,v in dict(base_obs=base,teacher_actions=label,design_index=groups,
+                        environment_ids=torch.arange(n,device=raw.device),validation=validation).items():data[k].append(v.cpu().clone())
+                action=student(canonical_input(base,plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))) if student else label
+                if not torch.isfinite(action).all():raise ValueError('Nonfinite AMP executed action')
+                if native_clip is not None:action=action.clamp(-native_clip,native_clip)
+                before=raw.robot.data.root_pos_w.clone();obs,reward,done,extra=env.step(action)
+                if recorder:recorder.capture(step,done)
+                delta=raw.robot.data.root_pos_w-before;active=alive&~done.bool()
+                forward[active]+=delta[active,0];side[active]+=delta[active,1];elapsed[alive]+=raw.step_dt
+                fell|=alive&raw.reset_terminated.bool();alive&=~done.bool();reset=done.bool()
+                if step%100==0:print('AMP_ROLLOUT',step,'/',a.steps,'designs',len(ids),'student',bool(student),flush=True)
+            if recorder:recorder.close()
+            if any(not torch.equal(normalization_before[k],v) for k,v in teacher.actor_obs_normalizer.state_dict().items()):
+                raise ValueError('Frozen AMP actor normalizer changed')
+            rows=[dict(design=ids[i%len(ids)],environment=i,payload_kg=None,seconds=float(elapsed[i]),fell=bool(fell[i]),
+                forward_m=float(forward[i]),lateral_m=float(side[i]),mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02))) for i in range(n)]
+            if a.mode=='collect':
+                value={k:torch.cat(v) for k,v in data.items()}
+                value.update(kind='real_rough_backpack_teacher_data_v1',task='run',plan_sha256=sha(a.plan),
+                    teacher_sha256=spec['checkpoint_sha256'],bank_sha256=spec['bank_sha256'],schema=plan['schema'],io_contract=io,
+                    design_ids=ids,static_context=static.cpu(),actual_payload_not_in_actor=True,
+                    student_sha256=sha(a.student) if a.student else None,
+                    source='real_teacher_execution' if not student else 'real_student_DAgger_with_frozen_native_teacher_labels',
+                    native_history='three term-major frames; original trained normalizer restored and frozen',
+                    seed=a.seed,reset_yaw_range_rad=a.reset_yaw_range,
+                    canonical_history='ten real streaming frames; reset-aware first-frame fill only',
+                    reference_library_sha256=spec['reference_library_sha256'],history_adapter_live_verified=True)
+                with (out/'data.pt').open('xb') as stream:torch.save(value,stream)
+            write_new(out/'summary.json',dict(result='REAL_AMP_ROLLOUT_COMPLETE',task='run',rows=rows,design_ids=ids,
+                teacher=spec['checkpoint_sha256'],student=sha(a.student) if a.student else None,
+                steps=a.steps,speed_command=a.speed,reset_yaw_range_rad=a.reset_yaw_range,
+                actor_normalizer_unchanged=True,native_clip_actions=native_clip,
+                teacher_updates=0,reference_routing_verified=True,history_adapter_live_verified=True))
+            write_new(out/'reference_cache_stats.json',dict(hits=routing.hits,misses=routing.misses))
+            status=0
+    except BaseException:
+        write_new(out/'failure.json',dict(traceback=traceback.format_exc()));traceback.print_exc()
+    finally:
+        timer=threading.Timer(120,lambda:os._exit(1));timer.daemon=True;timer.start()
+        if status:sys.stdout.flush();sys.stderr.flush();os._exit(1)
+        try:
+            if raw is not None:raw.close()
+            app.close()
+        except SystemExit as error:
+            if error.code not in (None,0):status=1
+        except BaseException:traceback.print_exc();status=1
+        timer.cancel()
+    sys.stdout.flush();sys.stderr.flush();return status
+
+if __name__=='__main__':os._exit(main())

@@ -12,14 +12,16 @@ def main():
     from hybrid_support import write_new, source_identity, RECIPE
     from robolab.physical_snapshot import DEFAULT_ROOT, physical_model, generator
     from robolab.rough_geometry import file_sha, audit_candidate_urdf, neutral_foot_compensation
+    from robolab.gp_extrapolation import get_generator,authorization_audit,design_extrapolation
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=str(Path(__file__).with_name("config.template.json")))
-    p.add_argument("--task-key", choices=["stairs"], default="stairs")
+    p.add_argument("--task-key", choices=["stairs", "backpack"], default="stairs")
     p.add_argument("--template", help="Original baseline RPO URDF on THIS machine; never load old policies/banks")
     p.add_argument("--mesh-dir", help="Original RPO display meshes on THIS machine")
     p.add_argument("--contract-json", default=str(ROOT/"configs/rough_robot_contract.json"))
     p.add_argument("--output-dir")
     p.add_argument("--generate-assets", action="store_true")
+    p.add_argument("--rough-bank", help="Backpack only: attach payload to the exact Rough base structure library")
     a = p.parse_args()
     config = json.loads(Path(a.config).read_text(encoding="utf8"))
     config = config.get("grid", config)
@@ -28,6 +30,15 @@ def main():
     print(json.dumps(dict(configuration=config, eligible_motor_pools=pools, excluded=excluded,
                          **{k: v for k, v in grid.items() if k != "designs"}), indent=2), flush=True)
     if not a.generate_assets:
+        return
+    if a.rough_bank:
+        if a.task_key!='backpack' or not a.output_dir or a.template or a.mesh_dir:
+            p.error('Backpack --rough-bank requires a NEW output-dir and no template/mesh-dir')
+        from hybrid_backpack_bank import adopt_rough_bank
+        bank=adopt_rough_bank(a.rough_bank,config,a.output_dir)
+        write_new(Path(a.output_dir)/'bank.json',bank)
+        load_configurable_bank(Path(a.output_dir)/'bank.json')
+        print('BACKPACK_ROUGH_BASE_MORPHOLOGY_VALIDATED',a.output_dir,flush=True)
         return
     if not a.template or not a.mesh_dir or not a.output_dir:
         p.error("asset generation requires --template, --mesh-dir and a NEW --output-dir")
@@ -38,7 +49,7 @@ def main():
     for knee in grid["knees"]:
         for ankle in grid["ankles"]:
             model = physical_model(knee_motor=knee, ankle_motor=ankle)
-            gen = generator(model["snapshot_root"])
+            gen = get_generator(model["snapshot_root"],config.get('gp_extrapolation',False))
             for label, segment in (("knee", "thigh"), ("ankle", "calf")):
                 lo, hi = gen.MODELS[model["selected"][label]["urdf_model_id"]]["prediction_range_m"]
                 if not lo <= ranges[segment][0] < ranges[segment][1] <= hi:
@@ -57,11 +68,19 @@ def main():
     for index, row in enumerate(rows):
         pair = row["knee_motor"]+"__"+row["ankle_motor"]
         physical = pairs[pair]
-        gen = generator(physical["snapshot_root"])
+        gen = get_generator(physical["snapshot_root"],config.get('gp_extrapolation',False))
         urdf = Path(gen.generate_urdf(row["thigh_m"], row["calf_m"], out/row["id"], template,
             mesh_dir=mesh_dir, knee_motor=row["knee_motor"], ankle_motor=row["ankle_motor"]))
         report = urdf.with_suffix(".report.json")
         audit = audit_candidate_urdf(template, urdf)
+        if a.task_key == 'backpack':
+            # Keep the generated base robot and create a separate task attachment.
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('_prepare_payload',ROOT/'robolab/tasks/direct/backpack_walk/backpack_urdf.py')
+            payload=importlib.util.module_from_spec(spec);spec.loader.exec_module(payload)
+            attached=urdf.with_name('robot_with_backpack.urdf')
+            payload.write_backpack_urdf(urdf,attached,.3)
+            urdf=attached
         graph = dict(joint_names=contract["joint_names"])
         placement = neutral_foot_compensation(template, urdf, contract["joint_names"],
             contract["default_joint_pos"], max_height_shift_m=.31)
@@ -69,11 +88,13 @@ def main():
             report_sha256=file_sha(report), graph=graph,
             context=context(row, physical, grid["knees"], grid["ankles"], ranges),
             root_height_compensation_m=placement["root_height_compensation_m"],
-            total_mass_kg=audit["total_mass_kg"]["candidate"],
+            total_mass_kg=audit["total_mass_kg"]["candidate"]+(.3 if a.task_key=='backpack' else 0.),
             visuals_are_original_meshes_not_parameterized_CAD=True)
+        if config.get('gp_extrapolation'):row['gp_extrapolation']=design_extrapolation(gen,physical,row)
         print(f"Generated {index+1}/{len(rows)}: {row['id']}", flush=True)
     training = dict(recipe=RECIPE, authorized_tasks=[a.task_key], source_hashes=source_identity(a.task_key),
                     retargeted_references=False, stairs_height_range_m=[.05, .10])
+    if config.get('gp_extrapolation'):training['gp_extrapolation']=authorization_audit()
     bank = dict(kind=KIND, schema_version=2, task_key=a.task_key, configuration=config, snapshot_root=str(DEFAULT_ROOT.resolve()),
         num_envs=grid["num_envs"], knees=grid["knees"], ankles=grid["ankles"],
         context_width=grid["context_width"], ranges_m=ranges, designs=rows, motor_pairs=pairs,

@@ -12,6 +12,7 @@ def main():
     from amp_support import write_new, source_identity, RECIPE
     from robolab.physical_snapshot import DEFAULT_ROOT, physical_model, generator
     from robolab.rough_geometry import file_sha, audit_candidate_urdf, neutral_foot_compensation
+    from robolab.gp_extrapolation import get_generator,authorization_audit,design_extrapolation
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=str(Path(__file__).with_name("config.template.json")))
     p.add_argument("--task-key", choices=["run"], default="run")
@@ -50,7 +51,7 @@ def main():
     for knee in grid["knees"]:
         for ankle in grid["ankles"]:
             model = physical_model(knee_motor=knee, ankle_motor=ankle)
-            gen = generator(model["snapshot_root"])
+            gen = get_generator(model["snapshot_root"],config.get('gp_extrapolation',False))
             for label, segment in (("knee", "thigh"), ("ankle", "calf")):
                 lo, hi = gen.MODELS[model["selected"][label]["urdf_model_id"]]["prediction_range_m"]
                 if not lo <= ranges[segment][0] < ranges[segment][1] <= hi:
@@ -69,7 +70,7 @@ def main():
     for index, row in enumerate(rows):
         pair = row["knee_motor"]+"__"+row["ankle_motor"]
         physical = pairs[pair]
-        gen = generator(physical["snapshot_root"])
+        gen = get_generator(physical["snapshot_root"],config.get('gp_extrapolation',False))
         urdf = Path(gen.generate_urdf(row["thigh_m"], row["calf_m"], out/row["id"], template,
             mesh_dir=mesh_dir, knee_motor=row["knee_motor"], ankle_motor=row["ankle_motor"]))
         report = urdf.with_suffix(".report.json")
@@ -83,9 +84,11 @@ def main():
             root_height_compensation_m=placement["root_height_compensation_m"],
             total_mass_kg=audit["total_mass_kg"]["candidate"],
             visuals_are_original_meshes_not_parameterized_CAD=True)
+        if config.get('gp_extrapolation'):row['gp_extrapolation']=design_extrapolation(gen,physical,row)
         print(f"Generated {index+1}/{len(rows)}: {row['id']}", flush=True)
     training = dict(recipe=RECIPE, authorized_tasks=[a.task_key], source_hashes=source_identity(a.task_key),
                     retargeted_references=True)
+    if config.get('gp_extrapolation'):training['gp_extrapolation']=authorization_audit()
     bank = dict(kind=KIND, schema_version=2, task_key=a.task_key, configuration=config, snapshot_root=str(DEFAULT_ROOT.resolve()),
         num_envs=grid["num_envs"], knees=grid["knees"], ankles=grid["ankles"],
         context_width=grid["context_width"], ranges_m=ranges, designs=rows, motor_pairs=pairs,

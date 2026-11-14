@@ -66,7 +66,8 @@ def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_mai
             print('STAGE_COMMITTED',index,stage['end_update'],flush=True)
             r.current_learning_iteration=stage['end_update']
             previous=str(checkpoint);index+=1
-        write_new(result/'summary.json',dict(result='PERSISTENT_ROUGH_COMPLETE_NOT_GAIT_VALIDATED',
+        label='BACKPACK' if bank.get('task_key')=='backpack' else 'ROUGH'
+        write_new(result/'summary.json',dict(result=f'PERSISTENT_{label}_COMPLETE_NOT_GAIT_VALIDATED',
                   completed_updates=plan['configuration']['rotation']['total_updates'],checkpoint=previous))
     except BaseException:
         failed=True

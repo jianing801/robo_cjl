@@ -137,7 +137,8 @@ def main(argv=None):
             if not (root/'completed.json').exists():
                 write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
             print('TRAINING_ALREADY_COMPLETE_NOT_GAIT_VALIDATED');return
-        if not commits and not plan.get('bootstrap_checkpoint') and any((root/'attempts').glob('*/train/launch.json')):
+        from hybrid_native_cache import training_attempt_started
+        if not commits and not plan.get('bootstrap_checkpoint') and training_attempt_started(root):
             raise RuntimeError('initial stage interrupted with no committed checkpoint; inspect manually, no implicit scratch restart')
         from robolab.rough_gpu import query_gpus,candidates,gpu_lease,child_environment
         from hybrid_processes import reject_duplicate_bank_safely as reject_duplicate_bank
@@ -151,6 +152,9 @@ def main(argv=None):
         with gpu_lease(choices,ROOT/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
             env=child_environment(gpu,os.environ)
             kit=a.kit_args+f" --/renderer/activeGpu={gpu['index']} --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0"
+            if plan.get('execution_protocol')=='persistent_v1' and config.get('full_body_torque') and not a.asset_cache:
+                from hybrid_native_cache import ensure_cache
+                a.asset_cache=str(ensure_cache(root,bank_path,a.python,kit,env,run_child))
             if plan.get('execution_protocol')=='persistent_v1':
                 attempt=root/'attempts'/f'session_{datetime.now():%Y%m%d_%H%M%S_%f}'
                 attempt.mkdir()

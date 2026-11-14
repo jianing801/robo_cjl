@@ -28,9 +28,10 @@ def evenly_spaced(bounds, count):
 
 def select_grid(config, knee_pool, ankle_pool):
     allowed = {"num_envs", "length_count", "thigh_range_m", "calf_range_m",
-               "knee_motor_count", "ankle_motor_count", "motor_seed", "knee_pool", "ankle_pool"}
+               "knee_motor_count", "ankle_motor_count", "motor_seed", "knee_pool", "ankle_pool", "gp_extrapolation"}
     if set(config) - allowed:
         raise ValueError(f"unknown configuration keys: {sorted(set(config)-allowed)}")
+    if type(config.get('gp_extrapolation',False)) is not bool:raise ValueError('gp_extrapolation must be boolean')
     envs = positive(config["num_envs"], "num_envs")
     count = positive(config["length_count"], "length_count")
     thigh = evenly_spaced(config["thigh_range_m"], count)
@@ -109,6 +110,8 @@ def load_configurable_bank(path):
     bank = json.loads(Path(path).read_text(encoding="utf8"))
     if bank["kind"] != KIND or bank["schema_version"] != 2:
         raise ValueError("wrong configurable bank schema")
+    from robolab.gp_extrapolation import validate_authorization
+    validate_authorization(bank['configuration'],bank['training'])
     from amp_rough_alignment import validate_bound_bank
     validate_bound_bank(bank)
     pools, excluded = eligible_pools(bank["snapshot_root"])
@@ -139,6 +142,10 @@ def load_configurable_bank(path):
     # Motor/context suffix is constant per verified pair. Avoid re-reading the
     # complete immutable physical snapshot once for every one of 900 designs.
     pair_suffixes = {}
+    gp_gen=None
+    if bank['configuration'].get('gp_extrapolation'):
+        from robolab.physical_snapshot import generator
+        gp_gen=generator(bank['snapshot_root'])
     for actual, expected in zip(bank["designs"], grid["designs"]):
         if any(actual[k] != v for k, v in expected.items()):
             raise ValueError("design differs from frozen Cartesian grid")
@@ -146,6 +153,10 @@ def load_configurable_bank(path):
             if file_sha(actual[name]) != actual[name+"_sha256"]:
                 raise ValueError(f"{name} asset changed")
         pair = actual["knee_motor"]+"__"+actual["ankle_motor"]
+        if gp_gen is not None:
+            from robolab.gp_extrapolation import design_extrapolation
+            if actual.get('gp_extrapolation')!=design_extrapolation(gp_gen,bank['motor_pairs'][pair],actual):
+                raise ValueError('design GP extrapolation markers changed')
         if pair not in pair_suffixes:
             pair_suffixes[pair] = context(actual, bank["motor_pairs"][pair],
                 bank["knees"], bank["ankles"], bank["ranges_m"])[2:]
