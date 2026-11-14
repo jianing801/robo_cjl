@@ -1,0 +1,90 @@
+# 环境、版本与机器人资产
+
+## 两个独立环境
+
+| 环境 | 用途 | 版本来源 |
+|---|---|---|
+| `robo_cjl` / 本机Isaac Lab Python | 结构库准备、专家PPO、蒸馏、评估 | 使用已验证的Python3.11、Isaac Sim/Lab和仓库RSL-RL组合；不按网页latest升级 |
+| `amp_hhtools` | CPU或CUDA参考动作求解 | 独立Python3.12；明确版本在`amp_engine/hhtools_requirements.txt`和安装器中 |
+
+HHTools、新Newton/Warp和不同MuJoCo依赖不应直接安装进训练环境。不要为了通过一次导入错误升级Isaac Sim、替换URDF导入器版本，或更改正在使用的环境。
+
+已可训练的服务器不需要重装。新的工作站应先按原已验证环境部署，再注册本仓库本地包；不要把“pip安装成功”等同于原生场景已验证。需要注册本地代码、且依赖已经就绪时，可使用：
+
+```bash
+python -m pip install --no-deps -e ./robolab -e ./rsl_rl
+```
+
+`--no-deps`不负责补齐缺失依赖，仅避免此步骤改变已验证组合。源码包名称或安装信息不能代替实际文件身份。
+
+## 原始机器人资产
+
+常用路径：
+
+```text
+robolab/data/robots/roboparty/rpo/urdf/rpo.urdf
+robolab/data/robots/roboparty/rpo/meshes/
+```
+
+该资源目录被忽略，不是普通Git更新会自动带来的模型。需要已验证的原始RPO资源；不同机器可指定其他绝对路径。不要使用某个已生成候选的URDF，或未经核对的最新版描述包作为基准。资产文件及生成bank中的绝对路径都要保持可访问。
+
+原始机器人资源的上游位置记录在`robolab/.gitmodules`，但当前仓库已经内置robolab和rsl_rl源码，不能照旧README假设它们是两个空子模块。仅执行`git submodule update`不能代替当前资产检查。
+
+## 物理与依赖目录的区别
+
+| 路径 | 用途 | 是否可当旧实验删除 |
+|---|---|---|
+| `vendor/physical_1450a51` | 固定物理目录、GP与URDF生成器依赖，含原Git blob校验 | 不可 |
+| `robolab/robolab/assets/motor_data` | 活跃电机目录、曲线、GP注册与源数据 | 不可 |
+| `multitask_morphology/amp_engine/vendor` | 当前参考动作工具自带的固定HHTools快照 | 不可随意裁剪 |
+| `amp_hybrid/vendor` | 已有editable HHTools环境可能指向的原位置 | 暂保留，不在生成过程中移动 |
+| `legacy/expert_sources_20261114` | 旧专家源码档案与身份清单 | 不作为新训练入口 |
+
+以上`multitask_morphology`和`amp_hybrid`均指`robolab/experiments/`下目录。GitHub列表中“背包”提交说明只是该目录最近一次提交的文字，不能作为其任务用途判断。
+
+## AMP独立环境
+
+从仓库根目录、已激活训练环境执行首次安装器：
+
+```bash
+python robolab/experiments/multitask_morphology/amp_engine/setup_hhtools.py --env-name amp_hhtools
+```
+
+安装器使用自带快照与版本清单。它的`--dry-run`可只显示命令；`--verify-runtime`需要在已经按该安装器配置的HHTools环境中运行。后者会严格检查导入位置，不能据此随意删除旧editable路径。
+
+如果完整参考库已由旧的可用HHTools环境生成，并已通过校验，训练阶段可以直接复用；不用为了切换安装位置重新求解参考动作。
+
+## 留下实际环境证据
+
+结构库生成完成后，才可以在ROOT下建立环境记录目录；不要在首次prepare前提前创建ROOT。
+
+```bash
+mkdir -p "$ROOT/environment"
+STAMP=$(date +%Y%m%d_%H%M%S)
+git rev-parse HEAD > "$ROOT/environment/source_$STAMP.txt"
+python -m pip freeze > "$ROOT/environment/train_packages_$STAMP.txt"
+conda run -n amp_hhtools python -m pip freeze > "$ROOT/environment/reference_packages_$STAMP.txt"
+```
+
+实际包清单用于追溯，不应未经核对就当作另一台机器的强制安装命令。原生GPU短测与版本审计记录仍需独立保留。Windows用户使用自己的已验证Python绝对路径；不要复制他人`C:/Users/...`路径。
+
+## Windows本机使用
+
+先在PowerShell进入本机仓库根目录，按实际部署填写Python和短输出路径。这里不自动创建ROOT：
+
+```powershell
+$TrainPython = "C:/Roboparty/env_isaaclab/Scripts/python.exe"
+$env:REPO = (Get-Location).Path
+$env:ENTRY = "$env:REPO/robolab/experiments/multitask_morphology"
+$env:ROOT = "D:/mrun/full3000_balanced_v2"
+$env:TEMPLATE = "$env:REPO/robolab/data/robots/roboparty/rpo/urdf/rpo.urdf"
+$env:MESH_DIR = "$env:REPO/robolab/data/robots/roboparty/rpo/meshes"
+$env:PYTHONUTF8 = "1"
+& $TrainPython --version
+& $TrainPython "$env:ENTRY/prepare.py" --output-root "$env:ROOT" `
+  --template "$env:TEMPLATE" --mesh-dir "$env:MESH_DIR" --generate-assets
+```
+
+Python可执行文件和D盘路径只是已有部署的写法示例，需要按本机修改。原生USD文件名较长，选择短输出路径；不能把Linux的`export`和反斜杠续行原样贴进PowerShell。之后调用同一Python入口及对应参数，或先激活自己的训练环境。
+
+正式服务器示例要求至少12.5GiB空闲显存；12GB显卡不满足该门槛。小规模本机短测不能冒充正式4096环境/60结构验证，也不要仅为绕过门槛悄悄改正式环境数或预算。

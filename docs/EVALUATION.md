@@ -1,0 +1,83 @@
+# 教师、共享策略与录像验收
+
+先按 [完整流程](WORKFLOW.md)设置REPO、ENTRY、ROOT。三个教师完成并通过校验、`prepare_shared.py`已生成`ROOT/shared_plan/plan.json`，才可使用本页统一rollout。它不是仅给一个模型文件就能运行的通用播放器。
+
+## 1. 输入和模式
+
+| 输入 | 意义 |
+|---|---|
+| `--plan` | 实际bank、教师、参考库、静态结构编码及其身份 |
+| `--design-ids` | 对应任务计划内一个或多个完整设计ID，逗号分隔 |
+| 不传`--student` | 执行冻结教师 |
+| 传`--student` | 执行共享学生，教师仍用于同状态标签/身份检查 |
+| `--mode evaluate` | 保存真实闭环summary，不采集BC数据 |
+| `--mode collect` | 采集真实状态和教师动作标签供BC/DAgger，不能拿MSE替代步态 |
+| `--steps 1000` | 控制步长0.02s，最长20秒观察窗 |
+| `--video` | 保存真实渲染录像和首帧图，不是拼接或示意动画 |
+
+内部任务名：Rough=`stairs`，负重=`backpack`，AMP=`run`。AMP使用`rollout_amp.py`，其余使用`rollout.py`；不要给AMP传`--task run`，该脚本没有这个参数。
+
+## 2. 代表结构的三任务教师录像
+
+先选一张空闲物理显卡。本页显式设置可见卡和渲染卡，子进程使用`cuda:0`；不要再把子进程改成`cuda:1`。
+
+```bash
+export PLAN="$ROOT/shared_plan/plan.json"
+export EVAL_GPU=1
+export CLIP_RUN="$(date +%Y%m%d_%H%M%S)"
+
+for TASK in stairs backpack run; do
+  DESIGN=$(python -c "import json,os,sys; print(json.load(open(os.environ['PLAN']))['teachers'][sys.argv[1]]['design_ids'][0])" "$TASK")
+  EXTRA=()
+  if [ "$TASK" = run ]; then
+    SCRIPT="$ENTRY/shared_policy/rollout_amp.py"
+    EXTRA+=(--speed 2.0)
+  else
+    SCRIPT="$ENTRY/shared_policy/rollout.py"
+    EXTRA+=(--task "$TASK")
+    if [ "$TASK" = backpack ]; then EXTRA+=(--payload-kg 10); fi
+  fi
+  CUDA_VISIBLE_DEVICES="$EVAL_GPU" python -u "$SCRIPT" \
+    --plan "$PLAN" --design-ids "$DESIGN" \
+    --output "$ROOT/evaluation/${CLIP_RUN}_teacher_${TASK}" \
+    --mode evaluate --steps 1000 --seed 42 --video --headless --device cuda:0 \
+    --kit_args="--/renderer/activeGpu=$EVAL_GPU --/physics/cudaDevice=0" "${EXTRA[@]}" || break
+done
+```
+
+这段串行运行3个短评估，不训练。它仅选每任务计划内的第一个设计作为最小示例，不代表随机评估或全库覆盖。正式交付应增加短/中/长腿与不同电机的代表结构，并记录选择规则；不要只挑成功的视频。
+
+当前评估默认每种结构有8个副本。Recorder隐藏其他机器人，只显示并跟踪env0，所以画面是一台机器人；不是把仿真副本数量改成1。视频会在env0首次终止时停止，较短视频应结合summary判断是否摔倒，不能剪掉失败段冒充完成20秒。
+
+负重录像示例固定10kg，Rough名义命令为0.5m/s、固定10cm楼梯，AMP示例为2m/s。示例不更改教师训练时的奖励、负载课程或最终全库评估的负载覆盖。
+
+## 3. 同条件学生录像
+
+蒸馏完成后从实际完成记录读取学生路径：
+
+```bash
+export STUDENT=$(python -c "import json,os; print(json.load(open(os.path.join(os.environ['ROOT'],'shared_actor','completed.json')))['student'])")
+```
+
+重新执行上一段循环，保持同一TASK、DESIGN、seed、命令速度和负载，将输出中的`teacher_`改为`student_`，并在Python参数中增加`--student "$STUDENT"`。输出目录必须新建。不要用同一个视频目录覆盖教师结果。
+
+只看env0录像不等于其他副本也通过。教师和学生都应读各自summary中的全部rows；共享流水线的全库配对评估用于覆盖完整共同结构集合。
+
+## 4. 通过标准与原始证据
+
+每环境保存设计ID、存活时间、是否摔倒、前进距离/速度，Rough另保存高度变化。当前名义门槛：完整20秒、不摔、前进速度至少0.1m/s；楼梯另需上升至少0.1m。按用户要求横移不作为失败条件。它不代表对所有扰动、所有速度和所有新结构都已验证。
+
+- `REAL_ROLLOUT_COMPLETE` / `REAL_AMP_ROLLOUT_COMPLETE`：本次评估执行完毕，不等于所有环境通过。
+- `shared_actor/completed.json`中的`nominal_passed`：以流水线实际全库配对结果为准。
+- 训练日志`Mean reward`：由完成回合统计，换组会有统计重启和任务差异，不能独立判定失败或遗忘。
+- BC验证MSE：动作拟合指标，不是行走通过率。
+
+可选用`--trace-stride 50`诊断Rough/负重的状态与动作；该参数不在AMP接口中，不要直接照搬。需要比较遗忘时，使用同一批结构、同一评估设置，读取不同阶段完整检查点做配对评估，而不是直接比较换组前后的训练reward。当前正式流水线没有自动生成遗忘矩阵。
+
+## 5. 索引与结果表
+
+使用 [评估汇总表模板](templates/evaluation_summary.csv) 和 [录像索引模板](templates/video_index.csv)。它们只有表头，没有预填成功结果，也不是现有脚本自动生成的文件。每个真实评估完成后，将bank中的腿长/电机信息和summary逐行关联，填写原始文件位置与模型SHA。
+
+建议交付至少包括每任务教师/学生对照、结构差异、10kg负重示例、失败样例及完整结果所在路径。视频不能替代summary，summary不能替代对应的模型、bank和参考动作身份。
+
+原生评估入口的 Kit 参数使用 `--kit_args`（下划线）；训练控制器使用 `--kit-args`。

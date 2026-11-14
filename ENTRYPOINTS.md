@@ -1,6 +1,6 @@
 # 当前正式入口与历史入口
 
-新实验先从本页选择工作流，不要根据文件名相似程度调用旧脚本。
+新实验先从本页选择工作流，不要根据文件名相似程度调用旧脚本。完整启动顺序和可复制命令见 [完整操作流程](docs/WORKFLOW.md)，评估见 [评估与录像](docs/EVALUATION.md)，异常处理见 [恢复说明](docs/RECOVERY.md)。
 
 | 工作流 | 入口 | 说明 |
 |---|---|---|
@@ -11,7 +11,7 @@
 | Rough候选结构BO | `rough_bo/bo_finetune_controller.py` | 独立工作流，明确传入教师、结构库与源码参数；不是完整三任务预训练 |
 | 原生任务开发/单任务 | `robolab/scripts/rsl_rl/train.py`、`play.py`、`play_amp.py` | 原始原生任务工具，继续保留 |
 
-完整三任务参数与命令见 [统一训练说明](robolab/experiments/multitask_morphology/README.md)。BO协议见 [Rough BO说明](rough_bo/README.md)。本次只精简入口，不启动训练、参考动作生成、评估或BO。
+完整三任务参数与命令见 [统一训练说明](robolab/experiments/multitask_morphology/README.md)。BO协议见 [Rough BO说明](rough_bo/README.md)。这些入口不会因为更新代码或阅读文档而自动执行。
 
 ## 已归档的旧Flat BO顶层脚本
 
@@ -36,4 +36,4 @@ experiments中仅特意保留两处兼容依赖：
 
 旧Rough BO的检查点源码恢复器会按检查点SHA从档案恢复所需旧Rough文件到独立审计缓存，不改用新引擎。已有冻结代码树、所有模型、结构库、参考动作、录像和实验记录未移动或删除。
 
-历史 `HANDOFF.md` 保留为研究过程记录，不作为当前默认配置或启动规范。根目录中英文README下方仍含上游通用介绍，应以本入口索引和对应工作流文档为准。
+历史 `HANDOFF.md` 保留为研究过程记录，不作为当前默认配置或启动规范。原上游通用介绍已移至 `docs/reference/`，不再作为当前克隆、子模块或启动规范。

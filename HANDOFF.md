@@ -1,5 +1,7 @@
 # Handoff Document — 基于深度强化学习的 RPO 双足机器人结构-控制一体化优化
 
+> **历史研究记录，不是当前启动规范。** 当前3000结构、三任务专家、冻结分组及共享Actor的完整操作见 [完整流程](docs/WORKFLOW.md)。下文日期、范围、Flat BO预算和旧评估修正仅用于追溯，不能覆盖当前配置。
+
 > **2026-09-01 评估更正（优先阅读）**：旧 `co_design_eval.py` 在 `env.step()` 返回后读取末位姿，而 `BaseEnv.step()` 已在返回前自动 reset 终止环境。故旧 evaluator 直接报告的 `v_actual_m_s`、CoT 与据此形成的 CoT 排名不再有效，须用当前版本重新评估；累计 episode return 不受影响。旧 CSV 仅能在排除最后的 reset 帧后做离线分析。新 evaluator 捕获终止前状态，支持真正的 `--num-episodes`，并在录制中用 `done=True` 标记终止帧。
 
 > **2026-10-17 当前实现补充**：当前 `generate_urdf_sw.py` 从 `motor_urdf_gp_registry.json` 加载按电机型号和腿段独立训练的SW-GP，更新质量、三维质心和完整惯量；不再保留多项式模型或回退路径。候选型号映射见 `docs/电机BO候选池与GP映射_2026-10-17.md`。腿部碰撞盒只代表中间连杆，不再整体等比缩放；它固定近端边界和膝/踝端安装间隙，只改变中间box的z向长度。下文关于 `generate_urdf.py` 的比例缩放记录属于旧版修复历史。
