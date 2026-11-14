@@ -12,3 +12,6 @@ rough_bo/checkpoint_sources/** -text
 
 # The standalone AMP generator verifies every vendored byte against its manifest.
 robolab/experiments/multitask_morphology/amp_engine/vendor/** -text
+
+# Training configuration pins the exact frozen schedule bytes on every platform.
+robolab/experiments/multitask_morphology/scheduling/formal_schedule.json text eol=lf

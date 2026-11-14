@@ -21,7 +21,7 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque'}:raise ValueError('expected grid, rotation and optional full_body_torque')
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque','group_schedule'}:raise ValueError('expected grid, rotation and optional full_body_torque/group_schedule')
     if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
     g,r=config['grid'],config['rotation']
     if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
@@ -33,11 +33,17 @@ def validate_config(config, bank):
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
         raise ValueError('active_designs must not exceed full training library or environment count')
+    if 'group_schedule' in config:
+        from amp_rough_alignment import rough_module
+        rough_module('hybrid_schedule').load_schedule(bank,config)
     return config
 
 def cycle_groups(bank, config, cycle):
     """Full coverage exactly once per sweep; stratified interleaving, seeded reshuffle."""
     if type(cycle) is not int or cycle<0:raise ValueError('invalid cycle')
+    if 'group_schedule' in config:
+        from amp_rough_alignment import rough_module
+        return rough_module('hybrid_schedule').groups_for(bank,config,cycle)
     rows=[d for d in bank['designs'] if d['split']=='train']
     cap=config['rotation']['active_designs']
     count=(len(rows)+cap-1)//cap
@@ -99,6 +105,9 @@ def experiment_identity(bank_path,config,reference_library):
         full_bank_context_is_stable=True,no_forgetting_metrics=True,reference_library_sha256=sha(reference_library),
         local_assets={'native_ground.usda':sha(HERE/'native_ground.usda')},
         shared_rough_runtime_helpers=shared_runtime_sources())
+    if 'group_schedule' in config:
+        from amp_rough_alignment import rough_module
+        result['group_schedule']=rough_module('hybrid_schedule').schedule_identity(json.loads(Path(bank_path).read_text(encoding='utf8')),config)
     if config.get('full_body_torque'):
         from amp_rough_alignment import rough_module
         result['full_body_sources']=rough_module('full_body_torque').source_identity()

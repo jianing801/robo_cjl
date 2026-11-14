@@ -36,5 +36,9 @@
     "total_updates": 5000,
     "seed": 42
   },
-  "full_body_torque": true
+  "full_body_torque": true,
+  "group_schedule": {
+    "path": "experiments/multitask_morphology/scheduling/formal_schedule.json",
+    "sha256": "e577c3c71564bec49340c01edbeac78b21ffea471c1a4147a7d97f89f1469f64"
+  }
 }

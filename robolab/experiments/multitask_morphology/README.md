@@ -31,6 +31,7 @@ multitask_morphology/
 | 膝 / 踝电机 | 完整 5 款 / 6 款；不含 4310P |
 | 并行环境 / 每组 | 4096 个副本 / 60 种结构 |
 | 换组 | 每 50 次 PPO 更新；每 50 组全库一遍（2500 次更新） |
+| 正式分组 | 冻结均衡排表：每组30种电机组合各2种；每档大腿/小腿各6种 |
 | 专家预算 | Rough 12000；负重 12000；AMP 5000 次更新 |
 | 全库轮数 | Rough / 负重各 4 轮＋第 5 轮 40 组；AMP 完整 2 轮 |
 | 全身电机 | 23 关节按对应型号应用实际扭矩—转速硬包络 |
@@ -55,7 +56,7 @@ conda activate robo_cjl
 export PYTHONUTF8=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export ENTRY=robolab/experiments/multitask_morphology
-export ROOT=/data/chenjiale/robo_cjl/robolab/logs/multitask_full3000_v1
+export ROOT=/data/chenjiale/robo_cjl/robolab/logs/multitask_full3000_balanced_v2
 
 # 必须填写本机真实存在的原始 RPO URDF 及显示网格目录。
 export TEMPLATE=/absolute/path/to/original_robot.urdf
@@ -155,6 +156,12 @@ python "$ENTRY/shared_policy/rollout.py" --plan "$ROOT/shared_plan/plan.json" \
 
 本目录是代码整合与启动规范，不声称新的 3000 结构三专家已经训好。历史 200 结构共享策略结果继续属于其历史实验，不能用来替代本次全库验证。旧入口与旧实验未删除、未搬动。
 
-## 离线分组优化候选
+## 已启用的正式均衡分组
 
-已完成60结构×50组的精确均衡构造与模拟退火顺序优化试验，详见 [方法、代码与对比结果](scheduling/README.md)。该试验尚未替换正式调度，不改变上述训练命令。
+三个正式配置现在都绑定 `scheduling/formal_schedule.json`，使用离线验证过的种子43排表。每组60种、每轮50组；每款膝电机每组12种、每款踝电机每组10种。详见 [构造、搜索与覆盖证据](scheduling/README.md)。上述启动命令不需要另加参数。
+
+每轮重复同一套组成员与组顺序，以保留已验证的连续窗口和跨轮覆盖。组内已独立打散；第 `cycle` 轮再旋转 `cycle×16` 个位置，将4096除以60多出的16个环境副本轮流分配给不同结构，组成员和组顺序不变。训练启动不执行退火，也不依赖额外求解器。
+
+排表SHA256、公共加载器SHA256及绑定配置进入实验身份；每次调度校验完整性、容量和精确边际。排表变化、网格变化或哈希不符都会拒绝启动/续训。旧配置未声明 `group_schedule` 时保留旧调度分支，旧实验仍必须使用其原冻结源码；不能在旧run里替换配置后直接续训。
+
+本次只改变新实验的排表。3000种结构、物理、电机曲线、奖励、负载课程、4096环境、每组50代以及各任务总预算不变。结构库网格未改变，已有bank和AMP参考若通过原生身份校验，可继续作为新实验的输入，不必为了排表重做运动学参考；训练输出必须使用新目录。本次未启动GPU训练。

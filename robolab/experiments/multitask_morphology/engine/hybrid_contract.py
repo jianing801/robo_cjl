@@ -21,7 +21,7 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint','full_body_torque'}:
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint','full_body_torque','group_schedule'}:
         raise ValueError('expected grid, rotation and optional torque_soft_constraint')
     if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
     if config.get('full_body_torque') and config.get('torque_soft_constraint') not in (None,{'weight':0,'limit_ratio':.8}):raise ValueError('full-body and six-joint penalties cannot both be active')
@@ -37,11 +37,17 @@ def validate_config(config, bank):
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
         raise ValueError('active_designs must not exceed full training library or environment count')
+    if 'group_schedule' in config:
+        from hybrid_schedule import load_schedule
+        load_schedule(bank,config)
     return config
 
 def cycle_groups(bank, config, cycle):
     """Full coverage exactly once per sweep; stratified interleaving, seeded reshuffle."""
     if type(cycle) is not int or cycle<0:raise ValueError('invalid cycle')
+    if 'group_schedule' in config:
+        from hybrid_schedule import groups_for
+        return groups_for(bank,config,cycle)
     rows=[d for d in bank['designs'] if d['split']=='train']
     cap=config['rotation']['active_designs']
     count=(len(rows)+cap-1)//cap
@@ -101,6 +107,9 @@ def experiment_identity(bank_path,config):
     result = dict(kind=KIND,task=task,bank_sha256=sha(bank_path),configuration=config,
         native_sources=source_identity(task),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
         full_bank_context_is_stable=True,no_forgetting_metrics=True)
+    if 'group_schedule' in config:
+        from hybrid_schedule import schedule_identity
+        result['group_schedule']=schedule_identity(json.loads(Path(bank_path).read_text(encoding='utf8')),config)
     if config.get('full_body_torque'):
         from full_body_torque import source_identity as torque_identity
         result['full_body_sources']=torque_identity()

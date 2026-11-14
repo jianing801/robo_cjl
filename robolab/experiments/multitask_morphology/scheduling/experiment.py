@@ -113,6 +113,8 @@ def main():
     results=[]
     for seed in [int(v) for v in args.seeds.split(',')]:
         started=time.monotonic();cfg=json.loads(json.dumps(config));cfg['rotation']['seed']=seed
+        # Explicitly retain the old stratified baseline after formal adoption.
+        cfg.pop('group_schedule',None)
         baseline=cycle_groups(bank,cfg,0)
         candidates=[construct(bank,seed*100000+i) for i in range(args.candidates)]
         initial=min(candidates,key=lambda groups:objective(features(groups,bank)))
