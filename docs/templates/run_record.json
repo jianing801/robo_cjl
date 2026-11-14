@@ -1,0 +1,18 @@
+{
+  "kind": "manual_project_index_template_not_execution_evidence",
+  "source_commit": null,
+  "experiment_root": null,
+  "bank_audit": null,
+  "amp_reference_library": null,
+  "formal_schedule_sha256": null,
+  "teachers": {
+    "rough_completed": null,
+    "backpack_completed": null,
+    "amp_completed": null
+  },
+  "shared_plan": null,
+  "shared_completed": null,
+  "evaluation_summary_csv": null,
+  "video_index_csv": null,
+  "notes": "Copy and fill with actual paths. This template does not claim any run has completed."
+}

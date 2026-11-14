@@ -1,0 +1,5 @@
+# Controller-only CPU models. Do not upgrade Isaac Sim / Isaac Lab / rsl_rl.
+numpy>=1.24,<3
+scipy>=1.10,<2
+scikit-learn>=1.4,<2
+optuna>=4.4,<6

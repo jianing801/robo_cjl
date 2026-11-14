@@ -1,0 +1,75 @@
+"""Unified layout and real CPU launch checks; no long training or Kit startup."""
+import ast
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import pytest
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+
+
+def module(path):
+    spec = importlib.util.spec_from_file_location('unified_' + path.stem, path)
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+
+
+@pytest.mark.parametrize('task,key,folder', [
+    ('rough','stairs','engine'), ('backpack','backpack','engine'), ('amp','run','amp_engine')])
+def test_task_routes_to_owned_runtime_and_rejects_wrong_bank(tmp_path, task, key, folder):
+    entry = module(HERE/'train.py')
+    bank = tmp_path/'bank.json'
+    bank.write_text(json.dumps({'task_key': key}))
+    cmd = entry.command(task, HERE/'configs'/f'{task}.json', bank, ['--execute'])
+    assert Path(cmd[2]) == HERE/folder/'train.py'
+    assert cmd[-1] == '--execute'
+    bank.write_text(json.dumps({'task_key': 'wrong'}))
+    with pytest.raises(ValueError):
+        entry.command(task, HERE/'configs'/f'{task}.json', bank, [])
+
+
+def test_owned_source_roots_and_full_motor_curves():
+    for folder, name in [('engine','hybrid_support.py'), ('amp_engine','amp_support.py')]:
+        assert module(HERE/folder/name).ROOT == ROOT
+    torque = module(HERE/'engine/full_body_torque.py')
+    hashes = torque.source_identity()
+    assert 'experiments/multitask_morphology/engine/full_body_torque.py' in hashes
+    assert any(path.endswith('.csv') for path in hashes)
+    alignment = module(HERE/'amp_engine/amp_rough_alignment.py')
+    assert alignment.ROUGH == HERE/'engine'
+    assert module(HERE/'amp_engine/setup_hhtools.py').verify_snapshot() > 500
+
+
+@pytest.mark.parametrize('entry', ['train.py','prepare.py','prepare_shared.py','distill.py',
+    'engine/train.py','amp_engine/train.py','validate_teacher.py'])
+def test_real_command_help_without_simulation(entry):
+    result = subprocess.run([sys.executable, str(HERE/entry), '--help'], cwd=ROOT,
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert 'usage:' in result.stdout
+
+
+def test_no_legacy_runtime_paths_or_historical_258_width():
+    for folder in ('engine','amp_engine','shared_policy'):
+        for path in (HERE/folder).glob('*.py'):
+            if path.name.startswith('test_'):
+                continue
+            ast.parse(path.read_text(encoding='utf8'))
+            source = path.read_text(encoding='utf8')
+            assert "code/'experiments/rough_hybrid'" not in source
+            assert "code/'experiments/amp_hybrid'" not in source
+            assert "HERE.parent/'rough_hybrid" not in source
+    amp = (HERE/'shared_policy/rollout_amp.py').read_text()
+    assert "234+spec['context_width']" in amp and '(n,258)' not in amp
+
+
+def test_three_task_shared_routing_and_mlp():
+    source = (HERE/'shared_policy/pipeline.py').read_text()
+    assert "'rollout_amp.py' if task=='run'" in source
+    assert "'--architecture','mlp'" in source
+    assert "for index,(task,ids) in enumerate(jobs):" in source
+    assert "'--max-rows-per-design-shard'" in source

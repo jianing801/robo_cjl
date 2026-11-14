@@ -1,0 +1,10 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+bank/
+runs/
+*.pt
+*.usd
+*.usda
+!native_ground.usda
+*.mp4

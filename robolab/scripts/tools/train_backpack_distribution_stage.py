@@ -8,6 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT.parent / "rsl_rl")]
 from robolab.backpack_distribution import sha, write_new, validate_checkpoint, validate_plan
+from robolab.kit_args import disable_extension_fs_watcher
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--plan", required=True)
@@ -15,18 +16,25 @@ parser.add_argument("--stage", type=int, required=True)
 parser.add_argument("--output", required=True)
 parser.add_argument("--resume-checkpoint")
 parser.add_argument("--smoke-only", action="store_true")
+parser.add_argument("--full-body-torque", action="store_true", help="All 23 motor curves and dynamic torque penalty, weight -12")
 from isaaclab.app import AppLauncher
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 plan = json.loads(Path(args.plan).read_text(encoding="utf8"))
 plan_sha = sha(args.plan)
+torque_identity = None
+if args.full_body_torque:
+    sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
+    from full_body_torque import source_identity
+    torque_identity = source_identity()
 validate_plan(plan)
 design, stage = plan["design"], plan["stages"][args.stage]
 if sha(design["urdf"]) != design["urdf_sha256"]:
     raise ValueError("URDF identity changed")
 output = Path(args.output).resolve()
 output.mkdir(parents=True, exist_ok=False)
-args.kit_args = (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable"
+args.kit_args = disable_extension_fs_watcher(
+    (args.kit_args or "") + f" --portable-root {output / 'portable'} --portable")
 app = AppLauncher(args).app
 
 import torch
@@ -47,6 +55,8 @@ class Runner(OnPolicyRunner):
         if Path(path).exists():
             return
         metadata = dict(infos or {}, distribution_plan_sha256=plan_sha,
+                        full_body_torque=args.full_body_torque,
+                        full_body_sources=torque_identity,
                         stage=args.stage, design_id=design["id"],
                         torch_rng_state=torch.get_rng_state(),
                         cuda_rng_state=torch.cuda.get_rng_state_all())
@@ -84,6 +94,11 @@ def main():
     robot_cfg.init_state.pos = (*robot_cfg.init_state.pos[:2],
         robot_cfg.init_state.pos[2] + design["root_height_compensation_m"])
     cfg.scene_context.robot = cfg.scene.robot = robot_cfg
+    if args.full_body_torque:
+        sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
+        from full_body_torque import activate_for_config
+        from spatial_rough_runtime import SpatialMotorCfg
+        write_new(output / 'full_body_configuration.json', activate_for_config(cfg, SpatialMotorCfg, 1))
     cfg.scene.replicate_physics = True
     cfg.commands.debug_vis = False
     cfg.scene.terrain.visual_material = None
@@ -115,6 +130,10 @@ def main():
             saved = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
             first = saved["iter"] + 1
             validate_checkpoint(saved, plan_sha, first)
+            if saved['infos'].get('full_body_torque', False) != args.full_body_torque:
+                raise ValueError('full-body motor/reward identity differs from checkpoint')
+            if args.full_body_torque and saved['infos'].get('full_body_sources') != torque_identity:
+                raise ValueError('full-body curve/source identity differs from checkpoint')
             if not stage["start"] <= first <= stage["stop"]:
                 raise ValueError("checkpoint outside this stage")
             expected_stage = args.stage - 1 if first == stage["start"] else args.stage
@@ -132,7 +151,7 @@ def main():
                     raise ValueError("nonfinite physics smoke")
         write_new(output / "manifest.json", dict(plan_sha256=plan_sha, pid=os.getpid(), stage=stage,
             payload_audit=audit, num_envs=env.num_envs, resume=args.resume_checkpoint,
-            smoke_only=args.smoke_only, actor_payload_privileged_input=False,
+            smoke_only=args.smoke_only, full_body_torque=args.full_body_torque, actor_payload_privileged_input=False,
             actuators=live_actuator_audit(raw.unwrapped.scene["robot"], plan["physical_model"])))
         write_new(output / "payload_samples.json", properties)
         if args.smoke_only:

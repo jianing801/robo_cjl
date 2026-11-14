@@ -14,6 +14,8 @@ from robolab.assets.rpo_motor_catalog import (
     KNEE_MOTOR_CHOICES,
 )
 
+from robolab.kit_args import disable_extension_fs_watcher
+
 from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", type=str, required=True)
@@ -38,6 +40,7 @@ if hasattr(opr, "resolve_callable"):
     _orig = opr.resolve_callable
     opr.resolve_callable = lambda x: _orig({"ActorCritic":"rsl_rl.modules.actor_critic:ActorCritic","PPO":"rsl_rl.algorithms:PPO"}.get(x,x))
 
+args_cli.kit_args = disable_extension_fs_watcher(args_cli.kit_args)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 

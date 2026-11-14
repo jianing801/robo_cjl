@@ -1,0 +1,72 @@
+# 实验目录、身份与交付证据
+
+## 1. 一个实验根目录
+
+```text
+ROOT/
+  banks/{rough,backpack,amp}/bank.json
+  bank_audit.json
+  references/library.json
+  references/<运动学标识>/<动作片段>.pkl
+  experts/{rough,backpack,amp}/
+    plan.json
+    commits/stage_*.json
+    attempts/.../stdout.log、stderr.log、launch.json、result/...
+    completed.json
+  shared_plan/{plan.json,shared_bank.json}
+  shared_actor/
+    manifest.json
+    data/、data_commits/、data_round_*.json
+    bc_round_*/.../summary.json、student_epoch_*.pt
+    evaluation/.../summary.json
+    completed.json
+  evaluation/<独立评估或录像目录>/
+  environment/
+```
+
+自动生成参考库时，实际片段也可能位于`references/generated_.../`，library指向该目录。这同样有效，不要为了让目录“好看”而移动。模型的实际保存目录以阶段commit和completed记录为准，不根据示例树猜测或复制文件。
+
+## 2. 文件身份各管什么
+
+| 身份 | 防止的问题 |
+|---|---|
+| 源码提交、native/hybrid source hashes | 奖励、物理、优化器或观测实现被悄悄更换 |
+| bank SHA与URDF/GP/网格审计 | 结构名称未变但实际腿长、质量、惯量或资产已变化 |
+| reference library、片段SHA与运动学标识 | 新结构错误借用旧参考动作 |
+| formal_schedule.json及加载器SHA | 换组表被更改，旧训练变成另一种调度 |
+| 阶段commit、检查点iter与Adam/LR | 半写模型、重复更新或丢失优化器状态 |
+| 共享计划与教师/学生SHA | 蒸馏或评估实际用了另一份策略 |
+
+源码、物理或奖励有意义的变化应建立新实验身份，不应手改已保存身份。路径变更也可能使文件不可访问或使库验证失败；备份时保留完整目录关系与原始记录。
+
+## 3. 三个不同的“完成”
+
+1. **准备完成**：结构库联合审计通过；AMP library覆盖全库并验证。
+2. **预算完成**：任务completed、最后阶段commit与完整最终模型一致；教师校验通过。
+3. **步态通过**：真实闭环原始结果满足明确门槛，且覆盖声明与实际设计/任务集合一致。
+
+这三件事不能互相替代。参考动作的运动学验证不等于动态可行性；历史200结构共享策略结果不能替代新3000结构三任务结果。
+
+## 4. 资源与磁盘
+
+结构库只生成基础机器人一次，AMP复用基础资产，负重增加附件；训练还会产生原生转换缓存和不同任务输出。不要把受Git管理的源码大小当成全部训练磁盘需求。
+
+蒸馏的数据可能很大。例如9000个任务—结构条件、每条件8副本、每20秒采200行，仅780维float32观测的单轮数据就约44.9GB，动作、元数据和其他文件另计。多轮DAgger累计旧数据；拟合时32行上限控制的是内存采样，不会删除磁盘原始数据。这个算式不是精确容量保证，运行前检查实际输出盘空间。
+
+```bash
+df -h "$REPO/robolab/logs"
+du -sh "$ROOT"
+```
+
+不隐式清理旧模型、视频、失败目录或转换资产。需要清理时先单独列出依赖和备份，不能只按目录名判断“旧”。
+
+## 5. 最小交付清单
+
+- 源码提交与环境记录、正式配置、分组SHA。
+- 三个实际bank、联合审计及所有仍被引用的原始资产。
+- AMP完整library与它指向的片段。
+- 三个教师completed、最后阶段commit及完整模型。
+- 共享计划、最终学生、蒸馏完成记录与原始配对评估summary。
+- [评估表模板](templates/evaluation_summary.csv)、[录像索引模板](templates/video_index.csv)填好的真实结果和录像。
+
+[运行记录模板](templates/run_record.json)可用于人工项目索引，明确标记为模板，不替代程序生成的plan、commit或completed，也不能作为运行成功证据。

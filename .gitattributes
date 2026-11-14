@@ -6,3 +6,18 @@ docs/examples/**/*.step -text -diff
 
 # These vendored bytes are verified against upstream Git blob hashes.
 vendor/physical_1450a51/** -text
+
+# Checkpoint source repair payloads are SHA256-verified literal Git bytes.
+rough_bo/checkpoint_sources/** -text
+
+# The standalone AMP generator verifies every vendored byte against its manifest.
+robolab/experiments/multitask_morphology/amp_engine/vendor/** -text
+
+# Training configuration pins the exact frozen schedule bytes on every platform.
+robolab/experiments/multitask_morphology/scheduling/formal_schedule.json text eol=lf
+
+# Historical launchers retain their original Git bytes and archived SHA256.
+legacy/flat_co_design_2026/** -text
+
+# Archived expert source identities are byte-exact, independent of checkout OS.
+legacy/expert_sources_20261114/** -text

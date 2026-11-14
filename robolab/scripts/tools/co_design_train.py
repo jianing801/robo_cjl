@@ -36,6 +36,8 @@ from robolab.assets.rpo_motor_catalog import (  # noqa: E402
     KNEE_MOTOR_CHOICES,
 )
 
+from robolab.kit_args import disable_extension_fs_watcher
+
 from isaaclab.app import AppLauncher
 
 # local imports — add rsl_rl scripts dir to path for cli_args
@@ -97,6 +99,7 @@ if args_cli.video:
 sys.argv = [sys.argv[0]] + hydra_args
 
 # Launch Isaac Sim
+args_cli.kit_args = disable_extension_fs_watcher(args_cli.kit_args)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 

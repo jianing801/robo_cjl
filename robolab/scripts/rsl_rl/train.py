@@ -42,6 +42,19 @@ import argparse
 import os
 import sys
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Dispatch before importing/launching Isaac: the optional Rough workflow handles
+# its own sequential preparation, preflight and training. Ordinary RPO is intact.
+if __name__ == "__main__" and "--multi_morph" in sys.argv:
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    from launch_spatial_rough import main as launch_spatial_rough
+    launch_spatial_rough(sys.argv[1:])
+    raise SystemExit(0)
+
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -71,6 +84,10 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+from robolab.kit_args import disable_extension_fs_watcher  # noqa: E402
+
+args_cli.kit_args = disable_extension_fs_watcher(args_cli.kit_args)
 
 # auto-enable distributed training when launched with torchrun / torch.distributed.run
 if int(os.getenv("WORLD_SIZE", "1")) > 1:
