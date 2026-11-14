@@ -31,7 +31,7 @@
     "gp_extrapolation": true
   },
   "rotation": {
-    "active_designs": 30,
+    "active_designs": 60,
     "updates_per_stage": 50,
     "total_updates": 12000,
     "seed": 42
