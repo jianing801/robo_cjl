@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "GroundPlane"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "GroundPlane"
+{
+    def Plane "CollisionPlane" (
+        prepend apiSchemas = ["PhysicsCollisionAPI"]
+    )
+    {
+        uniform token axis = "Z"
+        double width = 2000000
+        double length = 2000000
+        bool physics:collisionEnabled = true
+    }
+    def SphereLight "SphereLight"
+    {
+        float inputs:intensity = 0
+    }
+}

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pt
+*.mp4
+*.usd
+*.tmp.usda
+runs/
+banks/
+references/

@@ -1,0 +1,27 @@
+# 独立目录整合验证
+
+2026-11-14，在本机已验证的 Isaac Lab Python 环境进行检查；没有启动新的专家长训，没有操作服务器或修改历史结果。
+
+- 公共引擎、AMP 及新统一入口：161 项测试通过。
+- 共享策略、AMP 三帧到十帧适配、参考路由缓存、共享 PPO 接口与 GAE：16 项测试通过。共享 PPO 接口测试显式读取历史已验证学生文件，只读验证 Actor 输出一致及可训练值函数，不把它当作新的 3000 结构训练结果。
+- 三任务完整配置的真实 CPU 预览成功：各 3000 结构、4096 环境、29 维原生形态条件；预览没有生成仿真或新实验。
+- 独立参考生成器的 533 项快照文件逐项哈希验证通过，环境安装命令 dry-run 成功；HHTools 仍在独立 Python 3.12 环境使用，不升级训练环境。
+- 新顶层命令以及两套内部训练命令的 `--help` 子进程检查通过。
+
+本次额外修正的是迁移适配：所有内部仓库根路径重新定位；AMP 共用组件指向本目录 `engine`；负重采集使用新负重环境与策略；全身力矩参数随冻结教师继承；AMP 原生输入宽度从历史写死的 258 改成 `234 + bank.context_width`；三任务蒸馏使用 MLP，并分别路由 AMP/其他任务采集器；最终配对评估覆盖全部共同结构，忽略横移，保留摔倒与前进门槛。
+
+原生训练引擎来自此前已短测的实现，但**本次新目录没有重跑 GPU 原生训练或完整三专家蒸馏**。177 项工程测试和 CPU 预览不构成新全库步态证据。正式完成状态必须以新输出中的检查点、提交记录和配对步态结果为准。
+
+复核命令（从仓库 `robolab` 子目录）：
+
+```bash
+python -m pytest experiments/multitask_morphology/engine \
+  experiments/multitask_morphology/amp_engine \
+  experiments/multitask_morphology/test_entrypoints.py -q
+
+# 可选：用真实已验证的共享学生显式启用 PPO 接口一致性测试。
+export SHARED_PPO_TEST_CHECKPOINT=/absolute/path/to/verified_shared_student.pt
+python -m pytest experiments/multitask_morphology/shared_policy -q
+```
+
+不提供该文件时，对应依赖真实历史模型的测试会跳过，其他合成接口测试可独立运行。不要把旧目录和新目录的同名裸模块测试放在同一个 Python 进程收集，以免测试导入缓存互相覆盖。
