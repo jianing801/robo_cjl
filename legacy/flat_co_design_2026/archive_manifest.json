@@ -1,0 +1,37 @@
+{
+  "kind": "archived_legacy_entrypoints_v1",
+  "source_commit": "0356ad4f4fc211849153b77a153bea29aedfe2c5",
+  "files": [
+    {
+      "original_path": "bo_watchdog.sh",
+      "archive_path": "legacy/flat_co_design_2026/bo_watchdog.sh",
+      "sha256": "db3c924c106b48742acaadd0bfc1b87f3ddf0690d3c282e3795ba593b0c6a594",
+      "source_git_blob_sha": "d7dda351f4b8707c793d25b9608f9a7411e2c90b"
+    },
+    {
+      "original_path": "resume_co_design.sh",
+      "archive_path": "legacy/flat_co_design_2026/resume_co_design.sh",
+      "sha256": "167c6f0ac3636e25cc3013ea29952a41524e988c794827a2a9af14806c2347a7",
+      "source_git_blob_sha": "b9544014233a77e3f4628000951716d77b13f657"
+    },
+    {
+      "original_path": "re_eval_clean.sh",
+      "archive_path": "legacy/flat_co_design_2026/re_eval_clean.sh",
+      "sha256": "eaf4812043cac6a182269eeba61214ae481f645dff7ae1cc1c3558ce39272fdc",
+      "source_git_blob_sha": "d56bab5e43e0758ba7ac11571becde80af5af42a"
+    },
+    {
+      "original_path": "re_eval_cot.sh",
+      "archive_path": "legacy/flat_co_design_2026/re_eval_cot.sh",
+      "sha256": "2abee9dfd6233e5289c4cd4759af4eb609cdd55d990101ffb37c9e7434066cba",
+      "source_git_blob_sha": "ebf3d32770de07b9b3bb14ca76bd515d9b01be3b"
+    },
+    {
+      "original_path": "eval_all_multi.py",
+      "archive_path": "legacy/flat_co_design_2026/eval_all_multi.py",
+      "sha256": "efeefbe0d2381684634bf5d713ff0d06c15dae2fc90d16c28baa46c9d7d9f830",
+      "source_git_blob_sha": "b919a8868255eeb78f3b72ffc2d18e167a39ac01"
+    }
+  ],
+  "byte_identity": "Original source commit Git blobs; platform checkout newline conversion excluded."
+}
