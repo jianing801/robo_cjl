@@ -18,3 +18,7 @@ BO若已经有通过审计的独立冻结源码树，仍使用原树。直接调
 ## 本次校验
 
 657份原版本记录逐项验证原始Git字节及SHA256：121个源码/配置/说明文件归档，536个第三方依赖文件原位保留并校验，不增加第三份HHTools副本。保留的兼容依赖与原版本一致。正式专家、AMP、入口与分组/更新器检查182项通过；Rough BO CPU回归49项通过，其中历史源码恢复10项；统一共享策略接口16项通过。合计247项，未启动GPU训练。当前AMP引擎、HHTools新依赖、正式公共引擎的源码均未改动。
+
+## 后续目录精简
+
+原归档清单记录的是归档当时的存储位置。现旧 `experiments/amp_hybrid`、`rough_hybrid` 已移除：HHTools唯一副本位于 `robolab/experiments/multitask_morphology/amp_engine/vendor/`（536份逐字节校验相同）；旧力矩模块迁至 `robolab/scripts/tools/full_body_torque.py`（原字节不变）。历史源码及原SHA记录仍保留，本说明不改变原归档证据。已有HHTools环境按 `docs/SETUP.md` 重新绑定。

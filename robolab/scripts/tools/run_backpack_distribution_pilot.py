@@ -97,7 +97,6 @@ def main():
     constraint_path = root / 'torque_constraint.json'
     constraint = dict(full_body_torque=args.full_body_torque)
     if args.full_body_torque:
-        sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
         from full_body_torque import source_identity
         constraint['sources'] = source_identity()
     if constraint_path.exists():

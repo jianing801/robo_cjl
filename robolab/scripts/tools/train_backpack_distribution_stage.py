@@ -24,7 +24,6 @@ plan = json.loads(Path(args.plan).read_text(encoding="utf8"))
 plan_sha = sha(args.plan)
 torque_identity = None
 if args.full_body_torque:
-    sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
     from full_body_torque import source_identity
     torque_identity = source_identity()
 validate_plan(plan)
@@ -95,7 +94,6 @@ def main():
         robot_cfg.init_state.pos[2] + design["root_height_compensation_m"])
     cfg.scene_context.robot = cfg.scene.robot = robot_cfg
     if args.full_body_torque:
-        sys.path.insert(0, str(ROOT / 'experiments/rough_hybrid'))
         from full_body_torque import activate_for_config
         from spatial_rough_runtime import SpatialMotorCfg
         write_new(output / 'full_body_configuration.json', activate_for_config(cfg, SpatialMotorCfg, 1))

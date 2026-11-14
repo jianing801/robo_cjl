@@ -44,7 +44,7 @@ vendor/physical_1450a51/                  带哈希校验的物理依赖快照
 legacy/                                  旧入口与旧专家源码档案
 ```
 
-`rough_hybrid`只保留旧力矩兼容模块；`amp_hybrid/vendor`暂保留既有HHTools editable环境的依赖位置。不能为了目录整洁破坏已经生成的参考动作或历史模型身份。详见入口索引。
+旧 `rough_hybrid`、`amp_hybrid` 目录已移除。兼容力矩模块位于 `robolab/scripts/tools/`，HHTools仅保留正式AMP引擎内的快照；已有环境需按 [迁移说明](docs/SETUP.md#已有-hhtools-环境迁移) 重新绑定。历史模型身份及参考动作文件保留。
 
 ## 获取代码
 

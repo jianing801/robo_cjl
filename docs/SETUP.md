@@ -37,10 +37,10 @@ robolab/data/robots/roboparty/rpo/meshes/
 | `vendor/physical_1450a51` | 固定物理目录、GP与URDF生成器依赖，含原Git blob校验 | 不可 |
 | `robolab/robolab/assets/motor_data` | 活跃电机目录、曲线、GP注册与源数据 | 不可 |
 | `multitask_morphology/amp_engine/vendor` | 当前参考动作工具自带的固定HHTools快照 | 不可随意裁剪 |
-| `amp_hybrid/vendor` | 已有editable HHTools环境可能指向的原位置 | 暂保留，不在生成过程中移动 |
+| `multitask_morphology/amp_engine/vendor` | 唯一HHTools快照 | 旧环境按下述命令重新绑定，版本不变 |
 | `legacy/expert_sources_20261114` | 旧专家源码档案与身份清单 | 不作为新训练入口 |
 
-以上`multitask_morphology`和`amp_hybrid`均指`robolab/experiments/`下目录。GitHub列表中“背包”提交说明只是该目录最近一次提交的文字，不能作为其任务用途判断。
+以上`multitask_morphology`指`robolab/experiments/`下目录。GitHub列表中“背包”提交说明只是该目录最近一次提交的文字，不能作为其任务用途判断。
 
 ## AMP独立环境
 
@@ -50,7 +50,7 @@ robolab/data/robots/roboparty/rpo/meshes/
 python robolab/experiments/multitask_morphology/amp_engine/setup_hhtools.py --env-name amp_hhtools
 ```
 
-安装器使用自带快照与版本清单。它的`--dry-run`可只显示命令；`--verify-runtime`需要在已经按该安装器配置的HHTools环境中运行。后者会严格检查导入位置，不能据此随意删除旧editable路径。
+安装器使用自带快照与版本清单。它的`--dry-run`可只显示命令；`--verify-runtime`需要在已经按该安装器配置的HHTools环境中运行。后者会严格检查导入位置，旧editable环境可按下述迁移命令重新绑定。
 
 如果完整参考库已由旧的可用HHTools环境生成，并已通过校验，训练阶段可以直接复用；不用为了切换安装位置重新求解参考动作。
 
@@ -88,3 +88,15 @@ $env:PYTHONUTF8 = "1"
 Python可执行文件和D盘路径只是已有部署的写法示例，需要按本机修改。原生USD文件名较长，选择短输出路径；不能把Linux的`export`和反斜杠续行原样贴进PowerShell。之后调用同一Python入口及对应参数，或先激活自己的训练环境。
 
 正式服务器示例要求至少12.5GiB空闲显存；12GB显卡不满足该门槛。小规模本机短测不能冒充正式4096环境/60结构验证，也不要仅为绕过门槛悄悄改正式环境数或预算。
+
+## 已有 HHTools 环境迁移
+
+旧 `amp_hybrid` 目录已移除，536份依赖文件与正式目录逐字节一致，未升级依赖。生成任务结束后，在现有环境重新绑定唯一快照：
+
+```bash
+conda run --no-capture-output -n amp_hhtools python   robolab/experiments/multitask_morphology/amp_engine/rebind_hhtools.py
+```
+
+此入口只重新绑定editable包，不安装或升级依赖；成功输出 `HHTOOLS_REBOUND`。已有完整参考动作文件保留，不要求重新生成；旧的部分生成计划若记录已删除的绝对HHTools路径，不能继续使用该路径。服务器需要更新代码后执行此命令，本次没有远程修改环境。
+
+旧负重分布工具的力矩模块已迁至 `robolab/scripts/tools/full_body_torque.py`，模块字节和物理行为不变。源码身份中的路径会变化；历史检查点须在原提交独立checkout复现，不绕过身份检查续训。

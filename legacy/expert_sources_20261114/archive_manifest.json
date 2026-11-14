@@ -673,5 +673,9 @@
       "robolab/experiments/amp_hybrid/vendor/"
     ],
     "reason": "Avoid a third HHTools copy while preserving the original editable-install location; retained files remain SHA-verified."
+  },
+  "subsequent_relocations": {
+    "robolab/experiments/rough_hybrid/full_body_torque.py": "robolab/scripts/tools/full_body_torque.py",
+    "robolab/experiments/amp_hybrid/vendor/": "robolab/experiments/multitask_morphology/amp_engine/vendor/"
   }
 }

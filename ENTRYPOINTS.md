@@ -31,8 +31,8 @@
 
 experiments中仅特意保留两处兼容依赖：
 
-- `rough_hybrid/full_body_torque.py`：旧负重分布工具按原路径读取，原字节不变，已没有旧专家训练入口。
-- `amp_hybrid/vendor/`：现有HHTools editable环境可能指向它，暂时保留，不影响正在生成的参考动作；已没有旧AMP专家训练入口。
+- 旧负重工具的力矩模块位于 `robolab/scripts/tools/full_body_torque.py`，原字节不变。
+- HHTools仅保留 `multitask_morphology/amp_engine/vendor/`；旧环境按 [迁移说明](docs/SETUP.md#已有-hhtools-环境迁移) 重新绑定。
 
 旧Rough BO的检查点源码恢复器会按检查点SHA从档案恢复所需旧Rough文件到独立审计缓存，不改用新引擎。已有冻结代码树、所有模型、结构库、参考动作、录像和实验记录未移动或删除。
 
