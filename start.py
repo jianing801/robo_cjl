@@ -1,4 +1,4 @@
-"""三任务统一启动：自动寻找结构库、识别续训并复用已有参考动作。"""
+"""跨形态多任务共享策略流程：自动寻找结构库、识别续训并复用参考动作。"""
 import argparse
 from datetime import datetime
 import hashlib

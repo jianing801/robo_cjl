@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-spec = importlib.util.spec_from_file_location('simple_launcher', REPO/'启动.py')
+spec = importlib.util.spec_from_file_location('simple_launcher', REPO/'start.py')
 launcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)
 
