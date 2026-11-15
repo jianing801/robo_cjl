@@ -81,3 +81,52 @@ def test_cache_interruption_is_not_mistaken_for_started_ppo(tmp_path):
     session=tmp_path/'attempts/session_001/train';session.mkdir(parents=True)
     (session/'launch.json').write_text(json.dumps({'command':['python','-u','persistent_worker.py']}))
     assert training_attempt_started(tmp_path)
+
+
+def test_conversion_batches_cover_bank_once_and_bound_process_lifetime():
+    from native_cache_coordinator import conversion_batches
+    ids=[str(i) for i in range(3000)]
+    batches=conversion_batches(ids,32)
+    assert len(batches)==94
+    assert [x for batch in batches for x in batch]==ids
+    assert max(map(len,batches))==32
+    # An exporter timeout falls back to the previous four-asset isolation.
+    fallback=conversion_batches(batches[0],4)
+    assert len(fallback)==8 and sum(fallback,[])==batches[0]
+    for bad in (0,-1,65):
+        with pytest.raises(ValueError):conversion_batches(ids,bad)
+
+
+def test_large_batch_timeout_falls_back_without_losing_designs(tmp_path,monkeypatch):
+    import native_cache_coordinator as coordinator
+    import hybrid_bank, hybrid_assets
+    from types import SimpleNamespace
+    bank={'task_key':'stairs','designs':[{'id':str(i)} for i in range(36)]}
+    bank_path=tmp_path/'bank.json';bank_path.write_text(json.dumps(bank))
+    monkeypatch.setattr(hybrid_bank,'load_configurable_bank',lambda p:bank)
+    monkeypatch.setattr(hybrid_assets,'mesh_sources',lambda b:{})
+    monkeypatch.setattr(hybrid_assets,'validate_asset',lambda row:None)
+    monkeypatch.setattr(coordinator,'stop_tree',lambda child:None)
+    ticks=iter(range(0,100000,1000))
+    monkeypatch.setattr(coordinator.time,'monotonic',lambda:next(ticks))
+    monkeypatch.setattr(coordinator.time,'sleep',lambda seconds:None)
+    calls=[]
+    class Child:
+        returncode=0
+        def __init__(self,cmd,**kwargs):
+            self.ids=cmd[cmd.index('--design-ids')+1].split(',');calls.append(self.ids)
+            self.large=len(self.ids)>4
+            if not self.large:
+                out=Path(cmd[cmd.index('--output-dir')+1]);out.mkdir(parents=True)
+                (out/'summary.json').write_text(json.dumps(dict(result='NATIVE_ASSET_CACHE_COMPLETE',
+                    cache_schema_version=2,bank_sha256=sha(bank_path),mesh_sources={},
+                    assets=[{'design':key} for key in self.ids])))
+        def poll(self):return None if self.large else 0
+    monkeypatch.setattr(coordinator.subprocess,'Popen',Child)
+    args=SimpleNamespace(bank=bank_path,output_dir=tmp_path/'proof',cache_root=tmp_path/'cache',
+        batch_size=32,reuse_proof_root=[],pause_root=None)
+    coordinator.coordinate(args,[])
+    proof=json.loads((args.cache_root/'completed.json').read_text())
+    assert [r['design'] for r in proof['assets']]==[str(i) for i in range(36)]
+    assert len(calls[0])==32 and all(len(ids)<=4 for ids in calls[1:])
+    assert len(calls)==10

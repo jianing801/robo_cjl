@@ -9,6 +9,7 @@ def main():
     parser.add_argument('--bank',required=True);parser.add_argument('--cache-root',required=True)
     parser.add_argument('--output-dir',required=True)
     parser.add_argument('--pause-root')
+    parser.add_argument('--batch-size',type=int,default=32,help='Assets per isolated converter process (1-64)')
     parser.add_argument('--reuse-proof-root',action='append',default=[])
     parser.add_argument('--batch-worker',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--design-ids',help=argparse.SUPPRESS)

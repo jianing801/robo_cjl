@@ -43,6 +43,12 @@ def stop_tree(child):
         psutil.wait_procs([parent,*children],timeout=10)
     except psutil.NoSuchProcess:pass
 
+def conversion_batches(ids, size):
+    if not 1 <= size <= 64:
+        raise ValueError('native cache batch size must be between 1 and 64')
+    return [ids[i:i+size] for i in range(0,len(ids),size)]
+
+
 def coordinate(args,argv):
     from hybrid_support import write_new
     from hybrid_contract import sha
@@ -53,14 +59,17 @@ def coordinate(args,argv):
     from hybrid_assets import mesh_sources,validate_asset
     meshes=mesh_sources(bank)
     output=Path(args.output_dir).resolve();output.mkdir(parents=True,exist_ok=False)
+    batch_size=args.batch_size
+    conversion_batches([],batch_size)
     cache=Path(args.cache_root).resolve();cache.mkdir(parents=True,exist_ok=False)
     ids=[d['id'] for d in bank['designs']]
     rows=reuse_verified_batches(args.reuse_proof_root,bank,bank_sha,cache)
     seen={row['design'] for row in rows};pending=[key for key in ids if key not in seen]
     if rows:print('NATIVE_CACHE_REUSED',len(rows),'/',len(ids),flush=True)
     try:
-        for offset in range(0,len(pending),4):
-            chunk=pending[offset:offset+4];number=offset//4
+        batches=conversion_batches(pending,batch_size)
+        for number,chunk in enumerate(batches):
+            batch_timeout=max(180,90+20*len(chunk))
             for attempt in range(3):
                 if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
                 tag=f'batch_{number:04d}_attempt_{attempt+1}'
@@ -75,7 +84,7 @@ def coordinate(args,argv):
                     try:
                         while child.poll() is None:
                             if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
-                            if time.monotonic()-started>180:
+                            if time.monotonic()-started>batch_timeout:
                                 timeout=True;stop_tree(child);break
                             time.sleep(.5)
                     except BaseException:
@@ -98,10 +107,16 @@ def coordinate(args,argv):
                 # Preserve all partial assets and logs; retry in a new process/directory.
                 tail=(output/f'{tag}.stderr.log').read_text(encoding='utf8',errors='replace')[-2000:]
                 print('CACHE_BATCH_TIMEOUT; preserved evidence',tag,tail,flush=True)
+                if len(chunk)>4:
+                    # A larger batch is an optimization, never a prerequisite.
+                    # Leave failed assets untouched and retry in small fresh processes.
+                    batches[number+1:number+1]=conversion_batches(chunk,4)
+                    print('CACHE_BATCH_FALLBACK',len(chunk),'to batches of 4',flush=True)
+                    break
                 if attempt==2:raise TimeoutError('Native conversion failed three bounded attempts')
         if meshes!=mesh_sources(bank):raise ValueError('source meshes changed during native conversion')
         proof=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,bank_sha256=bank_sha,task=task,
-            designs=len(rows),assets=rows,batch_size=4,per_batch_timeout_seconds=180)
+            designs=len(rows),assets=rows,batch_size=batch_size,timeout_policy='max(180,90+20*designs)',timeout_fallback_batch_size=4)
         write_new(cache/'completed.json',proof);write_new(output/'summary.json',proof)
     except BaseException:
         import traceback
