@@ -1,0 +1,239 @@
+"""三任务统一启动：自动寻找结构库、识别续训并复用已有参考动作。"""
+import argparse
+from datetime import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+REPO = Path(__file__).resolve().parent
+ENTRY = REPO / 'robolab/experiments/multitask_morphology'
+DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
+ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
+           '蒸馏': 'distill', '状态': 'status', '录像': 'video'}
+
+
+def read(path):
+    return json.loads(Path(path).read_text(encoding='utf-8-sig'))
+
+
+def run(command, *, env=None, preview=False):
+    if preview:
+        print('预览，不执行：', subprocess.list2cmdline(list(map(str, command))), flush=True)
+        return
+    subprocess.run(list(map(str, command)), cwd=REPO, env=env, check=True)
+
+
+def bank_path(root, task):
+    return root / 'banks' / task / 'bank.json'
+
+
+def ensure_banks(root, preview=False):
+    # 完整库直接复用；部分生成的目录绝不覆盖或擅自删除。
+    paths = [bank_path(root, t) for t in ('rough', 'backpack', 'amp')]
+    if all(p.is_file() for p in paths):
+        print('已找到三个任务的结构库，直接复用。', flush=True)
+        return
+    if root.exists():
+        raise RuntimeError(f'结构库不完整，保留现场并停止：{root}。请查看“异常处理与续训”。')
+    assets = REPO / 'robolab/data/robots/roboparty/rpo'
+    template = assets / 'urdf/rpo.urdf'
+    meshes = assets / 'meshes'
+    if not template.is_file() or not meshes.is_dir():
+        raise FileNotFoundError('缺少原始机器人资产，请先完成“环境与资产准备”。')
+    run([sys.executable, '-u', ENTRY/'prepare.py', '--output-root', root,
+         '--template', template, '--mesh-dir', meshes, '--generate-assets'], preview=preview)
+
+
+def select_run(root, task):
+    """兼容之前手动启动的目录；优先使用本入口记下的任务目录。"""
+    bank = bank_path(root, task).resolve()
+    state = root / '启动记录' / f'{task}.json'
+    if state.is_file():
+        selected = Path(read(state)['output']).resolve()
+        if not selected.is_relative_to((root/'experts').resolve()):
+            raise ValueError('启动记录中的目录不属于本实验。')
+        if (selected/'plan.json').is_file():
+            if Path(read(selected/'plan.json')['bank']).resolve() != bank:
+                raise ValueError('启动记录绑定了不同结构库。')
+            return selected, True
+    candidates = []
+    for folder in (root/'experts').glob(task+'*'):
+        if folder.name != task and not folder.name.startswith(task+'_'):
+            continue
+        plan = folder/'plan.json'
+        if plan.is_file() and Path(read(plan)['bank']).resolve() == bank:
+            candidates.append(folder)
+    if candidates:
+        selected = max(candidates, key=lambda p: (p/'plan.json').stat().st_mtime_ns)
+        return selected, True
+    selected = root/'experts'/task
+    if selected.exists():
+        if not selected.is_dir() or any(p.is_file() or p.is_symlink() for p in selected.rglob('*')):
+            raise RuntimeError(f'目录有内容但缺少训练计划，保留并停止：{selected}')
+        # 空壳目录保留，给正式运行分配新目录；之后由启动记录记住。
+        selected = selected.with_name(task+'_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    return selected, False
+
+
+def expert_command(root, task, gpu, output, resume):
+    command = [sys.executable, '-u', str(ENTRY/'train.py'), '--task', task,
+               '--bank', str(bank_path(root, task)), '--output-root', str(output),
+               '--device', f'cuda:{gpu}', '--gpu-min-free-gb', '12.5',
+               '--gpu-max-utilization', '100', '--execute']
+    if resume:
+        command.append('--resume')
+    if task == 'amp':
+        library = root/'references/library.json'
+        if resume and (output/'plan.json').is_file():
+            library = Path(read(output/'plan.json')['reference_library'])
+        command += ['--reference-library', str(library),
+                    '--hhtools-env', 'amp_hhtools', '--reference-device', 'cuda']
+    return command
+
+
+def record_run(root, task, output):
+    folder = root/'启动记录'; folder.mkdir(exist_ok=True)
+    value = dict(output=str(output.resolve()), bank=str(bank_path(root, task).resolve()))
+    tmp = folder/f'{task}.{os.getpid()}.tmp'
+    tmp.write_text(json.dumps(value, ensure_ascii=False), encoding='utf8')
+    os.replace(tmp, folder/f'{task}.json')
+
+
+def launch_expert(root, task, gpu, preview=False):
+    output, resume = select_run(root, task)
+    print(('续训目录：' if resume else '新训练目录：')+str(output), flush=True)
+    if (output/'USER_PAUSED').exists():
+        raise RuntimeError('该任务有用户暂停标记；请明确恢复后再启动，不自动取消暂停。')
+    if resume and task != 'amp':
+        # 仅转换阶段允许通过已有审计工具迁移；PPO开始后严格拒绝改身份。
+        current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in (ENTRY/'engine').glob('*.py') if not p.name.startswith('test_')}
+        if read(output/'plan.json')['experiment']['hybrid_sources'] != current:
+            run([sys.executable, ENTRY/'engine/refresh_cache_plan.py', '--root', output], preview=preview)
+    command = expert_command(root, task, gpu, output, resume)
+    if preview:
+        run(command, preview=True)
+        return
+    record_run(root, task, output)
+    # Linux直接替换当前进程，避免额外父进程干扰中断和任务归属。
+    if sys.platform != 'win32':
+        os.chdir(REPO)
+        os.execv(sys.executable, command)
+    run(command)
+
+
+def references(root, gpu, cpu, preview=False):
+    library = root/'references/library.json'
+    if library.is_file():
+        print('参考动作库已存在；AMP启动时会严格校验复用，无需重新生成。', flush=True)
+        return
+    if library.parent.exists():
+        raise RuntimeError(f'参考动作目录部分存在但缺少完整库，保留并停止：{library.parent}')
+    command = ['conda', 'run', '--no-capture-output', '-n', 'amp_hhtools', 'python', '-u',
+               ENTRY/'amp_engine/prepare_references.py', '--bank', bank_path(root, 'amp'),
+               '--output', library.parent, '--hhtools-root', ENTRY/'amp_engine/vendor/hhtools',
+               '--device', 'cpu' if cpu else 'cuda:0']
+    env = os.environ.copy()
+    if not cpu:
+        env['CUDA_VISIBLE_DEVICES'] = str(gpu)
+    run(command, env=env, preview=preview)
+
+
+def distill(root, gpu, preview=False):
+    teachers = {t: select_run(root, t)[0] for t in ('rough', 'backpack', 'amp')}
+    if not all((p/'completed.json').is_file() for p in teachers.values()):
+        raise RuntimeError('请先完成三个专家；尚未完成的任务可用“状态”查看。')
+    plan = root/'shared_plan/plan.json'
+    if not plan.is_file():
+        command = [sys.executable, ENTRY/'prepare_shared.py', '--output', plan.parent]
+        for task, folder in teachers.items():
+            command += [f'--{task}-root', folder]
+        run(command, preview=preview)
+    if plan.is_file():
+        bound = read(plan)['teachers']
+        for task, folder in teachers.items():
+            native = {'rough':'stairs','backpack':'backpack','amp':'run'}[task]
+            if Path(bound[native]['checkpoint']).resolve() != Path(read(folder/'completed.json')['checkpoint']).resolve():
+                raise ValueError('共享计划绑定的教师与当前教师不一致；保留旧计划，不自动替换。')
+    output = root/'shared_policy'
+    command = [sys.executable, '-u', ENTRY/'distill.py', '--plan', plan, '--output', output,
+               '--device', f'cuda:{gpu}', '--batch-designs', '10', '--collect-steps', '1000',
+               '--stride', '5', '--epochs', '20', '--dagger-rounds', '3',
+               '--timeout-seconds', '1800', '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100']
+    if (output/'manifest.json').is_file():
+        command.append('--resume')
+    run(command, preview=preview)
+
+
+def video(root, task, gpu, index, preview=False):
+    plan = root/'shared_plan/plan.json'; complete = root/'shared_policy/completed.json'
+    if not plan.is_file() or not complete.is_file():
+        raise RuntimeError('请先完成共享策略蒸馏，再录共享策略录像。')
+    native = {'rough':'stairs', 'backpack':'backpack', 'amp':'run'}[task]
+    ids = read(plan)['teachers'][native]['design_ids']
+    if not 0 <= index < len(ids):
+        raise ValueError(f'结构序号应在0到{len(ids)-1}之间。')
+    output = root/'videos'/f'{task}_{index}_{datetime.now():%Y%m%d_%H%M%S_%f}'
+    command = [sys.executable, '-u', ENTRY/'shared_policy'/('rollout_amp.py' if task=='amp' else 'rollout.py'),
+               '--plan', plan, '--design-ids', ids[index], '--student', read(complete)['student'],
+               '--output', output, '--mode', 'evaluate', '--steps', '1000', '--video', '--headless',
+               '--device', 'cuda:0', f'--kit_args=--/renderer/activeGpu={gpu} --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0']
+    if task != 'amp':
+        command += ['--task', native]
+    if task == 'backpack':
+        command += ['--payload-kg', '10']
+    env = os.environ.copy(); env['CUDA_VISIBLE_DEVICES'] = str(gpu)
+    print('录像输出目录：', output, flush=True)
+    run(command, env=env, preview=preview)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, add_help=False)
+    parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
+    parser._positionals.title = '操作'
+    parser._optionals.title = '选项'
+    parser.add_argument('操作', choices=['准备','参考动作','rough','负重','amp','蒸馏','状态','录像'])
+    parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
+    parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
+    parser.add_argument('--任务', choices=['rough','负重','amp'], default='rough', help='录像任务')
+    parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
+    parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
+    parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
+    args = parser.parse_args(argv)
+    if args.gpu < 0:
+        parser.error('显卡编号不能为负数')
+    os.environ.setdefault('PYTHONUTF8', '1')
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
+    root = args.root.resolve(); action = ALIASES.get(args.操作, args.操作)
+    if args.cpu and action != 'references':
+        parser.error('--cpu仅用于单独生成参考动作')
+    if action == 'status':
+        print('实验目录：', root)
+        for task in ('rough','backpack','amp'):
+            output, resume = select_run(root, task)
+            status = '存在完成记录，仍需模型与步态验收' if (output/'completed.json').is_file() else ('已有计划，可续训' if resume else '尚未开始')
+            print(task, status, output)
+        return
+    if action == 'video':
+        video(root, ALIASES.get(args.任务,args.任务), args.gpu, args.结构, args.dry_run)
+        return
+    ensure_banks(root, args.dry_run)
+    if action == 'prepare':
+        return
+    if action == 'references':
+        references(root, args.gpu, args.cpu, args.dry_run)
+    elif action == 'distill':
+        distill(root, args.gpu, args.dry_run)
+    else:
+        launch_expert(root, action, args.gpu, args.dry_run)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, RuntimeError, FileNotFoundError, KeyError, subprocess.CalledProcessError) as error:
+        print('启动未完成：'+str(error), file=sys.stderr)
+        raise SystemExit(1)

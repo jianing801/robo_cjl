@@ -14,5 +14,5 @@
   "shared_completed": null,
   "evaluation_summary_csv": null,
   "video_index_csv": null,
-  "notes": "Copy and fill with actual paths. This template does not claim any run has completed."
+  "notes": "这是人工索引模板，请填写真实记录；不是程序运行完成的证据。JSON字段名保留与原始结果的对应关系。"
 }

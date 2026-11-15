@@ -1,0 +1,123 @@
+"""验证中文统一入口的目录判断和实际命令，不启动仿真或训练。"""
+import importlib.util
+import json
+from pathlib import Path
+import pytest
+
+REPO = Path(__file__).resolve().parents[3]
+spec = importlib.util.spec_from_file_location('simple_launcher', REPO/'启动.py')
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+
+
+def banks(root):
+    for task in ('rough','backpack','amp'):
+        path = launcher.bank_path(root, task); path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'task_key': task}))
+
+
+def plan(root, name):
+    folder = root/'experts'/name; folder.mkdir(parents=True)
+    (folder/'plan.json').write_text(json.dumps({'bank': str(launcher.bank_path(root,'rough'))}))
+    return folder
+
+
+def test_fresh_and_empty_outputs_never_need_manual_paths(tmp_path):
+    banks(tmp_path)
+    output, resume = launcher.select_run(tmp_path,'rough')
+    assert output == tmp_path/'experts/rough' and not resume
+    output.mkdir(parents=True)
+    next_output, resume = launcher.select_run(tmp_path,'rough')
+    assert next_output != output and not resume and output.is_dir()
+    assert not next_output.exists()
+
+
+def test_missing_plan_with_files_never_silently_starts_over(tmp_path):
+    folder = tmp_path/'experts/rough'; folder.mkdir(parents=True)
+    marker = folder/'model_0.pt'; marker.write_text('keep')
+    with pytest.raises(RuntimeError): launcher.select_run(tmp_path,'rough')
+    assert marker.read_text() == 'keep'
+
+
+def test_finds_manual_timestamp_run_and_remembers_it(tmp_path):
+    banks(tmp_path); existing = plan(tmp_path,'rough_20261115_123456')
+    assert launcher.select_run(tmp_path,'rough') == (existing,True)
+    launcher.record_run(tmp_path,'rough',existing)
+    plan(tmp_path,'rough_20261115_999999')
+    assert launcher.select_run(tmp_path,'rough') == (existing,True)
+
+
+def test_launch_record_cannot_escape_experiment(tmp_path):
+    banks(tmp_path); folder=tmp_path/'启动记录'; folder.mkdir()
+    (folder/'rough.json').write_text(json.dumps({'output':str(tmp_path.parent)}))
+    with pytest.raises(ValueError): launcher.select_run(tmp_path,'rough')
+
+
+@pytest.mark.parametrize('task',['rough','backpack','amp'])
+def test_native_expert_commands_keep_official_budget_and_gpu_interface(tmp_path,task):
+    command=launcher.expert_command(tmp_path,task,4,tmp_path/'output',True)
+    assert command[command.index('--device')+1]=='cuda:4'
+    assert '--execute' in command and '--resume' in command
+    assert '--config' not in command  # 正式入口自行使用冻结配置。
+    if task=='amp':
+        assert command[command.index('--reference-library')+1]==str(tmp_path/'references/library.json')
+
+
+def test_preview_does_not_create_output_or_launch_record(tmp_path,capsys):
+    banks(tmp_path)
+    launcher.main(['rough','--root',str(tmp_path),'--gpu','0','--dry-run'])
+    assert not (tmp_path/'experts').exists() and not (tmp_path/'启动记录').exists()
+    assert '--device cuda:0' in capsys.readouterr().out
+
+
+def test_pause_marker_is_not_removed(tmp_path):
+    banks(tmp_path); folder=plan(tmp_path,'rough'); marker=folder/'USER_PAUSED'; marker.touch()
+    with pytest.raises(RuntimeError): launcher.launch_expert(tmp_path,'rough',0,True)
+    assert marker.exists()
+
+
+def test_partial_bank_directory_is_not_overwritten(tmp_path,monkeypatch):
+    keep=tmp_path/'partial.txt'; keep.write_text('keep')
+    monkeypatch.setattr(launcher,'run',lambda *a,**k:pytest.fail('不应启动生成'))
+    with pytest.raises(RuntimeError): launcher.ensure_banks(tmp_path)
+    assert keep.read_text()=='keep'
+
+
+def test_cpu_references_command_uses_separate_environment(tmp_path,monkeypatch):
+    calls=[];monkeypatch.setattr(launcher,'run',lambda cmd,**kwargs:calls.append((cmd,kwargs)))
+    launcher.references(tmp_path,4,True,True)
+    command=calls[0][0]
+    assert command[:5]==['conda','run','--no-capture-output','-n','amp_hhtools']
+    assert command[-1]=='cpu'
+
+
+def test_shared_video_keeps_one_design_and_ten_kg(tmp_path,monkeypatch):
+    folder=tmp_path/'shared_plan';folder.mkdir()
+    (folder/'plan.json').write_text(json.dumps({'teachers':{'backpack':{'design_ids':['one','two']}}}))
+    output=tmp_path/'shared_policy';output.mkdir()
+    (output/'completed.json').write_text(json.dumps({'student':'model.pt'}))
+    calls=[];monkeypatch.setattr(launcher,'run',lambda cmd,**kwargs:calls.append(cmd))
+    launcher.video(tmp_path,'backpack',0,1,True)
+    command=calls[0]
+    assert command[command.index('--design-ids')+1]=='two'
+    assert command[command.index('--payload-kg')+1]=='10'
+
+
+def test_amp_resume_keeps_original_reference_library(tmp_path):
+    output=tmp_path/'amp';output.mkdir()
+    library=str(tmp_path/'original_reference/library.json')
+    (output/'plan.json').write_text(json.dumps({'reference_library':library}))
+    command=launcher.expert_command(tmp_path,'amp',0,output,True)
+    assert command[command.index('--reference-library')+1]==library
+
+
+def test_existing_shared_plan_cannot_silently_switch_teachers(tmp_path,monkeypatch):
+    teachers={}
+    for task in ('rough','backpack','amp'):
+        folder=tmp_path/'experts'/task;folder.mkdir(parents=True)
+        (folder/'completed.json').write_text(json.dumps({'checkpoint':str(folder/'new.pt')}))
+        teachers[task]=folder
+    monkeypatch.setattr(launcher,'select_run',lambda root,task:(teachers[task],True))
+    folder=tmp_path/'shared_plan';folder.mkdir()
+    (folder/'plan.json').write_text(json.dumps({'teachers':{'stairs':{'checkpoint':str(tmp_path/'old.pt')}}}))
+    with pytest.raises(ValueError,match='教师'):launcher.distill(tmp_path,0,True)
