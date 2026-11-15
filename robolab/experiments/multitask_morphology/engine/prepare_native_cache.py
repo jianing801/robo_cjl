@@ -9,10 +9,13 @@ def main():
     parser.add_argument('--bank',required=True);parser.add_argument('--cache-root',required=True)
     parser.add_argument('--output-dir',required=True)
     parser.add_argument('--pause-root')
-    parser.add_argument('--batch-size',type=int,default=32,help='Assets per isolated converter process (1-64)')
+    parser.add_argument('--batch-size',type=int,default=0,help='0: continuous conversion; positive: optional planned process recycle interval')
     parser.add_argument('--reuse-proof-root',action='append',default=[])
+    parser.add_argument('--stall-timeout',type=float,default=30,help='Seconds without a completed asset after startup')
+    parser.add_argument('--startup-timeout',type=float,default=300)
     parser.add_argument('--batch-worker',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--design-ids',help=argparse.SUPPRESS)
+    parser.add_argument('--design-ids-file',help=argparse.SUPPRESS)
     parser.add_argument('--expected-bank-sha',help=argparse.SUPPRESS)
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser);args=parser.parse_args()
@@ -24,7 +27,7 @@ def main():
     bank_path=Path(args.bank).resolve();task=json.loads(bank_path.read_text(encoding='utf8')).get('task_key','stairs')
     if sha(bank_path)!=args.expected_bank_sha:raise ValueError('bank changed during cache conversion')
     bank=json.loads(bank_path.read_text(encoding='utf8'))
-    selected=args.design_ids.split(',');lookup={d['id']:d for d in bank['designs']}
+    selected=json.loads(Path(args.design_ids_file).read_text(encoding='utf8')) if args.design_ids_file else args.design_ids.split(',');lookup={d['id']:d for d in bank['designs']}
     if len(set(selected))!=len(selected) or not set(selected).issubset(lookup):raise ValueError('unknown cache design')
     bank['designs']=[lookup[key] for key in selected]
     from hybrid_assets import mesh_sources
@@ -63,6 +66,12 @@ def main():
             gc.collect()
             for _ in range(3):app.update()
             row['files_sha256']=asset_files(spawn.usd_dir);rows.append(row)
+            # Publish only a fully hashed asset; a killed writer leaves only .tmp.
+            from native_cache_coordinator import publish_asset_proof
+            publish_asset_proof(output/'assets'/f'{design["id"]}.json',dict(
+                result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,
+                mesh_sources=mesh_sources({'designs':[design]}),bank_sha256=sha(bank_path),
+                task=task,designs=1,assets=[row]))
             print('NATIVE_ASSET_READY',index+1,'/',len(bank['designs']),design['id'],flush=True)
         if meshes!=mesh_sources(bank):raise ValueError('source meshes changed during conversion')
         summary=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,bank_sha256=sha(bank_path),task=task,

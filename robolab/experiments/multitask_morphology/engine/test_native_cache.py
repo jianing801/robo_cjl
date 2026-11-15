@@ -83,50 +83,112 @@ def test_cache_interruption_is_not_mistaken_for_started_ppo(tmp_path):
     assert training_attempt_started(tmp_path)
 
 
-def test_conversion_batches_cover_bank_once_and_bound_process_lifetime():
-    from native_cache_coordinator import conversion_batches
-    ids=[str(i) for i in range(3000)]
-    batches=conversion_batches(ids,32)
-    assert len(batches)==94
-    assert [x for batch in batches for x in batch]==ids
-    assert max(map(len,batches))==32
-    # An exporter timeout falls back to the previous four-asset isolation.
-    fallback=conversion_batches(batches[0],4)
-    assert len(fallback)==8 and sum(fallback,[])==batches[0]
-    for bad in (0,-1,65):
-        with pytest.raises(ValueError):conversion_batches(ids,bad)
+
+def test_asset_proof_is_atomic_and_interrupted_session_can_be_reused(tmp_path):
+    from native_cache_coordinator import publish_asset_proof,reuse_verified_batches
+    root,cache,bank,usd=make_cache(tmp_path)
+    folder=tmp_path/'sessions/batch_0000/assets';folder.mkdir(parents=True)
+    proof=json.loads((cache/'completed.json').read_text())
+    publish_asset_proof(folder/'one.json',proof)
+    assert not list(folder.glob('*.tmp'))
+    (folder/'broken.json.tmp').write_text('{')
+    destination=tmp_path/'resumed';destination.mkdir()
+    rows=reuse_verified_batches([folder.parent.parent],json.loads(bank.read_text()),sha(bank),destination)
+    assert len(rows)==1 and Path(rows[0]['usd']).read_bytes()==usd.read_bytes()
+    with pytest.raises(FileExistsError):publish_asset_proof(folder/'one.json',proof)
 
 
-def test_large_batch_timeout_falls_back_without_losing_designs(tmp_path,monkeypatch):
-    import native_cache_coordinator as coordinator
-    import hybrid_bank, hybrid_assets
+@pytest.mark.parametrize('fault',['healthy','crash','stall','no_progress','failure','pause'])
+def test_continuous_converter_watchdog_and_resume(tmp_path,monkeypatch,fault):
+    import native_cache_coordinator as c
+    import hybrid_bank,hybrid_assets
     from types import SimpleNamespace
-    bank={'task_key':'stairs','designs':[{'id':str(i)} for i in range(36)]}
+    bank={'task_key':'stairs','designs':[{'id':str(i),'urdf_sha256':'fixture'} for i in range(12)]}
     bank_path=tmp_path/'bank.json';bank_path.write_text(json.dumps(bank))
     monkeypatch.setattr(hybrid_bank,'load_configurable_bank',lambda p:bank)
     monkeypatch.setattr(hybrid_assets,'mesh_sources',lambda b:{})
     monkeypatch.setattr(hybrid_assets,'validate_asset',lambda row:None)
-    monkeypatch.setattr(coordinator,'stop_tree',lambda child:None)
-    ticks=iter(range(0,100000,1000))
-    monkeypatch.setattr(coordinator.time,'monotonic',lambda:next(ticks))
-    monkeypatch.setattr(coordinator.time,'sleep',lambda seconds:None)
-    calls=[]
+    ticks=iter(range(10000));monkeypatch.setattr(c.time,'monotonic',lambda:next(ticks))
+    monkeypatch.setattr(c.time,'sleep',lambda seconds:None)
+    calls=[];pause=tmp_path/'control';pause.mkdir()
     class Child:
-        returncode=0
+        returncode=None
         def __init__(self,cmd,**kwargs):
-            self.ids=cmd[cmd.index('--design-ids')+1].split(',');calls.append(self.ids)
-            self.large=len(self.ids)>4
-            if not self.large:
-                out=Path(cmd[cmd.index('--output-dir')+1]);out.mkdir(parents=True)
-                (out/'summary.json').write_text(json.dumps(dict(result='NATIVE_ASSET_CACHE_COMPLETE',
-                    cache_schema_version=2,bank_sha256=sha(bank_path),mesh_sources={},
-                    assets=[{'design':key} for key in self.ids])))
-        def poll(self):return None if self.large else 0
-    monkeypatch.setattr(coordinator.subprocess,'Popen',Child)
-    args=SimpleNamespace(bank=bank_path,output_dir=tmp_path/'proof',cache_root=tmp_path/'cache',
-        batch_size=32,reuse_proof_root=[],pause_root=None)
-    coordinator.coordinate(args,[])
-    proof=json.loads((args.cache_root/'completed.json').read_text())
-    assert [r['design'] for r in proof['assets']]==[str(i) for i in range(36)]
-    assert len(calls[0])==32 and all(len(ids)<=4 for ids in calls[1:])
-    assert len(calls)==10
+            self.ids=json.loads(Path(cmd[cmd.index('--design-ids-file')+1]).read_text())
+            self.output=Path(cmd[cmd.index('--output-dir')+1]);self.output.mkdir(parents=True)
+            self.cache=Path(cmd[cmd.index('--cache-root')+1]);self.index=0
+            self.first=not calls;calls.append(self.ids)
+        def poll(self):
+            if self.returncode is not None:return self.returncode
+            if fault=='no_progress':self.returncode=7;return 7
+            if self.first and fault=='failure':
+                (self.output/'failure.json').write_text('{"traceback":"explicit conversion error"}')
+                self.returncode=1;return 1
+            if self.first and fault=='pause':
+                (pause/'USER_PAUSED').touch();return None
+            if self.first and self.index==2 and fault in ('crash','stall'):
+                if fault=='crash':self.returncode=7;return 7
+                return None
+            if self.index==len(self.ids):self.returncode=0;return 0
+            key=self.ids[self.index];self.index+=1
+            c.publish_asset_proof(self.output/'assets'/f'{key}.json',dict(
+                result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,bank_sha256=sha(bank_path),
+                mesh_sources={},assets=[dict(design=key,urdf_sha256='fixture',usd=str(self.cache/key/'robot.usd'))]))
+            return None
+    monkeypatch.setattr(c.subprocess,'Popen',Child)
+    monkeypatch.setattr(c,'stop_tree',lambda child:setattr(child,'returncode',-9))
+    args=SimpleNamespace(bank=bank_path,cache_root=tmp_path/'cache',output_dir=tmp_path/'proof',
+        batch_size=0,startup_timeout=3,stall_timeout=3,reuse_proof_root=[],pause_root=pause)
+    if fault in ('no_progress','failure','pause'):
+        with pytest.raises(RuntimeError):c.coordinate(args,[])
+        assert len(calls)==(3 if fault=='no_progress' else 1)
+        assert not (args.cache_root/'completed.json').exists()
+    else:
+        c.coordinate(args,[])
+        proof=json.loads((args.cache_root/'completed.json').read_text())
+        assert [row['design'] for row in proof['assets']]==[str(i) for i in range(12)]
+        assert len(calls)==(1 if fault=='healthy' else 2)
+        if fault!='healthy':assert calls[1]==[str(i) for i in range(2,12)]
+
+
+def test_live_asset_proofs_validate_geometry_and_bank_before_accepting(tmp_path):
+    from native_cache_coordinator import publish_asset_proof,read_asset_proofs
+    root,cache,bank,usd=make_cache(tmp_path)
+    folder=tmp_path/'live';proof=json.loads((cache/'completed.json').read_text())
+    publish_asset_proof(folder/'assets/one.json',proof)
+    parsed=json.loads(bank.read_text())
+    assert len(read_asset_proofs(folder,cache,parsed,sha(bank),set()))==1
+    with pytest.raises(ValueError,match='proof'):
+        read_asset_proofs(folder,cache,parsed,'wrong-bank',set())
+    (usd.parent/'geometry.usd').write_text('changed')
+    with pytest.raises(ValueError,match='geometry'):
+        read_asset_proofs(folder,cache,parsed,sha(bank),set())
+
+
+@pytest.mark.parametrize('change',['converter_only','native','runtime','unknown_converter','checkpoint','commit','worker'])
+def test_cache_plan_refresh_only_accepts_known_pre_ppo_converter_change(tmp_path,monkeypatch,change):
+    import refresh_cache_plan as refresh
+    from copy import deepcopy
+    previous={name:values[0] for name,values in refresh.KNOWN_CONVERTERS.items()}
+    previous['train.py']='unchanged-controller'
+    old=dict(native_sources={'physics':'same'},hybrid_sources=previous)
+    current=deepcopy(old)
+    for name in refresh.KNOWN_CONVERTERS:current['hybrid_sources'][name]='new-converter'
+    current['hybrid_sources']['refresh_cache_plan.py']='new-helper'
+    plan=dict(experiment=old,bank='fixture',configuration={'budget':12000})
+    if change=='native':current['native_sources']['physics']='changed'
+    if change=='runtime':current['hybrid_sources']['train.py']='changed'
+    if change=='unknown_converter':old['hybrid_sources']['prepare_native_cache.py']='unknown'
+    if change=='checkpoint':(tmp_path/'model_0.pt').touch()
+    if change=='commit':
+        (tmp_path/'commits').mkdir();(tmp_path/'commits/stage_0.json').write_text('{}')
+    if change=='worker':
+        folder=tmp_path/'attempts/session_0/train';folder.mkdir(parents=True)
+        (folder/'launch.json').write_text(json.dumps({'command':['python','persistent_worker.py']}))
+    monkeypatch.setattr(refresh,'experiment_identity',lambda bank,config:current)
+    if change=='converter_only':
+        updated=refresh.refreshed_plan(tmp_path,plan)
+        assert updated['experiment']==current and plan['experiment']==old
+        assert updated['configuration']==plan['configuration']
+    else:
+        with pytest.raises((ValueError,RuntimeError)):refresh.refreshed_plan(tmp_path,plan)

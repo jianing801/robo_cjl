@@ -1,4 +1,4 @@
-"""Bounded fresh-process batches isolate native URDF exporter lifetime faults."""
+"""Continuous native conversion with durable per-asset proofs and a progress watchdog."""
 import json,os,subprocess,sys,time
 from pathlib import Path
 
@@ -9,7 +9,7 @@ def reuse_verified_batches(roots,bank,bank_sha,cache):
     from hybrid_assets import validate_asset,mesh_sources
     expected={d['id']:d for d in bank['designs']};rows={}
     for root in roots:
-        for proof_path in sorted(Path(root).glob('batch_*/summary.json')):
+        for proof_path in sorted([*Path(root).glob('batch_*/summary.json'), *Path(root).glob('batch_*/assets/*.json')]):
             proof=json.loads(proof_path.read_text(encoding='utf8'))
             if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2 or proof.get('bank_sha256')!=bank_sha:continue
             subset={'designs':[expected[row['design']] for row in proof['assets'] if row['design'] in expected]}
@@ -43,10 +43,37 @@ def stop_tree(child):
         psutil.wait_procs([parent,*children],timeout=10)
     except psutil.NoSuchProcess:pass
 
-def conversion_batches(ids, size):
-    if not 1 <= size <= 64:
-        raise ValueError('native cache batch size must be between 1 and 64')
-    return [ids[i:i+size] for i in range(0,len(ids),size)]
+def publish_asset_proof(path,value):
+    """Atomic publication makes completed assets recoverable before worker exit."""
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    if path.exists():raise FileExistsError(path)
+    temporary=path.with_suffix('.json.tmp')
+    with temporary.open('x',encoding='utf8') as stream:
+        json.dump(value,stream,ensure_ascii=False,allow_nan=False)
+        stream.flush();os.fsync(stream.fileno())
+    os.replace(temporary,path)
+
+
+def read_asset_proofs(folder,cache,bank,bank_sha,seen):
+    from hybrid_assets import validate_asset,mesh_sources
+    expected={d['id']:d for d in bank['designs']};rows=[]
+    for path in sorted((Path(folder)/'assets').glob('*.json')):
+        if path.stem in seen:continue
+        proof=json.loads(path.read_text(encoding='utf8'))
+        if (proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2
+                or proof.get('bank_sha256')!=bank_sha or len(proof.get('assets',[]))!=1):
+            raise ValueError('invalid per-asset conversion proof')
+        row=proof['assets'][0];key=row['design']
+        if key!=path.stem or key not in expected or key in seen:
+            raise ValueError('unexpected per-asset design')
+        if not Path(row['usd']).resolve().is_relative_to(Path(cache).resolve()):
+            raise ValueError('conversion proof escapes this worker cache')
+        if row['urdf_sha256']!=expected[key]['urdf_sha256']:
+            raise ValueError('changed URDF in per-asset proof')
+        if proof.get('mesh_sources')!=mesh_sources({'designs':[expected[key]]}):
+            raise ValueError('changed mesh in per-asset proof')
+        validate_asset(row);seen.add(key);rows.append(row)
+    return rows
 
 
 def coordinate(args,argv):
@@ -56,67 +83,68 @@ def coordinate(args,argv):
     if task=='run':from amp_bank import load_configurable_bank
     else:from hybrid_bank import load_configurable_bank
     bank=load_configurable_bank(bank_path);bank_sha=sha(bank_path)
-    from hybrid_assets import mesh_sources,validate_asset
+    from hybrid_assets import mesh_sources
     meshes=mesh_sources(bank)
+    size=args.batch_size
+    if not 0<=size<=len(bank['designs']):raise ValueError('invalid conversion recycle interval')
+    startup=getattr(args,'startup_timeout',300);stall=getattr(args,'stall_timeout',30)
+    if startup<=0 or stall<=0:raise ValueError('watchdog timeouts must be positive')
     output=Path(args.output_dir).resolve();output.mkdir(parents=True,exist_ok=False)
-    batch_size=args.batch_size
-    conversion_batches([],batch_size)
     cache=Path(args.cache_root).resolve();cache.mkdir(parents=True,exist_ok=False)
     ids=[d['id'] for d in bank['designs']]
     rows=reuse_verified_batches(args.reuse_proof_root,bank,bank_sha,cache)
-    seen={row['design'] for row in rows};pending=[key for key in ids if key not in seen]
+    seen={row['design'] for row in rows};failures=0;number=0
     if rows:print('NATIVE_CACHE_REUSED',len(rows),'/',len(ids),flush=True)
     try:
-        batches=conversion_batches(pending,batch_size)
-        for number,chunk in enumerate(batches):
-            batch_timeout=max(180,90+20*len(chunk))
-            for attempt in range(3):
-                if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
-                tag=f'batch_{number:04d}_attempt_{attempt+1}'
-                batch_output=output/tag;batch_cache=cache/tag
-                cmd=[sys.executable,'-u',str(Path(__file__).with_name('prepare_native_cache.py')),*argv,
-                    '--batch-worker','--design-ids',','.join(chunk),'--expected-bank-sha',bank_sha,
-                    '--cache-root',str(batch_cache),'--output-dir',str(batch_output)]
-                kwargs={'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}
-                print('CACHE_BATCH_START',number,attempt+1,'designs',len(chunk),flush=True)
-                with (output/f'{tag}.stdout.log').open('x',encoding='utf8') as out,(output/f'{tag}.stderr.log').open('x',encoding='utf8') as err:
-                    child=subprocess.Popen(cmd,stdout=out,stderr=err,**kwargs);started=time.monotonic();timeout=False
-                    try:
-                        while child.poll() is None:
-                            if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
-                            if time.monotonic()-started>batch_timeout:
-                                timeout=True;stop_tree(child);break
-                            time.sleep(.5)
-                    except BaseException:
-                        stop_tree(child);raise
-                summary=batch_output/'summary.json';failure=batch_output/'failure.json'
-                if failure.exists():raise RuntimeError(f'Native cache batch failed: {failure.read_text(encoding="utf8")}')
-                if summary.exists():
-                    proof=json.loads(summary.read_text(encoding='utf8'))
-                    if (proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2
-                        or proof.get('bank_sha256')!=bank_sha or len(proof['assets'])!=len(chunk)
-                        or {r['design'] for r in proof['assets']}!=set(chunk)):
-                        raise ValueError('native cache batch proof mismatch')
-                    for row in proof['assets']:validate_asset(row)
-                    if proof.get('mesh_sources')!=mesh_sources({'designs':[bank_design for bank_design in bank['designs'] if bank_design['id'] in chunk]}):
-                        raise ValueError('native cache batch mesh identity mismatch')
-                    if child.returncode not in (0,None) and not timeout:raise RuntimeError('Cache batch exited abnormally')
-                    rows.extend(proof['assets'])
-                    print('NATIVE_CACHE_PROGRESS',len(rows),'/',len(ids),flush=True);break
-                if not timeout:raise RuntimeError(f'Native cache worker exited {child.returncode}; inspect {tag} logs')
-                # Preserve all partial assets and logs; retry in a new process/directory.
-                tail=(output/f'{tag}.stderr.log').read_text(encoding='utf8',errors='replace')[-2000:]
-                print('CACHE_BATCH_TIMEOUT; preserved evidence',tag,tail,flush=True)
-                if len(chunk)>4:
-                    # A larger batch is an optimization, never a prerequisite.
-                    # Leave failed assets untouched and retry in small fresh processes.
-                    batches[number+1:number+1]=conversion_batches(chunk,4)
-                    print('CACHE_BATCH_FALLBACK',len(chunk),'to batches of 4',flush=True)
-                    break
-                if attempt==2:raise TimeoutError('Native conversion failed three bounded attempts')
+        while len(seen)<len(ids):
+            if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
+            pending=[key for key in ids if key not in seen];chunk=pending[:size] if size else pending
+            tag=f'batch_{number:04d}_attempt_1';number+=1
+            batch_output=output/tag;batch_cache=cache/tag
+            selected=output/f'{tag}.designs.json';write_new(selected,chunk)
+            cmd=[sys.executable,'-u',str(Path(__file__).with_name('prepare_native_cache.py')),*argv,
+                 '--batch-worker','--design-ids-file',str(selected),'--expected-bank-sha',bank_sha,
+                 '--cache-root',str(batch_cache),'--output-dir',str(batch_output)]
+            kwargs={'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}
+            print('CACHE_SESSION_START',number,'pending',len(chunk),flush=True)
+            before=len(seen);timeout=False
+            with (output/f'{tag}.stdout.log').open('x',encoding='utf8') as out,(output/f'{tag}.stderr.log').open('x',encoding='utf8') as err:
+                child=subprocess.Popen(cmd,stdout=out,stderr=err,**kwargs)
+                last_progress=time.monotonic();progressed=False
+                try:
+                    while True:
+                        if args.pause_root and (Path(args.pause_root)/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
+                        new=read_asset_proofs(batch_output,batch_cache,bank,bank_sha,seen)
+                        if new:
+                            rows.extend(new);last_progress=time.monotonic();progressed=True
+                            print('NATIVE_CACHE_PROGRESS',len(rows),'/',len(ids),flush=True)
+                        if child.poll() is not None:break
+                        limit=stall if progressed else startup
+                        if time.monotonic()-last_progress>limit:
+                            timeout=True;stop_tree(child);break
+                        time.sleep(.5)
+                    rows.extend(read_asset_proofs(batch_output,batch_cache,bank,bank_sha,seen))
+                except BaseException:
+                    stop_tree(child);raise
+            failure=batch_output/'failure.json'
+            if failure.exists():
+                raise RuntimeError('Native converter recorded failure: '+failure.read_text(encoding='utf8'))
+            if len(seen)==before:failures+=1
+            else:failures=0
+            if set(chunk).issubset(seen) and child.returncode==0 and not timeout:
+                continue
+            tail=(output/f'{tag}.stderr.log').read_text(encoding='utf8',errors='replace')[-2000:]
+            print('CACHE_SESSION_INTERRUPTED','timeout' if timeout else child.returncode,
+                  'verified',len(seen)-before,'preserved evidence',tag,tail,flush=True)
+            if failures>=3:raise RuntimeError('Native converter failed three consecutive sessions without progress')
+            # The next process only receives designs with no verified asset proof.
         if meshes!=mesh_sources(bank):raise ValueError('source meshes changed during native conversion')
-        proof=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,bank_sha256=bank_sha,task=task,
-            designs=len(rows),assets=rows,batch_size=batch_size,timeout_policy='max(180,90+20*designs)',timeout_fallback_batch_size=4)
+        by_id={row['design']:row for row in rows}
+        if set(by_id)!=set(ids) or len(rows)!=len(ids):raise ValueError('cache coverage mismatch')
+        proof=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,
+            bank_sha256=bank_sha,task=task,designs=len(rows),assets=[by_id[key] for key in ids],
+            conversion_protocol='continuous_asset_proofs_v1',recycle_interval=size,
+            startup_timeout_seconds=startup,stall_timeout_seconds=stall,sessions=number)
         write_new(cache/'completed.json',proof);write_new(output/'summary.json',proof)
     except BaseException:
         import traceback
