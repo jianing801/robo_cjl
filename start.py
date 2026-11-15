@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 
 REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
@@ -152,6 +154,95 @@ def references(root, gpu, cpu, preview=False):
     run(command, env=env, preview=preview)
 
 
+def cache_worker_status(pid):
+    import psutil
+    try:
+        state=psutil.Process(pid).status()
+    except psutil.Error:
+        return '已退出'
+    # Linux的/proc链接只用于诊断本次子进程，不读取资产内容或其他用户数据。
+    if sys.platform.startswith('linux'):
+        try:
+            for path in sorted(Path(f'/proc/{pid}/fd').iterdir(),key=lambda p:int(p.name),reverse=True):
+                target=os.readlink(path)
+                if target.lower().endswith(('.usd','.urdf','.stl','.obj','.pkl')):
+                    return state+'，打开文件：'+target
+        except OSError:
+            pass
+    return state
+
+
+def run_cache_child(command, folder, env):
+    """资产专用监督：心跳不依赖子进程输出，中断及非零退出也保存退出记录。"""
+    import psutil
+    folder.mkdir(exist_ok=False)
+    started=time.monotonic();worker=None;pump=None;problem=None;code=None
+    last=['尚无子进程输出'];logging_errors=[]
+    with (folder/'stdout.log').open('x',encoding='utf8') as out,(folder/'stderr.log').open('x',encoding='utf8') as err:
+        try:
+            kwargs=dict(cwd=REPO/'robolab',env=dict(env,PYTHONIOENCODING='utf-8'),
+                        stdout=subprocess.PIPE,stderr=err,text=True,encoding='utf8',errors='replace',bufsize=1)
+            if os.name=='nt':kwargs['creationflags']=subprocess.CREATE_NO_WINDOW
+            else:kwargs['start_new_session']=True
+            worker=subprocess.Popen(command,**kwargs)
+            try:created=psutil.Process(worker.pid).create_time()
+            except psutil.NoSuchProcess:created=None
+            (folder/'launch.json').write_text(json.dumps(dict(pid=worker.pid,create_time=created,command=command)),encoding='utf8')
+            print('CACHE_CHILD_START',worker.pid,folder,flush=True)
+            def copy_output():
+                try:
+                    for line in worker.stdout:
+                        last[0]=line.rstrip();print(line,end='',flush=True)
+                        out.write(line);out.flush()
+                except BaseException as error:
+                    logging_errors.append(error)
+            pump=threading.Thread(target=copy_output,daemon=True);pump.start()
+            heartbeat=time.monotonic()
+            while worker.poll() is None:
+                if logging_errors:raise RuntimeError('缓存日志转发失败：'+str(logging_errors[0]))
+                if time.monotonic()-heartbeat>=10:
+                    print(f'CACHE_HEARTBEAT pid={worker.pid} elapsed={time.monotonic()-started:.0f}s '
+                          f'{cache_worker_status(worker.pid)}；最近输出：{last[0]}',flush=True)
+                    heartbeat=time.monotonic()
+                time.sleep(.2)
+            code=worker.wait()
+            pump.join(timeout=5)
+            if logging_errors:raise RuntimeError('缓存日志转发失败：'+str(logging_errors[0]))
+        except BaseException as error:
+            problem=error
+            if isinstance(error,KeyboardInterrupt):
+                (folder.parents[2]/'USER_PAUSED').touch(exist_ok=True)
+            if worker is not None and worker.poll() is None:
+                from native_cache_coordinator import stop_tree
+                stop_tree(worker)
+                code=worker.poll()
+        finally:
+            if pump is not None:pump.join(timeout=1)
+            if worker is not None and code is None:code=worker.poll()
+            failure=(folder/'result/failure.json').is_file()
+            summary=(folder/'result/summary.json').is_file()
+            effective=code if code else (1 if problem is not None or failure or not summary else 0)
+            record=dict(returncode=effective,raw_returncode=code,summary_exists=summary,
+                        failure_recorded=failure,interrupted=isinstance(problem,KeyboardInterrupt),
+                        wall_seconds=round(time.monotonic()-started,3),
+                        controller_error=None if problem is None else type(problem).__name__+': '+str(problem))
+            print('CACHE_CHILD_EXIT',json.dumps(record,ensure_ascii=False),flush=True)
+            (folder/'exit.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf8')
+    if problem is not None:raise problem
+    if effective:
+        try:
+            failure_path=folder/'result/failure.json'
+            if failure_path.is_file():
+                print('缓存准备失败原因：\n'+str(read(failure_path).get('traceback','')),file=sys.stderr,flush=True)
+            else:
+                with (folder/'stderr.log').open('rb') as stream:
+                    stream.seek(0,os.SEEK_END);stream.seek(max(0,stream.tell()-8192))
+                    print(stream.read().decode('utf8',errors='replace'),file=sys.stderr,flush=True)
+        except (OSError,ValueError) as reading_error:
+            print('无法读取错误详情：'+str(reading_error),file=sys.stderr,flush=True)
+        raise RuntimeError(f'USD准备失败，退出码{code}；完整错误见{folder}/stderr.log')
+
+
 def prepare_task_assets(root, task, gpu, preview=False):
     """仅准备一个任务的USD；复用原控制器的锁、日志及缓存校验，不调用PPO。"""
     output, resume = select_run(root, task)
@@ -165,7 +256,7 @@ def prepare_task_assets(root, task, gpu, preview=False):
         print(f'转换选卡：cuda:{gpu}；最低空闲显存4GiB，和训练12.5GiB门槛分开。')
         return
     sys.path[:0] = [str(ENTRY/'engine'), str(REPO/'robolab'), str(REPO/'rsl_rl')]
-    from train import controller_lock, run_child
+    from train import controller_lock
     from hybrid_native_cache import ensure_cache, sha
     from hybrid_processes import reject_duplicate_bank_safely
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
@@ -182,7 +273,7 @@ def prepare_task_assets(root, task, gpu, preview=False):
             environment = child_environment(selected, os.environ)
             kit = (f" --/renderer/activeGpu={selected['index']}"
                    " --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0")
-            cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_child)
+            cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_cache_child)
         folder = root/'启动记录'; folder.mkdir(exist_ok=True)
         record = dict(cache=str(cache.resolve()), bank_sha256=sha(bank),
                       completed_sha256=sha(cache/'completed.json'))
@@ -216,10 +307,33 @@ def reject_asset_workers(bank):
                 raise RuntimeError(f'同一结构库已有转换进程{process.pid}，不重复启动。')
 
 
-def prepare_assets(root, task, gpu, preview=False):
+def resume_asset_pause(root, task, preview=False):
+    """仅在用户明确传入恢复选项时清除预训练转换暂停，保留审计。"""
+    output, resume=select_run(root,task)
+    cache_root=output if resume else root/'资产准备'/task
+    marker=cache_root/'USER_PAUSED'
+    if not marker.exists():return
+    sys.path.insert(0,str(ENTRY/'engine'))
+    from hybrid_native_cache import training_attempt_started
+    if training_attempt_started(cache_root) or any((cache_root/'commits').glob('*.json')):
+        raise RuntimeError('该暂停目录已有PPO记录；资产恢复选项不能取消训练暂停。')
+    if preview:
+        print('预览：将明确恢复转换暂停',marker)
+        return
+    folder=root/'启动记录';folder.mkdir(exist_ok=True)
+    record=folder/f'{task}_asset_resume_{datetime.now():%Y%m%d_%H%M%S_%f}.json'
+    with record.open('x',encoding='utf8') as stream:
+        json.dump(dict(explicit_asset_resume=True,marker=str(marker),
+                       marker_sha256=hashlib.sha256(marker.read_bytes()).hexdigest()),stream)
+    marker.unlink()
+    print('已按本次明确指令恢复USD准备，不启动PPO。',flush=True)
+
+
+def prepare_assets(root, task, gpu, preview=False, resume_paused=False):
     tasks = ('rough','backpack','amp') if task == '全部' else (ALIASES.get(task,task),)
     # 顺序执行，一次只启动一个任务的转换器；任一失败立即停止。
     for current in tasks:
+        if resume_paused:resume_asset_pause(root,current,preview)
         prepare_task_assets(root,current,gpu,preview)
     print('USD_ASSETS_ALL_SELECTED_READY' if not preview else 'USD_ASSETS_PREVIEW_ONLY',flush=True)
 
@@ -284,6 +398,7 @@ def main(argv=None):
     parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
     parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
+    parser.add_argument('--resume-paused', action='store_true', help='明确恢复仅转换阶段的用户暂停，不恢复PPO')
     args = parser.parse_args(argv)
     if args.gpu < 0:
         parser.error('显卡编号不能为负数')
@@ -292,6 +407,8 @@ def main(argv=None):
     root = args.root.resolve(); action = ALIASES.get(args.操作, args.操作)
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
+    if args.resume_paused and action != 'assets':
+        parser.error('--resume-paused仅用于USD资产准备')
     if action == 'status':
         print('实验目录：', root)
         for task in ('rough','backpack','amp'):
@@ -311,7 +428,7 @@ def main(argv=None):
     if action == 'references':
         references(root, args.gpu, args.cpu, args.dry_run)
     elif action == 'assets':
-        prepare_assets(root, args.任务 or '全部', args.gpu, args.dry_run)
+        prepare_assets(root, args.任务 or '全部', args.gpu, args.dry_run, args.resume_paused)
     elif action == 'distill':
         distill(root, args.gpu, args.dry_run)
     else:

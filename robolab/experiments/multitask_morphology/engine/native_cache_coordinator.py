@@ -2,23 +2,38 @@
 import json,os,subprocess,sys,time
 from pathlib import Path
 
+def exception_text(error):
+    # 不读取源码行，避免共享存储故障时traceback自身的linecache也被阻塞。
+    lines=['Traceback (most recent call last):']
+    tb=error.__traceback__
+    while tb is not None:
+        code=tb.tb_frame.f_code
+        lines.append(f'  File "{code.co_filename}", line {tb.tb_lineno}, in {code.co_name}')
+        tb=tb.tb_next
+    lines.append(type(error).__name__+': '+str(error))
+    return '\n'.join(lines)
+
 def reuse_verified_batches(roots,bank,bank_sha,cache):
     """Copy only completed, hash-verified native batches; keep failures intact."""
     import shutil
-    from hybrid_native_cache import sha
     from hybrid_assets import validate_asset,mesh_sources
     expected={d['id']:d for d in bank['designs']};rows={}
     for root in roots:
         for proof_path in sorted([*Path(root).glob('batch_*/summary.json'), *Path(root).glob('batch_*/assets/*.json')]):
+            print('CACHE_REUSE_PROOF',str(proof_path),flush=True)
             proof=json.loads(proof_path.read_text(encoding='utf8'))
             if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2 or proof.get('bank_sha256')!=bank_sha:continue
+            keys=[row['design'] for row in proof['assets']]
+            if keys and all(key in rows for key in keys):continue
             subset={'designs':[expected[row['design']] for row in proof['assets'] if row['design'] in expected]}
             if proof.get('mesh_sources')!=mesh_sources(subset):raise ValueError('native batch source meshes changed')
             for row in proof['assets']:
                 key=row['design'];source=Path(row['usd'])
                 if key not in expected or key in rows:continue
+                print('CACHE_REUSE_ASSET_BEGIN',key,str(source),flush=True)
                 validate_asset(row)
-                if row['urdf_sha256']!=expected[key]['urdf_sha256'] or sha(source)!=row['usd_sha256']:
+                # validate_asset已经核对USD哈希，不再重复读取大文件。
+                if row['urdf_sha256']!=expected[key]['urdf_sha256']:
                     raise ValueError('changed native batch; do not reuse')
                 if (source.parent/'.asset_hash').read_text().strip()!=row['converter_hash'] or not (source.parent/'config.yaml').is_file():
                     raise ValueError('incomplete native batch metadata')
@@ -30,6 +45,7 @@ def reuse_verified_batches(roots,bank,bank_sha,cache):
                     return shutil.copy2(src,dst)
                 shutil.copytree(source.parent,target,copy_function=copy_file)
                 rows[key]=dict(row,usd=str(target/source.name))
+                print('CACHE_REUSE_PROGRESS',len(rows),'/',len(expected),flush=True)
     return list(rows.values())
 
 def stop_tree(child):
@@ -78,20 +94,37 @@ def read_asset_proofs(folder,cache,bank,bank_sha,seen):
 
 def coordinate(args,argv):
     from hybrid_support import write_new
+    output=Path(args.output_dir).resolve();output.mkdir(parents=True,exist_ok=False)
+    print('CACHE_PHASE VALIDATING_BANK',str(args.bank),flush=True)
+    try:
+        return _coordinate(args,argv)
+    except BaseException as error:
+        text=exception_text(error)
+        print(text,file=sys.stderr,flush=True)
+        if not (output/'failure.json').exists():
+            write_new(output/'failure.json',dict(traceback=text))
+        raise
+
+
+def _coordinate(args,argv):
+    from hybrid_support import write_new
     from hybrid_contract import sha
     bank_path=Path(args.bank).resolve();task=json.loads(bank_path.read_text(encoding='utf8')).get('task_key','stairs')
     if task=='run':from amp_bank import load_configurable_bank
     else:from hybrid_bank import load_configurable_bank
     bank=load_configurable_bank(bank_path);bank_sha=sha(bank_path)
     from hybrid_assets import mesh_sources
+    print('CACHE_PHASE HASHING_SOURCE_MESHES',len(bank['designs']),flush=True)
     meshes=mesh_sources(bank)
+    print('CACHE_PHASE SOURCE_MESHES_VERIFIED',len(meshes),flush=True)
     size=args.batch_size
     if not 0<=size<=len(bank['designs']):raise ValueError('invalid conversion recycle interval')
     startup=getattr(args,'startup_timeout',300);stall=getattr(args,'stall_timeout',30)
     if startup<=0 or stall<=0:raise ValueError('watchdog timeouts must be positive')
-    output=Path(args.output_dir).resolve();output.mkdir(parents=True,exist_ok=False)
+    output=Path(args.output_dir).resolve()
     cache=Path(args.cache_root).resolve();cache.mkdir(parents=True,exist_ok=False)
     ids=[d['id'] for d in bank['designs']]
+    print('CACHE_PHASE REUSING_PREVIOUS_ASSETS',len(args.reuse_proof_root),flush=True)
     rows=reuse_verified_batches(args.reuse_proof_root,bank,bank_sha,cache)
     seen={row['design'] for row in rows};failures=0;number=0
     if rows:print('NATIVE_CACHE_REUSED',len(rows),'/',len(ids),flush=True)
@@ -146,6 +179,5 @@ def coordinate(args,argv):
             conversion_protocol='continuous_asset_proofs_v1',recycle_interval=size,
             startup_timeout_seconds=startup,stall_timeout_seconds=stall,sessions=number)
         write_new(cache/'completed.json',proof);write_new(output/'summary.json',proof)
-    except BaseException:
-        import traceback
-        write_new(output/'failure.json',dict(traceback=traceback.format_exc()));raise
+    except BaseException as error:
+        write_new(output/'failure.json',dict(traceback=exception_text(error)));raise

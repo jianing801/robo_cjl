@@ -185,3 +185,56 @@ def test_existing_converter_for_same_bank_is_not_duplicated(tmp_path,monkeypatch
     monkeypatch.setitem(sys.modules,'psutil',fake)
     with pytest.raises(RuntimeError,match='90001'):launcher.reject_asset_workers(bank)
     launcher.reject_asset_workers(tmp_path/'different_bank.json')
+
+
+@pytest.mark.parametrize('mode',['success','failure','nonzero','missing_summary'])
+def test_cache_supervisor_always_records_child_exit(tmp_path,mode):
+    import sys
+    folder=tmp_path/'run/attempts/cache_one/train';folder.parent.mkdir(parents=True)
+    result=folder/'result'
+    script='from pathlib import Path; import json,sys; p=Path('+repr(str(result))+'); p.mkdir(); print("TEST_CACHE_STAGE",flush=True); '
+    if mode=='success':script+='(p/"summary.json").write_text("{}")'
+    elif mode=='failure':script+='(p/"failure.json").write_text(json.dumps({"traceback":"test failure"}))'
+    elif mode=='nonzero':script+='sys.exit(7)'
+    else:script+='pass'
+    if mode=='success':launcher.run_cache_child([sys.executable,'-u','-c',script],folder,{**__import__('os').environ})
+    else:
+        with pytest.raises(RuntimeError):launcher.run_cache_child([sys.executable,'-u','-c',script],folder,{**__import__('os').environ})
+    record=json.loads((folder/'exit.json').read_text())
+    assert record['returncode']==(0 if mode=='success' else 7 if mode=='nonzero' else 1)
+    assert record['raw_returncode']==(7 if mode=='nonzero' else 0)
+    assert 'TEST_CACHE_STAGE' in (folder/'stdout.log').read_text()
+
+
+def test_cache_supervisor_parent_interrupt_records_pause_and_exit(tmp_path,monkeypatch):
+    import sys,os
+    folder=tmp_path/'run/attempts/cache_one/train';folder.parent.mkdir(parents=True)
+    original_sleep=launcher.time.sleep;once=[True]
+    def interrupt_once(seconds):
+        if once[0]:once[0]=False;raise KeyboardInterrupt()
+        original_sleep(min(seconds,.01))
+    monkeypatch.setattr(launcher.time,'sleep',interrupt_once)
+    with pytest.raises(KeyboardInterrupt):
+        launcher.run_cache_child([sys.executable,'-u','-c','import time; time.sleep(30)'],folder,dict(os.environ))
+    assert (tmp_path/'run/USER_PAUSED').exists()
+    assert json.loads((folder/'exit.json').read_text())['interrupted'] is True
+
+
+def test_cache_supervisor_prints_heartbeat_without_child_output(tmp_path,monkeypatch,capsys):
+    import sys,os
+    folder=tmp_path/'run/attempts/cache_one/train';folder.parent.mkdir(parents=True)
+    ticks=iter(range(0,100000,20))
+    monkeypatch.setattr(launcher.time,'monotonic',lambda:next(ticks))
+    script='import time; from pathlib import Path; time.sleep(.5); p=Path('+repr(str(folder/'result'))+'); p.mkdir(); (p/"summary.json").write_text("{}")'
+    launcher.run_cache_child([sys.executable,'-u','-c',script],folder,dict(os.environ))
+    assert 'CACHE_HEARTBEAT' in capsys.readouterr().out
+
+
+def test_explicit_asset_resume_audits_marker_but_cannot_resume_ppo(tmp_path):
+    banks(tmp_path);folder=tmp_path/'资产准备/rough';folder.mkdir(parents=True)
+    marker=folder/'USER_PAUSED';marker.touch()
+    launcher.resume_asset_pause(tmp_path,'rough')
+    assert not marker.exists() and list((tmp_path/'启动记录').glob('rough_asset_resume_*.json'))
+    marker.touch();(folder/'commits').mkdir();(folder/'commits/stage_0.json').write_text('{}')
+    with pytest.raises(RuntimeError,match='PPO'):launcher.resume_asset_pause(tmp_path,'rough')
+    assert marker.exists()

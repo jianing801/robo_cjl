@@ -6,11 +6,15 @@ from hybrid_contract import experiment_identity
 from hybrid_native_cache import training_attempt_started
 from hybrid_support import write_new
 
-KNOWN_CONVERTERS = {'prepare_native_cache.py': ['1a7814e36b72064a4130c693885d4fc95ea450fac80cf6d5b392e63132c1da5d', '49bb0275ce660e9bc3d0d61c445c90f6d98d592819019b890d37b290189f2f31'], 'native_cache_coordinator.py': ['86a3acdc5be4b9e6fcb4ba4d2b68140af2401076619a0d62024410a642f9206a', '9da8fa47dbfdc880b427010e4b585d2698cd087613ff0f2abb4fad3baf04e057']}
+KNOWN_CONVERTERS = {'prepare_native_cache.py': ['0914a11665f442dc6822cac05b944fc9750d5dbd9231fdca4607f53b41deec8e', '1a7814e36b72064a4130c693885d4fc95ea450fac80cf6d5b392e63132c1da5d', '49bb0275ce660e9bc3d0d61c445c90f6d98d592819019b890d37b290189f2f31'], 'native_cache_coordinator.py': ['86a3acdc5be4b9e6fcb4ba4d2b68140af2401076619a0d62024410a642f9206a', '9da8fa47dbfdc880b427010e4b585d2698cd087613ff0f2abb4fad3baf04e057', 'b6554ba09d3a4b03c307b2fcce120e3036f816c424b5bbf7aa04b2013af4d214']}
+KNOWN_REFRESH_HELPERS = ['7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3']
+
 
 def refreshed_plan(root,plan):
+    print('CACHE_PLAN_CHECK_PPO_EVIDENCE',root,flush=True)
     if training_attempt_started(root) or any((root/'commits').glob('*.json')) or any(root.rglob('*.pt')):
         raise RuntimeError('PPO evidence exists: use the original frozen code; plan cannot be refreshed')
+    print('CACHE_PLAN_CHECK_SOURCE_IDENTITY',flush=True)
     old=plan['experiment'];new=experiment_identity(plan['bank'],plan['configuration'])
     if old==new:return plan
     a=dict(old);b=dict(new);previous=dict(a.pop('hybrid_sources'));current=dict(b.pop('hybrid_sources'))
@@ -18,7 +22,9 @@ def refreshed_plan(root,plan):
     for name,known in KNOWN_CONVERTERS.items():
         if previous.pop(name,None) not in known:raise ValueError('Unknown previous converter source: '+name)
         current.pop(name,None)
-    if 'refresh_cache_plan.py' in previous:raise ValueError('Unknown previous refresh helper identity')
+    previous_helper=previous.pop('refresh_cache_plan.py',None)
+    if previous_helper is not None and previous_helper not in KNOWN_REFRESH_HELPERS:
+        raise ValueError('Unknown previous refresh helper identity')
     current.pop('refresh_cache_plan.py',None)
     if previous!=current:raise ValueError('Training/runtime source changed; refusing refresh')
     return dict(plan,experiment=new)

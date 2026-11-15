@@ -192,3 +192,41 @@ def test_cache_plan_refresh_only_accepts_known_pre_ppo_converter_change(tmp_path
         assert updated['configuration']==plan['configuration']
     else:
         with pytest.raises((ValueError,RuntimeError)):refresh.refreshed_plan(tmp_path,plan)
+
+
+def test_early_bank_validation_failure_is_recorded(tmp_path,monkeypatch):
+    import native_cache_coordinator as c
+    import hybrid_bank
+    from types import SimpleNamespace
+    bank=tmp_path/'bank.json';bank.write_text('{"task_key":"stairs"}')
+    def fail(path):raise OSError('test disk read failure')
+    monkeypatch.setattr(hybrid_bank,'load_configurable_bank',fail)
+    output=tmp_path/'result'
+    with pytest.raises(OSError,match='test disk'):
+        c.coordinate(SimpleNamespace(bank=bank,output_dir=output),[])
+    assert 'OSError: test disk read failure' in json.loads((output/'failure.json').read_text())['traceback']
+
+
+def test_exception_formatter_never_reads_source_lines(monkeypatch):
+    import native_cache_coordinator as c
+    import linecache
+    monkeypatch.setattr(linecache,'getline',lambda *a,**k: (_ for _ in ()).throw(AssertionError('must not read source')))
+    try:raise OSError('test storage failure')
+    except OSError as error:text=c.exception_text(error)
+    assert 'OSError: test storage failure' in text and 'test_exception_formatter' in text
+
+
+def test_known_persistent_converter_and_helper_migrate_only_before_ppo(tmp_path,monkeypatch):
+    import refresh_cache_plan as refresh
+    from copy import deepcopy
+    source={name:values[-1] for name,values in refresh.KNOWN_CONVERTERS.items()}
+    source['refresh_cache_plan.py']=refresh.KNOWN_REFRESH_HELPERS[0]
+    source['train.py']='unchanged'
+    old=dict(native_sources={'physics':'same'},hybrid_sources=source)
+    new=deepcopy(old)
+    for name in (*refresh.KNOWN_CONVERTERS,'refresh_cache_plan.py'):new['hybrid_sources'][name]='new'
+    monkeypatch.setattr(refresh,'experiment_identity',lambda bank,config:new)
+    plan=dict(experiment=old,bank='fixture',configuration={})
+    assert refresh.refreshed_plan(tmp_path,plan)['experiment']==new
+    old['hybrid_sources']['refresh_cache_plan.py']='unrecognized'
+    with pytest.raises(ValueError,match='helper'):refresh.refreshed_plan(tmp_path,plan)

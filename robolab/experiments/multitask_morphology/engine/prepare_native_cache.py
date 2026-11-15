@@ -1,10 +1,11 @@
 """Convert all required assets before persistent physics scene rebuilding."""
-import argparse,json,sys,traceback
+import argparse,json,sys
 from pathlib import Path
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2]
 sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl'),str(HERE.parent/'amp_engine')]
 
 def main():
+    print('CACHE_PHASE ENTRY_READY',flush=True)
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bank',required=True);parser.add_argument('--cache-root',required=True)
     parser.add_argument('--output-dir',required=True)
@@ -17,6 +18,7 @@ def main():
     parser.add_argument('--design-ids',help=argparse.SUPPRESS)
     parser.add_argument('--design-ids-file',help=argparse.SUPPRESS)
     parser.add_argument('--expected-bank-sha',help=argparse.SUPPRESS)
+    print('CACHE_PHASE IMPORTING_ISAAC_ARGUMENTS',flush=True)
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(parser);args=parser.parse_args()
     if not args.batch_worker:
@@ -77,12 +79,38 @@ def main():
         summary=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,bank_sha256=sha(bank_path),task=task,
             designs=len(rows),assets=rows)
         write_new(output/'summary.json',summary);failed=False
-    except BaseException:
-        write_new(output/'failure.json',dict(traceback=traceback.format_exc()));traceback.print_exc();raise
+    except BaseException as error:
+        from native_cache_coordinator import exception_text
+        text=exception_text(error)
+        write_new(output/'failure.json',dict(traceback=text))
+        print(text,file=sys.stderr,flush=True)
+        raise
     finally:
         if failed:
             import atexit,os
             atexit.register(lambda:os._exit(1))
         app.close()
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    import faulthandler
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(60,repeat=True)
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as error:
+        from native_cache_coordinator import exception_text
+        text=exception_text(error)
+        print(text,file=sys.stderr,flush=True)
+        outputs=[sys.argv[i+1] for i,arg in enumerate(sys.argv[:-1]) if arg=='--output-dir']
+        if outputs:
+            try:
+                folder=Path(outputs[-1]);folder.mkdir(parents=True,exist_ok=True)
+                target=folder/'failure.json'
+                if not target.exists():target.write_text(json.dumps(dict(traceback=text)),encoding='utf8')
+            except OSError as recording_error:
+                print('CACHE_FAILURE_RECORD_WRITE_FAILED',repr(recording_error),file=sys.stderr,flush=True)
+        raise SystemExit(130 if isinstance(error,KeyboardInterrupt) else 1)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
