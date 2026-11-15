@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
 DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
 ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
-           '蒸馏': 'distill', '状态': 'status', '录像': 'video'}
+           '蒸馏': 'distill', '状态': 'status', '录像': 'video', '资产': 'assets'}
 
 
 def read(path):
@@ -91,6 +91,16 @@ def expert_command(root, task, gpu, output, resume):
             library = Path(read(output/'plan.json')['reference_library'])
         command += ['--reference-library', str(library),
                     '--hhtools-env', 'amp_hhtools', '--reference-device', 'cuda']
+    cached = root/'启动记录'/f'{task}_asset_cache.json'
+    if cached.is_file():
+        value = read(cached)
+        # 索引只指向本结构库的完整缓存；实际几何仍由原生worker严格校验。
+        if value['bank_sha256'] != hashlib.sha256(bank_path(root,task).read_bytes()).hexdigest():
+            raise ValueError('预转换缓存绑定了不同结构库。')
+        proof = Path(value['cache'])/'completed.json'
+        if not proof.is_file() or hashlib.sha256(proof.read_bytes()).hexdigest() != value['completed_sha256']:
+            raise ValueError('预转换缓存完成证明缺失或变化，不能直接用于训练。')
+        command += ['--asset-cache', value['cache']]
     return command
 
 
@@ -140,6 +150,78 @@ def references(root, gpu, cpu, preview=False):
     if not cpu:
         env['CUDA_VISIBLE_DEVICES'] = str(gpu)
     run(command, env=env, preview=preview)
+
+
+def prepare_task_assets(root, task, gpu, preview=False):
+    """仅准备一个任务的USD；复用原控制器的锁、日志及缓存校验，不调用PPO。"""
+    output, resume = select_run(root, task)
+    # 已有训练计划的目录可以直接利用之前成功的小批次；新任务另建资产目录，
+    # 不在专家输出目录制造“有缓存但无plan”的半成品。
+    cache_root = output if resume else root/'资产准备'/task
+    if (cache_root/'USER_PAUSED').exists():
+        raise RuntimeError(f'{task}资产目录有用户暂停标记，不自动取消。')
+    print(f'仅准备{task}的USD，不启动PPO。缓存目录：{cache_root}', flush=True)
+    if preview:
+        print(f'转换选卡：cuda:{gpu}；最低空闲显存4GiB，和训练12.5GiB门槛分开。')
+        return
+    sys.path[:0] = [str(ENTRY/'engine'), str(REPO/'robolab'), str(REPO/'rsl_rl')]
+    from train import controller_lock, run_child
+    from hybrid_native_cache import ensure_cache, sha
+    from hybrid_processes import reject_duplicate_bank_safely
+    from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
+    bank = bank_path(root,task)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root/'attempts').mkdir(exist_ok=True)
+    with controller_lock(cache_root):
+        reject_duplicate_bank_safely(bank)
+        reject_asset_workers(bank)
+        # 这是转换的启动门槛，不是显存峰值保证；OOM保留日志并停止。
+        choices = candidates(query_gpus(), os.environ, min_free_mib=4*1024,
+                             max_utilization=100, requested=f'cuda:{gpu}')
+        with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as selected:
+            environment = child_environment(selected, os.environ)
+            kit = (f" --/renderer/activeGpu={selected['index']}"
+                   " --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0")
+            cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_child)
+        folder = root/'启动记录'; folder.mkdir(exist_ok=True)
+        record = dict(cache=str(cache.resolve()), bank_sha256=sha(bank),
+                      completed_sha256=sha(cache/'completed.json'))
+        temporary = folder/f'{task}_asset_cache.{os.getpid()}.tmp'
+        temporary.write_text(json.dumps(record,ensure_ascii=False),encoding='utf8')
+        os.replace(temporary,folder/f'{task}_asset_cache.json')
+    print('USD_ASSETS_READY',task,cache,flush=True)
+
+
+def reject_asset_workers(bank):
+    """拒绝同库残留转换器；不结束其他进程或删除锁文件。"""
+    import psutil
+    own = {os.getpid(), *[p.pid for p in psutil.Process().parents()]}
+    for process in psutil.process_iter(['pid','cmdline']):
+        if process.pid in own:
+            continue
+        args = process.info['cmdline'] or []
+        if not any(Path(arg).name == 'prepare_native_cache.py' for arg in args):
+            continue
+        for i, arg in enumerate(args):
+            value = arg.split('=',1)[1] if arg.startswith('--bank=') else args[i+1] if arg=='--bank' and i+1<len(args) else None
+            if value is None:
+                continue
+            path = Path(value)
+            if not path.is_absolute():
+                try:
+                    path = Path(process.cwd())/path
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    continue
+            if path.resolve() == Path(bank).resolve():
+                raise RuntimeError(f'同一结构库已有转换进程{process.pid}，不重复启动。')
+
+
+def prepare_assets(root, task, gpu, preview=False):
+    tasks = ('rough','backpack','amp') if task == '全部' else (ALIASES.get(task,task),)
+    # 顺序执行，一次只启动一个任务的转换器；任一失败立即停止。
+    for current in tasks:
+        prepare_task_assets(root,current,gpu,preview)
+    print('USD_ASSETS_ALL_SELECTED_READY' if not preview else 'USD_ASSETS_PREVIEW_ONLY',flush=True)
 
 
 def distill(root, gpu, preview=False):
@@ -195,10 +277,10 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','rough','负重','amp','蒸馏','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','rough','负重','amp','蒸馏','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
-    parser.add_argument('--任务', choices=['rough','负重','amp'], default='rough', help='录像任务')
+    parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
     parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
     parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
@@ -218,13 +300,18 @@ def main(argv=None):
             print(task, status, output)
         return
     if action == 'video':
-        video(root, ALIASES.get(args.任务,args.任务), args.gpu, args.结构, args.dry_run)
+        task = args.任务 or 'rough'
+        if task == '全部':
+            parser.error('录像请一次选择一个任务')
+        video(root, ALIASES.get(task,task), args.gpu, args.结构, args.dry_run)
         return
     ensure_banks(root, args.dry_run)
     if action == 'prepare':
         return
     if action == 'references':
         references(root, args.gpu, args.cpu, args.dry_run)
+    elif action == 'assets':
+        prepare_assets(root, args.任务 or '全部', args.gpu, args.dry_run)
     elif action == 'distill':
         distill(root, args.gpu, args.dry_run)
     else:

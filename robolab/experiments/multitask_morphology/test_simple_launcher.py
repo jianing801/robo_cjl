@@ -121,3 +121,67 @@ def test_existing_shared_plan_cannot_silently_switch_teachers(tmp_path,monkeypat
     folder=tmp_path/'shared_plan';folder.mkdir()
     (folder/'plan.json').write_text(json.dumps({'teachers':{'stairs':{'checkpoint':str(tmp_path/'old.pt')}}}))
     with pytest.raises(ValueError,match='教师'):launcher.distill(tmp_path,0,True)
+
+
+def test_prepare_all_assets_is_sequential_and_never_calls_training(tmp_path,monkeypatch):
+    calls=[]
+    monkeypatch.setattr(launcher,'prepare_task_assets',lambda root,task,gpu,preview:calls.append((task,gpu,preview)))
+    monkeypatch.setattr(launcher,'launch_expert',lambda *a,**k:pytest.fail('资产准备不得启动PPO'))
+    banks(tmp_path)
+    launcher.main(['资产','--gpu','5','--root',str(tmp_path),'--dry-run'])
+    assert calls==[('rough',5,True),('backpack',5,True),('amp',5,True)]
+
+
+def test_prepare_all_assets_stops_on_first_failure(tmp_path,monkeypatch):
+    calls=[]
+    def convert(root,task,gpu,preview):
+        calls.append(task)
+        if task=='backpack':raise RuntimeError('保留失败现场')
+    monkeypatch.setattr(launcher,'prepare_task_assets',convert)
+    with pytest.raises(RuntimeError):launcher.prepare_assets(tmp_path,'全部',5)
+    assert calls==['rough','backpack']
+
+
+def test_asset_preparation_has_separate_gpu_threshold_and_remembered_cache(tmp_path,monkeypatch):
+    import sys,hashlib
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    banks(tmp_path);events=[]
+    def ensure(root,bank,python,kit,environment,child):
+        events.append(('convert',root))
+        cache=root/'native_cache_fixture';cache.mkdir()
+        (cache/'completed.json').write_text('{}')
+        return cache
+    monkeypatch.setattr(launcher,'reject_asset_workers',lambda bank:None)
+    monkeypatch.setitem(sys.modules,'train',SimpleNamespace(controller_lock=lambda root:nullcontext(),run_child=lambda *a:pytest.fail('测试不应执行原生子进程')))
+    monkeypatch.setitem(sys.modules,'hybrid_native_cache',SimpleNamespace(ensure_cache=ensure,sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()))
+    monkeypatch.setitem(sys.modules,'hybrid_processes',SimpleNamespace(reject_duplicate_bank_safely=lambda bank:None))
+    def candidates(rows,env,**kwargs):
+        assert kwargs['min_free_mib']==4096 and kwargs['requested']=='cuda:5'
+        return [{'index':5,'uuid':'GPU-fixture','free_mib':10240}]
+    monkeypatch.setitem(sys.modules,'robolab.rough_gpu',SimpleNamespace(query_gpus=lambda:[],candidates=candidates,
+        gpu_lease=lambda choices,root:nullcontext(choices[0]),child_environment=lambda gpu,env:dict(env)))
+    launcher.prepare_task_assets(tmp_path,'rough',5)
+    assert events[0][1]==tmp_path/'资产准备/rough'
+    assert not (tmp_path/'experts').exists()
+    command=launcher.expert_command(tmp_path,'rough',5,tmp_path/'experts/rough',False)
+    assert command[command.index('--gpu-min-free-gb')+1]=='12.5'
+    assert command[command.index('--asset-cache')+1]==str(tmp_path/'资产准备/rough/native_cache_fixture')
+
+
+def test_asset_index_cannot_reuse_another_bank(tmp_path):
+    banks(tmp_path);folder=tmp_path/'启动记录';folder.mkdir()
+    (folder/'rough_asset_cache.json').write_text(json.dumps({'bank_sha256':'wrong'}))
+    with pytest.raises(ValueError):launcher.expert_command(tmp_path,'rough',0,tmp_path/'output',False)
+
+
+def test_existing_converter_for_same_bank_is_not_duplicated(tmp_path,monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    bank=tmp_path/'bank.json'
+    other=SimpleNamespace(pid=90001,info={'cmdline':['python','prepare_native_cache.py','--bank',str(bank)]})
+    fake=SimpleNamespace(Process=lambda:SimpleNamespace(parents=lambda:[]),process_iter=lambda fields:[other],
+        NoSuchProcess=ProcessLookupError,ZombieProcess=ProcessLookupError)
+    monkeypatch.setitem(sys.modules,'psutil',fake)
+    with pytest.raises(RuntimeError,match='90001'):launcher.reject_asset_workers(bank)
+    launcher.reject_asset_workers(tmp_path/'different_bank.json')
