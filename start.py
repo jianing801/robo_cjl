@@ -202,7 +202,7 @@ def run_cache_child(command, folder, env):
                 if logging_errors:raise RuntimeError('缓存日志转发失败：'+str(logging_errors[0]))
                 if time.monotonic()-heartbeat>=10:
                     print(f'CACHE_HEARTBEAT pid={worker.pid} elapsed={time.monotonic()-started:.0f}s '
-                          f'{cache_worker_status(worker.pid)}；最近输出：{last[0]}',flush=True)
+                          f'{cache_worker_status(worker.pid).split(chr(65292)+"打开文件",1)[0]}；阶段/进度：{last[0]}',flush=True)
                     heartbeat=time.monotonic()
                 time.sleep(.2)
             code=worker.wait()

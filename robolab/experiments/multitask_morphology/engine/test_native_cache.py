@@ -106,7 +106,7 @@ def test_continuous_converter_watchdog_and_resume(tmp_path,monkeypatch,fault):
     bank={'task_key':'stairs','designs':[{'id':str(i),'urdf_sha256':'fixture'} for i in range(12)]}
     bank_path=tmp_path/'bank.json';bank_path.write_text(json.dumps(bank))
     monkeypatch.setattr(hybrid_bank,'load_configurable_bank',lambda p:bank)
-    monkeypatch.setattr(hybrid_assets,'mesh_sources',lambda b:{})
+    monkeypatch.setattr(hybrid_assets,'mesh_sources',lambda b,**kwargs:{})
     monkeypatch.setattr(hybrid_assets,'validate_asset',lambda row:None)
     ticks=iter(range(10000));monkeypatch.setattr(c.time,'monotonic',lambda:next(ticks))
     monkeypatch.setattr(c.time,'sleep',lambda seconds:None)
@@ -375,3 +375,25 @@ def test_server_actual_unchanged_importer_identity_is_not_a_migration(tmp_path,m
     if change_unchanged_converter:
         with pytest.raises(ValueError,match='prepare_native_cache'):refresh.refreshed_plan(tmp_path,plan)
     else:assert refresh.refreshed_plan(tmp_path,plan)['experiment']==new
+
+
+def test_concise_mesh_progress_never_prints_file_or_design_names(tmp_path,capsys):
+    from hybrid_assets import mesh_sources
+    root,cache,bank,usd=make_cache(tmp_path)
+    parsed=json.loads(bank.read_text())
+    parsed['designs'].append(dict(parsed['designs'][0],id='second'))
+    actual=mesh_sources(parsed)
+    output=capsys.readouterr().out
+    assert 'CACHE_URDF_PROGRESS 2 / 2' in output
+    assert 'CACHE_MESH_PROGRESS 1 / 1' in output
+    assert str(tmp_path) not in output and 'second' not in output
+    assert actual==json.loads((cache/'completed.json').read_text())['mesh_sources']
+
+
+def test_concise_asset_validation_retains_corrupt_file_in_error(tmp_path,capsys):
+    root,cache,bank,usd=make_cache(tmp_path)
+    (usd.parent/'geometry.usd').write_text('corrupt')
+    with pytest.raises(ValueError,match='geometry.usd'):validate_cache(cache,bank)
+    output=capsys.readouterr().out
+    assert 'CACHE_VALIDATE_FILE_BEGIN' not in output
+    assert 'CACHE_VALIDATE_ASSET_BEGIN' not in output

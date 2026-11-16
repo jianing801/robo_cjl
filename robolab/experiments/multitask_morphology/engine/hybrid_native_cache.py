@@ -12,7 +12,7 @@ def validation_heartbeat(function):
         stop=threading.Event();started=time.monotonic()
         def report():
             while not stop.wait(10):
-                print('CACHE_VALIDATE_WAIT',f'{time.monotonic()-started:.0f}s','校验仍在进行，当前读取位置见最近的BEGIN输出',flush=True)
+                print('CACHE_VALIDATE_WAIT',f'{time.monotonic()-started:.0f}s','校验进行中；阶段与进度见最近一条进度输出',flush=True)
         thread=threading.Thread(target=report,daemon=True);thread.start()
         try:return function(*args,**kwargs)
         finally:stop.set();thread.join(timeout=1)
@@ -25,7 +25,7 @@ def validate_cache(cache,bank_path,design_ids=None):
     if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('bank_sha256')!=sha(bank_path):
         raise ValueError('native cache belongs to another bank')
     if proof.get('cache_schema_version')!=2:raise ValueError('native cache requires geometry-hash schema 2; rebuild cache')
-    from hybrid_assets import mesh_sources,validate_asset
+    from hybrid_assets import mesh_sources,validate_asset,progress
     rows=proof['assets'];expected={d['id']:d for d in bank['designs']}
     if len(rows)!=len(expected) or {r['design'] for r in rows}!=set(expected):raise ValueError('incomplete native cache')
     selected=set(expected) if design_ids is None else set(design_ids)
@@ -37,7 +37,7 @@ def validate_cache(cache,bank_path,design_ids=None):
         raise ValueError('source mesh dependencies changed')
     if design_ids is None and recorded!=actual_meshes:raise ValueError('source mesh dependencies changed')
     done=0
-    print('CACHE_VALIDATE_BEGIN',len(selected),str(cache),flush=True)
+    progress('CACHE_VALIDATE_PROGRESS',0,len(selected))
     for row in rows:
         if row['design'] not in selected:continue
         usd=Path(row['usd']).resolve();directory=usd.parent
@@ -45,10 +45,9 @@ def validate_cache(cache,bank_path,design_ids=None):
             raise ValueError('native cache asset identity mismatch')
         if not (directory/'config.yaml').is_file():raise ValueError('native converted asset is incomplete/changed')
         if sha(expected[row['design']]['urdf'])!=row['urdf_sha256']:raise ValueError('source URDF changed')
-        print('CACHE_VALIDATE_ASSET_BEGIN',row['design'],str(usd),flush=True)
         validate_asset(row)
         done+=1
-        print('CACHE_VALIDATE_PROGRESS',done,'/',len(selected),flush=True)
+        progress('CACHE_VALIDATE_PROGRESS',done,len(selected))
     return proof
 
 def cache_directories(cache,bank_path,design_ids=None,require_complete=False):

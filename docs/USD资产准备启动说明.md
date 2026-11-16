@@ -50,13 +50,13 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 |---|---|
 | USD_EXISTING_CACHE_CHECK_BEFORE_GPU | 发现完整缓存，先用CPU校验，不申请GPU |
 | CACHE_VALIDATE_SOURCE_MESHES | 本次要检查的结构数量 |
-| CACHE_VALIDATE_URDF_BEGIN / MESH_BEGIN / FILE_BEGIN | 正在读取的具体文件 |
+| CACHE_URDF_PROGRESS / CACHE_MESH_PROGRESS | 结构源文件与网格依赖检查进度，如60 / 60 |
 | CACHE_VALIDATE_PROGRESS 12 / 3000 | 本次完整缓存检查已有12个结构通过 |
-| CACHE_VALIDATE_WAIT | 每10秒提示校验尚未结束；结合最近BEGIN定位文件 |
+| CACHE_VALIDATE_WAIT | 每10秒提示校验尚未结束；阶段及已完成数见最近进度 |
 | CACHE_REUSE_PROGRESS 2026 / 3000 | 已从历史尝试校验并复用2026个结构，不是重新转换 |
 | CACHE_SESSION_START | 启动原生转换子进程，处理仍缺失的结构 |
 | NATIVE_CACHE_PROGRESS | 已接受的总资产数，可能包含复用项 |
-| CACHE_HEARTBEAT | 转换协调器仍在运行；disk-sleep表示当时等磁盘 |
+| CACHE_HEARTBEAT | 每10秒报告运行状态及最近阶段/进度，不再输出打开文件路径 |
 | CACHE_FINALIZED | 本次协调器完成报告核对成功，无需外层重读全部USD |
 | USD_ASSETS_READY rough / backpack / amp | 对应任务已完成缓存登记 |
 | USD_ASSETS_ALL_SELECTED_READY | 此次选定的任务全部完成 |
@@ -100,4 +100,21 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 
 `CACHE_PLAN_CHECK_PPO_EVIDENCE`是在确认尚未开始PPO，随后才能更新转换相关代码身份。检查器排除顶层`native_cache_*`和有明确转换启动记录的`attempts/cache_*`，不为查找模型遍历USD目录。未知目录和未证明为转换任务的尝试仍检查；已存在训练启动或提交记录时继续拒绝修改身份。
 
-`CACHE_PLAN_SCAN_DIRECTORY`显示检查到的目录数和当前路径；`CACHE_PLAN_SKIP_CONVERSION_ATTEMPT`表示跳过已确认的纯转换尝试；`CACHE_PLAN_NO_CHECKPOINTS`表示未发现检查点，随后进入代码身份检查。此步骤不申请GPU，不转换USD。
+检查阶段不逐目录输出路径；明确的纯转换尝试自动跳过；`CACHE_PLAN_NO_CHECKPOINTS`表示未发现检查点，随后进入代码身份检查。此步骤不申请GPU，不转换USD。
+
+
+### 简洁进度输出
+
+正常情况下只显示阶段、已完成/总数，以及必要的启动、结束信息。源文件、网格、USD检查和历史资产复用的计数通常按约5%刷新，处理较慢时也会更新已完成数；等待提示每10秒保留。不会逐个打印URDF、USD、网格、证明文件或结构ID。失败时仍保留具体文件路径及完整错误，方便定位。
+
+典型输出：
+
+```text
+CACHE_PHASE CHECKING_PPO_EVIDENCE
+CACHE_URDF_PROGRESS 0 / 60
+CACHE_URDF_PROGRESS 30 / 60
+CACHE_URDF_PROGRESS 60 / 60
+CACHE_MESH_PROGRESS 24 / 24
+CACHE_VALIDATE_PROGRESS 30 / 60
+CACHE_VALIDATE_PROGRESS 60 / 60
+```

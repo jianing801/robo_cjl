@@ -16,21 +16,20 @@ def exception_text(error):
 def reuse_verified_batches(roots,bank,bank_sha,cache):
     """Copy only completed, hash-verified native batches; keep failures intact."""
     import shutil
-    from hybrid_assets import validate_asset,mesh_sources
+    from hybrid_assets import validate_asset,mesh_sources,progress
     expected={d['id']:d for d in bank['designs']};rows={}
+    progress('CACHE_REUSE_PROGRESS',0,len(expected))
     for root in roots:
         for proof_path in [*sorted(Path(root).glob('batch_*/summary.json')), *sorted(Path(root).glob('batch_*/assets/*.json'))]:
-            print('CACHE_REUSE_PROOF',str(proof_path),flush=True)
             proof=json.loads(proof_path.read_text(encoding='utf8'))
             if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2 or proof.get('bank_sha256')!=bank_sha:continue
             keys=[row['design'] for row in proof['assets']]
             if keys and all(key in rows for key in keys):continue
             subset={'designs':[expected[row['design']] for row in proof['assets'] if row['design'] in expected]}
-            if proof.get('mesh_sources')!=mesh_sources(subset):raise ValueError('native batch source meshes changed')
+            if proof.get('mesh_sources')!=mesh_sources(subset,report=False):raise ValueError('native batch source meshes changed')
             for row in proof['assets']:
                 key=row['design'];source=Path(row['usd'])
                 if key not in expected or key in rows:continue
-                print('CACHE_REUSE_ASSET_BEGIN',key,str(source),flush=True)
                 validate_asset(row)
                 # validate_asset已经核对USD哈希，不再重复读取大文件。
                 if row['urdf_sha256']!=expected[key]['urdf_sha256']:
@@ -45,7 +44,7 @@ def reuse_verified_batches(roots,bank,bank_sha,cache):
                     return shutil.copy2(src,dst)
                 shutil.copytree(source.parent,target,copy_function=copy_file)
                 rows[key]=dict(row,usd=str(target/source.name))
-                print('CACHE_REUSE_PROGRESS',len(rows),'/',len(expected),flush=True)
+                progress('CACHE_REUSE_PROGRESS',len(rows),len(expected))
     return list(rows.values())
 
 def stop_tree(child):
@@ -71,7 +70,7 @@ def publish_asset_proof(path,value):
 
 
 def read_asset_proofs(folder,cache,bank,bank_sha,seen):
-    from hybrid_assets import validate_asset,mesh_sources
+    from hybrid_assets import validate_asset,mesh_sources,progress
     expected={d['id']:d for d in bank['designs']};rows=[]
     for path in sorted((Path(folder)/'assets').glob('*.json')):
         if path.stem in seen:continue
@@ -86,7 +85,7 @@ def read_asset_proofs(folder,cache,bank,bank_sha,seen):
             raise ValueError('conversion proof escapes this worker cache')
         if row['urdf_sha256']!=expected[key]['urdf_sha256']:
             raise ValueError('changed URDF in per-asset proof')
-        if proof.get('mesh_sources')!=mesh_sources({'designs':[expected[key]]}):
+        if proof.get('mesh_sources')!=mesh_sources({'designs':[expected[key]]},report=False):
             raise ValueError('changed mesh in per-asset proof')
         validate_asset(row);seen.add(key);rows.append(row)
     return rows
@@ -171,7 +170,7 @@ def _coordinate(args,argv):
                   'verified',len(seen)-before,'preserved evidence',tag,tail,flush=True)
             if failures>=3:raise RuntimeError('Native converter failed three consecutive sessions without progress')
             # The next process only receives designs with no verified asset proof.
-        if meshes!=mesh_sources(bank):raise ValueError('source meshes changed during native conversion')
+        if meshes!=mesh_sources(bank,report=False):raise ValueError('source meshes changed during native conversion')
         by_id={row['design']:row for row in rows}
         if set(by_id)!=set(ids) or len(rows)!=len(ids):raise ValueError('cache coverage mismatch')
         proof=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,
