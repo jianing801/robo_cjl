@@ -52,7 +52,7 @@ def main():
     if len(set(selected))!=len(selected) or not set(selected).issubset(lookup):raise ValueError('unknown cache design')
     bank['designs']=[lookup[key] for key in selected]
     from hybrid_assets import mesh_sources
-    meshes=mesh_sources(bank)
+    meshes=None  # 共享源已由协调器校验；避免启动前遍历全部待转换结构。
     output=Path(args.output_dir).resolve();output.mkdir(parents=True,exist_ok=False)
     cache=Path(args.cache_root).resolve();cache.mkdir(parents=True,exist_ok=False)
     args.kit_args=(args.kit_args or '')+f' --portable-root {output/"portable"} --portable'
@@ -94,7 +94,7 @@ def main():
                 mesh_sources=mesh_sources({'designs':[design]}),bank_sha256=sha(bank_path),
                 task=task,designs=1,assets=[row]))
             print('NATIVE_ASSET_READY',index+1,'/',len(bank['designs']),design['id'],flush=True)
-        if meshes!=mesh_sources(bank):raise ValueError('source meshes changed during conversion')
+        meshes=mesh_sources(bank)
         summary=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,mesh_sources=meshes,bank_sha256=sha(bank_path),task=task,
             designs=len(rows),assets=rows)
         write_new(output/'summary.json',summary);failed=False

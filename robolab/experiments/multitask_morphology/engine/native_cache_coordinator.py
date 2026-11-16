@@ -16,7 +16,7 @@ def exception_text(error):
 def reuse_verified_batches(roots,bank,bank_sha,cache):
     """Copy only completed, hash-verified native batches; keep failures intact."""
     import shutil
-    from hybrid_assets import validate_asset,mesh_sources,progress
+    from hybrid_assets import validate_asset_resume as validate_asset,mesh_sources,progress
     expected={d['id']:d for d in bank['designs']};rows={}
     progress('CACHE_REUSE_PROGRESS',0,len(expected))
     for root in roots:
@@ -70,7 +70,7 @@ def publish_asset_proof(path,value):
 
 
 def read_asset_proofs(folder,cache,bank,bank_sha,seen):
-    from hybrid_assets import validate_asset,mesh_sources,progress
+    from hybrid_assets import validate_asset_resume as validate_asset,mesh_sources,progress
     expected={d['id']:d for d in bank['designs']};rows=[]
     for path in sorted((Path(folder)/'assets').glob('*.json')):
         if path.stem in seen:continue

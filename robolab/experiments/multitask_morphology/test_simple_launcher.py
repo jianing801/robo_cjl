@@ -273,7 +273,7 @@ def test_restart_preview_does_not_write_or_remove_anything(tmp_path,monkeypatch)
     assert not (tmp_path/'启动记录').exists() and (output/'USER_PAUSED').exists()
 
 
-@pytest.mark.parametrize('fault',['checkpoint','commit','bootstrap','config','cache','other_checkpoint','active'])
+@pytest.mark.parametrize('fault',['commit','bootstrap','config','cache','other_checkpoint','active'])
 def test_initial_restart_refuses_to_discard_learned_state_or_change_settings(tmp_path,monkeypatch,fault):
     output,cache=restart_fixture(tmp_path,monkeypatch)
     if fault=='checkpoint':(output/'model_0.pt').write_text('keep')
@@ -328,4 +328,12 @@ def test_no_committed_checkpoint_cannot_be_disguised_as_pause_resume(tmp_path,mo
     (launch/'launch.json').write_text(json.dumps({'command':['python','persistent_worker.py']}))
     with pytest.raises(RuntimeError,match='restart-initial'):
         launcher.resume_expert_pause(tmp_path,'rough',output)
+    assert (output/'USER_PAUSED').exists()
+
+
+def test_explicit_initial_restart_preserves_uncommitted_model(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    model=output/'model_0.pt';model.write_bytes(b'original partial checkpoint')
+    selected,_,_=launcher.prepare_initial_restart(tmp_path,'rough',output)
+    assert selected!=output and model.read_bytes()==b'original partial checkpoint'
     assert (output/'USER_PAUSED').exists()

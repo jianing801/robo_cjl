@@ -149,7 +149,7 @@ def resume_expert_pause(root, task, output, preview=False):
     from hybrid_native_cache import training_attempt_started
     commits=list((output/'commits').glob('stage_*.json'))
     if training_attempt_started(output) and not commits:
-        raise RuntimeError('首组已中断但没有已提交断点；明确重开请加--restart-initial，不直接删除暂停标记。')
+        raise RuntimeError('首组已中断但没有已提交组断点；组内模型保留在原目录，明确从首组重新训练请加--restart-initial。')
     if preview:
         print('预览：明确恢复该专家暂停，不删除模型。',flush=True);return
     folder=root/'启动记录';folder.mkdir(exist_ok=True)
@@ -165,8 +165,8 @@ def prepare_initial_restart(root, task, output, preview=False):
     """明确授权的首组重启：新目录、原bank/配置/USD，旧目录和暂停标记保留。"""
     bank=bank_path(root,task).resolve();reject_active_expert(output,bank)
     plan=read(output/'plan.json')
-    if (output/'completed.json').exists() or any((output/'commits').glob('*.json')) or has_initial_checkpoint(output):
-        raise RuntimeError('已有检查点或训练提交，不能重开首组；请使用--resume-paused续训。')
+    if (output/'completed.json').exists() or any((output/'commits').glob('*.json')):
+        raise RuntimeError('已有训练提交或完成记录，请使用--resume-paused续训。')
     if plan.get('bootstrap_checkpoint') or plan.get('start_stage',0):raise RuntimeError('该目录是检查点续接链，不能当作初始训练重开。')
     if plan.get('configuration')!=read(ENTRY/'configs'/f'{task}.json'):
         raise RuntimeError('旧配置与当前正式配置不一致，不隐式改变预算或训练设置。')
@@ -198,7 +198,7 @@ def prepare_initial_restart(root, task, output, preview=False):
         (audit/'plan.before.json').write_bytes((output/'plan.json').read_bytes())
         (audit/'authorization.json').write_text(json.dumps(dict(explicit_restart_initial=True,previous_output=str(output),new_output=str(selected),bank=str(bank),cache=cache_record['cache'],configuration=plan['configuration'],old_pause_preserved=(output/'USER_PAUSED').exists()),ensure_ascii=False,indent=2),encoding='utf8')
         temporary=folder/f'{task}_asset_cache.{tag}.tmp';temporary.write_text(json.dumps(cache_record,ensure_ascii=False),encoding='utf8');os.replace(temporary,record)
-    print('明确重新启动首组，保留原目录和旧暂停记录。',flush=True)
+    print('明确从第0代重新启动首组，保留原目录、组内模型和旧暂停记录。',flush=True)
     return selected,plan.get('reference_library'),cache_record['cache']
 
 
@@ -372,7 +372,7 @@ def prepare_task_assets(root, task, gpu, preview=False):
         cache=None
         for proof in sorted(cache_root.glob('native_cache_*/completed.json'),reverse=True):
             print('USD_EXISTING_CACHE_CHECK_BEFORE_GPU',task,str(proof.parent),flush=True)
-            try:validate_cache(proof.parent,bank)
+            try:validate_cache(proof.parent,bank,resume_fast=True)
             except (ValueError,OSError,KeyError) as error:
                 print('USD_EXISTING_CACHE_REJECTED',str(error),flush=True)
                 continue

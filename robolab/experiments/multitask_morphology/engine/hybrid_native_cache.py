@@ -19,13 +19,15 @@ def validation_heartbeat(function):
     return wrapped
 
 @validation_heartbeat
-def validate_cache(cache,bank_path,design_ids=None):
+def validate_cache(cache,bank_path,design_ids=None,*,resume_fast=False):
     cache=Path(cache);bank=json.loads(Path(bank_path).read_text(encoding='utf8'))
     proof=json.loads((cache/'completed.json').read_text(encoding='utf8'))
     if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('bank_sha256')!=sha(bank_path):
         raise ValueError('native cache belongs to another bank')
     if proof.get('cache_schema_version')!=2:raise ValueError('native cache requires geometry-hash schema 2; rebuild cache')
     from hybrid_assets import mesh_sources,validate_asset,progress
+    if resume_fast:
+        from hybrid_assets import validate_asset_resume as validate_asset
     rows=proof['assets'];expected={d['id']:d for d in bank['designs']}
     if len(rows)!=len(expected) or {r['design'] for r in rows}!=set(expected):raise ValueError('incomplete native cache')
     selected=set(expected) if design_ids is None else set(design_ids)
@@ -138,7 +140,7 @@ def training_attempt_started(root):
 def ensure_cache(root,bank_path,python,kit,environment,run_child):
     root=Path(root)
     for path in sorted(root.glob('native_cache_*/completed.json'),reverse=True):
-        try:validate_cache(path.parent,bank_path)
+        try:validate_cache(path.parent,bank_path,resume_fast=True)
         except (ValueError,OSError,KeyError):continue
         return path.parent
     tag=datetime.now().strftime('%Y%m%d_%H%M%S_%f')

@@ -61,3 +61,26 @@ def validate_asset(row):
             raise ValueError('native geometry dependency changed: '+str(path))
     if converter_bytes.decode('utf8').strip()!=row['converter_hash']:
         raise ValueError('native asset identity changed')
+
+
+def validate_asset_resume(row):
+    """恢复检查：首次深检，后续元数据未变时跳过大USD读取。"""
+    import json,os,stat,time
+    usd=Path(row['usd']).resolve();directory=usd.parent
+    receipt=directory.parent/('.resume_'+directory.name+'.json')
+    if receipt.is_symlink():raise ValueError('resume receipt is a symlink')
+    signatures={}
+    for name in row.get('files_sha256',{}):
+        path=(directory/name).resolve()
+        if not path.is_relative_to(directory):raise ValueError('asset path escapes directory')
+        value=path.stat()
+        if not stat.S_ISREG(value.st_mode) or value.st_size<=0:raise ValueError('empty/nonregular asset')
+        signatures[name]=[value.st_size,value.st_mtime_ns,value.st_dev,value.st_ino]
+    binding=dict(row=row,files=signatures)
+    previous=json.loads(receipt.read_text(encoding='utf8')) if receipt.is_file() else None
+    if previous==binding:return
+    validate_asset(row)
+    temporary=receipt.with_name(receipt.name+f'.{os.getpid()}.{time.time_ns()}.tmp')
+    with temporary.open('x',encoding='utf8') as stream:
+        json.dump(binding,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
+    os.replace(temporary,receipt)

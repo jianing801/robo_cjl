@@ -108,6 +108,7 @@ def test_continuous_converter_watchdog_and_resume(tmp_path,monkeypatch,fault):
     monkeypatch.setattr(hybrid_bank,'load_configurable_bank',lambda p:bank)
     monkeypatch.setattr(hybrid_assets,'mesh_sources',lambda b,**kwargs:{})
     monkeypatch.setattr(hybrid_assets,'validate_asset',lambda row:None)
+    monkeypatch.setattr(hybrid_assets,'validate_asset_resume',lambda row:None)
     ticks=iter(range(10000));monkeypatch.setattr(c.time,'monotonic',lambda:next(ticks))
     monkeypatch.setattr(c.time,'sleep',lambda seconds:None)
     calls=[];pause=tmp_path/'control';pause.mkdir()
@@ -367,7 +368,9 @@ def test_server_actual_unchanged_importer_identity_is_not_a_migration(tmp_path,m
     new_sources=dict(old_sources)
     for name in new_sources:
         if name!='prepare_native_cache.py':new_sources[name]='updated-reviewed-source'
-    if change_unchanged_converter:new_sources['prepare_native_cache.py']='changed-importer'
+    if change_unchanged_converter:
+        old_sources['prepare_native_cache.py']='unknown-unreviewed-source'
+        new_sources['prepare_native_cache.py']='changed-importer'
     old=dict(native_sources={'physics':'same'},hybrid_sources=old_sources)
     new=dict(native_sources={'physics':'same'},hybrid_sources=new_sources)
     monkeypatch.setattr(refresh,'experiment_identity',lambda bank,config:new)
@@ -456,3 +459,27 @@ def test_training_runtime_routes_fast_mode_only_for_execute():
         assert len(calls)==1
         flag=next(k.value for k in calls[0].keywords if k.arg=='training_fast')
         assert ast.unparse(flag)=="bool(getattr(options, 'execute', False))"
+
+
+def test_resume_receipt_survives_restart_without_reading_usd(tmp_path,monkeypatch):
+    import hybrid_assets
+    root,cache,bank,usd=make_cache(tmp_path)
+    row=json.loads((cache/'completed.json').read_text())['assets'][0]
+    hybrid_assets.validate_asset_resume(row)
+    original=hybrid_assets.sha
+    def no_usd(path):
+        if Path(path).suffix=='.usd':raise AssertionError('unchanged USD must not be reread')
+        return original(path)
+    monkeypatch.setattr(hybrid_assets,'sha',no_usd)
+    hybrid_assets.validate_asset_resume(row)
+    (usd.parent/'geometry.usd').unlink()
+    with pytest.raises(OSError):hybrid_assets.validate_asset_resume(row)
+
+
+def test_resume_receipt_does_not_hide_changed_asset(tmp_path):
+    from hybrid_assets import validate_asset_resume
+    root,cache,bank,usd=make_cache(tmp_path)
+    row=json.loads((cache/'completed.json').read_text())['assets'][0]
+    validate_asset_resume(row)
+    usd.write_text('changed content')
+    with pytest.raises(ValueError):validate_asset_resume(row)
