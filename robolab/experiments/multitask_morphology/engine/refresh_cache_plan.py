@@ -7,9 +7,11 @@ from hybrid_native_cache import training_attempt_started
 from hybrid_support import write_new
 
 KNOWN_CONVERTERS = {'prepare_native_cache.py': ['0914a11665f442dc6822cac05b944fc9750d5dbd9231fdca4607f53b41deec8e', '1a7814e36b72064a4130c693885d4fc95ea450fac80cf6d5b392e63132c1da5d', '49bb0275ce660e9bc3d0d61c445c90f6d98d592819019b890d37b290189f2f31', 'b642f6695a8a92ebb7cfcfce418bfefcb842cd51f1cf8ba88928bb305747be9f'], 'native_cache_coordinator.py': ['2a9ba775c12a474e33b961a009cece02c22c6c62ed8907725b5a9b08a441eefe', '48682f956f90326b9bee272e6c14767d96735840ab7ce6895dd2f12ce0724029', '86a3acdc5be4b9e6fcb4ba4d2b68140af2401076619a0d62024410a642f9206a', '9da8fa47dbfdc880b427010e4b585d2698cd087613ff0f2abb4fad3baf04e057', 'b6554ba09d3a4b03c307b2fcce120e3036f816c424b5bbf7aa04b2013af4d214']}
-KNOWN_REFRESH_HELPERS = ['42a1eeffa9c451010d8d34086e5eabbc061da2be158645dea794fab11c727aee', '5de7b34f719dd0f33ad35c135d1c861158593294cba3339eebe0bed3823fbf49', '4d75c167794e1011b3bd0ba9941cfe83d98cccdf3d220b36f46a76cb543671da', '9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
+KNOWN_REFRESH_HELPERS = ['28deb9d37a46fb1eced7b960fadc7a7d57dbf38adb6b8ce85bd6c16dc26d1a3a', '42a1eeffa9c451010d8d34086e5eabbc061da2be158645dea794fab11c727aee', '5de7b34f719dd0f33ad35c135d1c861158593294cba3339eebe0bed3823fbf49', '4d75c167794e1011b3bd0ba9941cfe83d98cccdf3d220b36f46a76cb543671da', '9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
 
 KNOWN_LOGGING_IO_SOURCES = {'hybrid_assets.py': 'eea0ecd8265f914e945cef8e324ad311f447377f1ca092671f91fed07c9240ea', 'hybrid_native_cache.py': '6a60466b93e536efdb0fc0d8e757353a4fdd37641ef2d1ff0574b3a01c8cf95f'}
+
+KNOWN_FAST_TRAINING_SOURCES = {'hybrid_native_cache.py': 'bdc3412a05a33f9e0024e907ea0a5c9d8a821a20cc2ee911f665cd60bde1f5af', 'hybrid_runtime.py': 'c96306de0ae57bf834fbc151720a78bdc58760b444ba2ed5233c558b231b49b1', 'train.py': '94b7a654b935d8094cc1248309395817b8819875faaec623000e01c3013206d8'}
 
 KNOWN_IO_SOURCES = {'hybrid_assets.py': 'c9eab750c7a712966572623fd1aa22c29b579f721741f23efa81d979794f0898', 'hybrid_native_cache.py': '03153f0b0e568439f295761903c68e6a1c06201cea5dd97893386d44ad49bad0', 'train.py': '24f2c69b1f41f726cc4fe4726278dfa135d3e94f1f39329f1618bc4c8230760c'}
 
@@ -61,8 +63,12 @@ def refreshed_plan(root,plan):
     current.pop('refresh_cache_plan.py',None)
     for name,digest in KNOWN_IO_SOURCES.items():
         if previous.get(name)!=current.get(name):
-            if previous.get(name) is None or previous.get(name) not in (digest,KNOWN_LOGGING_IO_SOURCES.get(name)):
+            if previous.get(name) is None or previous.get(name) not in (digest,KNOWN_LOGGING_IO_SOURCES.get(name),KNOWN_FAST_TRAINING_SOURCES.get(name)):
                 raise ValueError('Unknown previous cache IO source: '+name)
+            previous.pop(name,None);current.pop(name,None)
+    for name,digest in KNOWN_FAST_TRAINING_SOURCES.items():
+        if previous.get(name)!=current.get(name):
+            if previous.get(name)!=digest:raise ValueError('Unknown previous fast-training source: '+name)
             previous.pop(name,None);current.pop(name,None)
     if previous!=current:raise ValueError('Training/runtime source changed; refusing refresh')
     return dict(plan,experiment=new)

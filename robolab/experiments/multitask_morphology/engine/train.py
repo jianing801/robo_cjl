@@ -150,18 +150,22 @@ def main(argv=None):
             if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')
         # 先检查首组缓存，完成后才申请GPU；不让磁盘扫描占着训练卡。
         if plan.get('execution_protocol')=='persistent_v1' and config.get('full_body_torque'):
-            from hybrid_native_cache import validate_cache
+            from hybrid_native_cache import validate_training_cache
             first_ids=stage_spec(bank,config,index)['design_ids']
             paths=[Path(a.asset_cache)] if a.asset_cache else [p.parent for p in sorted(root.glob('native_cache_*/completed.json'),reverse=True)]
+            accepted_cache=False
             for cache_path in paths:
                 print('TRAIN_CACHE_PREFLIGHT_BEFORE_GPU',str(cache_path),len(first_ids),flush=True)
-                try:validate_cache(cache_path,bank_path,first_ids)
+                try:validate_training_cache(cache_path,bank_path,first_ids)
                 except (ValueError,OSError,KeyError) as error:
                     if a.asset_cache:raise
                     print('TRAIN_CACHE_REJECTED',str(cache_path),str(error),flush=True)
                     continue
                 a.asset_cache=str(cache_path)
+                accepted_cache=True
                 break
+            if paths and not accepted_cache:
+                raise RuntimeError('Completed caches failed training fast checks; inspect the error or run a full cache audit, no implicit rebuild')
         choices=candidates(query_gpus(),os.environ,min_free_mib=a.gpu_min_free_gb*1024,max_utilization=a.gpu_max_utilization,requested=a.device)
         with gpu_lease(choices,ROOT/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
             env=child_environment(gpu,os.environ)

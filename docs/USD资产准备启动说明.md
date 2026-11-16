@@ -118,3 +118,8 @@ CACHE_MESH_PROGRESS 24 / 24
 CACHE_VALIDATE_PROGRESS 30 / 60
 CACHE_VALIDATE_PROGRESS 60 / 60
 ```
+
+
+### 正式训练快检不改变本页的独立转换流程
+
+本页所有`start.py 资产`命令仍执行完整缓存校验。只有正式专家训练复用已完成缓存时使用`TRAIN_CACHE_FAST_PROGRESS`，跳过USD全内容重哈希，保存并比较文件元数据基线。独立资产准备不因这一改动降低检查强度。具体区别见[跨形态多任务共享策略训练流程](跨形态多任务共享策略训练流程.md)的“正式训练的USD快检”一节。

@@ -50,11 +50,77 @@ def validate_cache(cache,bank_path,design_ids=None):
         progress('CACHE_VALIDATE_PROGRESS',done,len(selected))
     return proof
 
-def cache_directories(cache,bank_path,design_ids=None,require_complete=False):
+@validation_heartbeat
+def validate_training_cache(cache,bank_path,design_ids):
+    """正式训练快检：信任已有完成证明，不重读USD内容；后续检查元数据变化。"""
+    import os,stat
+    from hybrid_assets import progress
+    cache=Path(cache).resolve();bank_path=Path(bank_path)
+    bank_bytes=bank_path.read_bytes();bank=json.loads(bank_bytes)
+    proof_bytes=(cache/'completed.json').read_bytes();proof=json.loads(proof_bytes)
+    bank_sha=hashlib.sha256(bank_bytes).hexdigest();proof_sha=hashlib.sha256(proof_bytes).hexdigest()
+    if (proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2
+            or proof.get('bank_sha256')!=bank_sha):raise ValueError('training cache belongs to another bank or lacks completion proof')
+    expected={d['id']:d for d in bank['designs']};rows=proof['assets']
+    if len(rows)!=len(expected) or {r['design'] for r in rows}!=set(expected):raise ValueError('incomplete native cache')
+    selected=set(design_ids)
+    if not selected or not selected.issubset(expected):raise ValueError('unknown/empty selected training designs')
+    key=hashlib.sha256(json.dumps(sorted(selected)).encode()).hexdigest()
+    receipt_dir=cache/'.training_fast_checks';receipt_path=receipt_dir/(key+'.json')
+    if receipt_dir.is_symlink() or receipt_path.is_symlink():raise ValueError('training receipt must stay inside cache')
+    previous=json.loads(receipt_path.read_text(encoding='utf8')) if receipt_path.is_file() else None
+    binding=dict(version=1,mode='trusted_completed_proof_and_metadata',bank_sha256=bank_sha,proof_sha256=proof_sha)
+    if previous is not None and any(previous.get(k)!=v for k,v in binding.items()):
+        raise ValueError('training fast-check receipt identity changed; perform full cache audit')
+    signatures={}
+    def inspect(path):
+        path=Path(path);value=path.stat()
+        if not stat.S_ISREG(value.st_mode) or value.st_size<=0:raise ValueError('missing/empty training asset: '+str(path))
+        # 增加硬链接会改变ctime和nlink，不改变内容；不能据此误报资产变化。
+        signatures[str(path)]=[value.st_size,value.st_mtime_ns,value.st_dev,value.st_ino]
+    progress('TRAIN_CACHE_FAST_PROGRESS',0,len(selected))
+    done=0
+    for row in rows:
+        if row['design'] not in selected:continue
+        usd=Path(row['usd']).resolve();directory=usd.parent
+        if not usd.is_relative_to(cache) or directory.name!=row['design'] or row['urdf_sha256']!=expected[row['design']]['urdf_sha256']:
+            raise ValueError('training cache asset identity mismatch')
+        files=row.get('files_sha256',{})
+        if not {usd.name,'.asset_hash','config.yaml'}.issubset(files) or files[usd.name]!=row['usd_sha256']:
+            raise ValueError('training cache lacks consistent layer proof')
+        # 小型URDF和配置仍核对内容；大型USD只读文件元数据。
+        urdf=Path(expected[row['design']]['urdf'])
+        if sha(urdf)!=row['urdf_sha256']:raise ValueError('source URDF changed: '+str(urdf))
+        inspect(urdf)
+        for name in files:
+            path=(directory/name).resolve()
+            if not path.is_relative_to(directory):raise ValueError('training cache dependency escapes asset directory')
+            inspect(path)
+            if path.suffix.lower()!='.usd' and sha(path)!=files[name]:
+                raise ValueError('training cache metadata changed: '+str(path))
+        if (directory/'.asset_hash').read_text().strip()!=row['converter_hash']:
+            raise ValueError('native converter hash changed')
+        done+=1;progress('TRAIN_CACHE_FAST_PROGRESS',done,len(selected))
+    meshes=proof.get('mesh_sources')
+    if not isinstance(meshes,dict) or not meshes:raise ValueError('missing source mesh identity')
+    for path in meshes:inspect(path)
+    if previous is not None and previous.get('files')!=signatures:
+        raise ValueError('training cache file size/mtime/inode changed; perform full cache audit')
+    # 只在成功快检后记录基线。旧缓存首次以已有完成证明为信任起点，不冒称全量复验。
+    if previous is None:
+        receipt_dir.mkdir(exist_ok=True)
+        temporary=receipt_dir/(key+f'.{os.getpid()}.{time.time_ns()}.tmp')
+        temporary.write_text(json.dumps(dict(binding,files=signatures),sort_keys=True),encoding='utf8')
+        os.replace(temporary,receipt_path)
+    return proof
+
+
+def cache_directories(cache,bank_path,design_ids=None,require_complete=False,training_fast=False):
     """Use only completed proof entries; never pick abandoned partial batches."""
     cache=Path(cache)
     if (cache/'completed.json').is_file():
-        proof=validate_cache(cache,bank_path,design_ids)
+        proof=(validate_training_cache(cache,bank_path,design_ids) if training_fast
+               else validate_cache(cache,bank_path,design_ids))
         return [Path(row['usd']).parent for row in proof['assets'] if design_ids is None or row['design'] in design_ids]
     if require_complete:raise ValueError('full-body persistent training requires a completed native cache proof')
     return [p.parent for p in cache.rglob('.asset_hash')

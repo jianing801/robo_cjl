@@ -397,3 +397,62 @@ def test_concise_asset_validation_retains_corrupt_file_in_error(tmp_path,capsys)
     output=capsys.readouterr().out
     assert 'CACHE_VALIDATE_FILE_BEGIN' not in output
     assert 'CACHE_VALIDATE_ASSET_BEGIN' not in output
+
+
+def test_training_fast_check_never_reads_usd_contents_and_survives_hardlink(tmp_path,monkeypatch,capsys):
+    import hybrid_native_cache as native
+    import os
+    root,cache,bank,usd=make_cache(tmp_path)
+    original=Path.open
+    def guarded(path,*args,**kwargs):
+        if path.suffix.lower()=='.usd':raise AssertionError('formal fast path must not read USD bytes')
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'open',guarded)
+    proof=native.validate_training_cache(cache,bank,['one'])
+    assert len(proof['assets'])==1
+    os.link(usd,tmp_path/'scene_link.usd')
+    native.validate_training_cache(cache,bank,['one'])
+    assert 'TRAIN_CACHE_FAST_PROGRESS 1 / 1' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('fault',['missing','size','mtime','config','converter','urdf','mesh','proof'])
+def test_training_fast_rejects_missing_or_changed_assets(tmp_path,fault):
+    import hybrid_native_cache as native
+    import os
+    root,cache,bank,usd=make_cache(tmp_path)
+    native.validate_training_cache(cache,bank,['one'])
+    if fault=='missing':(usd.parent/'geometry.usd').unlink()
+    if fault=='size':usd.write_text('different-sized data')
+    if fault=='mtime':
+        st=usd.stat();os.utime(usd,ns=(st.st_atime_ns,st.st_mtime_ns+1000000000))
+    if fault=='config':(usd.parent/'config.yaml').write_text('changed config')
+    if fault=='converter':(usd.parent/'.asset_hash').write_text('changed')
+    if fault=='urdf':(tmp_path/'robot.urdf').write_text('<robot/>')
+    if fault=='mesh':(tmp_path/'mesh.stl').write_text('changed mesh size')
+    if fault=='proof':
+        p=cache/'completed.json';d=json.loads(p.read_text());d['bank_sha256']='wrong';p.write_text(json.dumps(d))
+    with pytest.raises((ValueError,OSError)):native.validate_training_cache(cache,bank,['one'])
+
+
+def test_training_fast_does_not_inspect_unselected_design_or_change_deep_default(tmp_path):
+    import hybrid_native_cache as native
+    root,cache,bank,usd=make_cache(tmp_path)
+    data=json.loads(bank.read_text());data['designs'].append(dict(id='unused',urdf='must-not-read'))
+    bank.write_text(json.dumps(data));p=cache/'completed.json';proof=json.loads(p.read_text())
+    proof['bank_sha256']=sha(bank);proof['assets'].append(dict(design='unused'));p.write_text(json.dumps(proof))
+    assert native.cache_directories(cache,bank,['one'],require_complete=True,training_fast=True)==[usd.parent.resolve()]
+    (usd.parent/'geometry.usd').write_text('corrupt')
+    # 独立转换/完整审计默认依然检查真实内容。
+    with pytest.raises(ValueError,match='geometry dependency'):native.cache_directories(cache,bank,['one'])
+
+
+def test_training_runtime_routes_fast_mode_only_for_execute():
+    import ast
+    root=Path(__file__).resolve().parents[1]
+    for p in [root/'engine/hybrid_runtime.py',root/'amp_engine/amp_mixed_runtime.py']:
+        tree=ast.parse(p.read_text(encoding='utf8'))
+        calls=[n for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,(ast.Name,ast.Attribute))
+               and (n.func.id if isinstance(n.func,ast.Name) else n.func.attr)=='cache_directories']
+        assert len(calls)==1
+        flag=next(k.value for k in calls[0].keywords if k.arg=='training_fast')
+        assert ast.unparse(flag)=="bool(getattr(options, 'execute', False))"

@@ -161,6 +161,22 @@ def main(argv=None):
         from robolab.rough_gpu import query_gpus,candidates,gpu_lease,child_environment
         from amp_processes import reject_duplicate_bank_safely as reject_duplicate_bank
         reject_duplicate_bank(bank_path)
+        if plan['execution_protocol']=='amp_persistent_v1' and config.get('full_body_torque'):
+            first_ids=stage_spec(bank,config,index)['design_ids']
+            paths=[Path(a.asset_cache)] if a.asset_cache else [p.parent for p in sorted(root.glob('native_cache_*/completed.json'),reverse=True)]
+            accepted_cache=False
+            for cache_path in paths:
+                print('TRAIN_CACHE_PREFLIGHT_BEFORE_GPU',len(first_ids),flush=True)
+                try:rough_module('hybrid_native_cache').validate_training_cache(cache_path,bank_path,first_ids)
+                except (ValueError,OSError,KeyError) as error:
+                    if a.asset_cache:raise
+                    print('TRAIN_CACHE_REJECTED',str(error),flush=True)
+                    continue
+                a.asset_cache=str(cache_path)
+                accepted_cache=True
+                break
+            if paths and not accepted_cache:
+                raise RuntimeError('Completed caches failed training fast checks; inspect the error or run a full cache audit, no implicit rebuild')
         choices=candidates(query_gpus(),os.environ,min_free_mib=a.gpu_min_free_gb*1024,max_utilization=a.gpu_max_utilization,requested=a.device)
         with gpu_lease(choices,ROOT/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
             env=child_environment(gpu,os.environ)

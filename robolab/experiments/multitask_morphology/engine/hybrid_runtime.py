@@ -83,7 +83,8 @@ def configure_spatial(options, bank, designs, output, configurator=None):
         from isaaclab.sim.converters.asset_converter_base import AssetConverterBase
         from hybrid_native_cache import cache_directories
         for directory in cache_directories(Path(options.asset_cache).resolve(),options.bank,
-                [d['id'] for d in designs],require_complete=getattr(options,'full_body_torque',False)):
+                [d['id'] for d in designs],require_complete=getattr(options,'full_body_torque',False),
+                training_fast=bool(getattr(options,'execute',False))):
             cache.setdefault((directory/'.asset_hash').read_text().strip(),directory)
     assets, robots = [], []
     for d in designs:
