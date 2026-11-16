@@ -230,3 +230,50 @@ def test_known_persistent_converter_and_helper_migrate_only_before_ppo(tmp_path,
     assert refresh.refreshed_plan(tmp_path,plan)['experiment']==new
     old['hybrid_sources']['refresh_cache_plan.py']='unrecognized'
     with pytest.raises(ValueError,match='helper'):refresh.refreshed_plan(tmp_path,plan)
+
+
+def test_coordinator_bootstrap_never_imports_isaac_or_native_libraries(tmp_path,monkeypatch):
+    import importlib.util,sys,builtins
+    import native_cache_coordinator as coordinator
+    script=Path(coordinator.__file__).with_name('prepare_native_cache.py')
+    spec=importlib.util.spec_from_file_location('pure_cache_bootstrap',script)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr(sys,'meta_path',list(sys.meta_path))
+    calls=[];argv=['--bank','bank.json','--cache-root','cache','--output-dir','result',
+        '--headless','--device','cuda:0','--kit_args=--/renderer/activeGpu=5 --/physics/cudaDevice=0']
+    monkeypatch.setattr(sys,'argv',[str(script),*argv])
+    monkeypatch.setattr(coordinator,'coordinate',lambda args,raw:calls.append((args,raw)))
+    original_import=builtins.__import__
+    def forbidden_native(name,*args,**kwargs):
+        if name.split('.')[0] in ('isaaclab','isaacsim','carb','omni'):
+            raise AssertionError('协调器不得导入原生库：'+name)
+        return original_import(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,'__import__',forbidden_native)
+    module.main()
+    assert len(calls)==1 and calls[0][1]==argv
+    assert calls[0][0].bank=='bank.json' and calls[0][0].device=='cuda:0'
+
+
+def test_coordinator_rejects_unknown_flags_before_work(tmp_path,monkeypatch):
+    import importlib.util,sys
+    import native_cache_coordinator as coordinator
+    script=Path(coordinator.__file__).with_name('prepare_native_cache.py')
+    spec=importlib.util.spec_from_file_location('pure_cache_bad_flags',script)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    monkeypatch.setattr(sys,'argv',[str(script),'--bank','bank.json','--cache-root','cache',
+        '--output-dir','result','--unknown-setting','x'])
+    monkeypatch.setattr(coordinator,'coordinate',lambda *args:pytest.fail('不能执行未知参数'))
+    with pytest.raises(SystemExit) as error:module.main()
+    assert error.value.code==2
+
+
+def test_coordinator_import_guard_blocks_native_components_only():
+    import importlib.util
+    import native_cache_coordinator as coordinator
+    script=Path(coordinator.__file__).with_name('prepare_native_cache.py')
+    spec=importlib.util.spec_from_file_location('cache_import_guard_test',script)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    guard=module.CoordinatorImportGuard()
+    for name in ('isaaclab.app','isaaclab_tasks','isaacsim','carb','omni.usd','pxr.Usd'):
+        with pytest.raises(ImportError):guard.find_spec(name)
+    assert guard.find_spec('numpy') is None and guard.find_spec('sklearn') is None

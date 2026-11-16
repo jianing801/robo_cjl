@@ -4,6 +4,13 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[2]
 sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl'),str(HERE.parent/'amp_engine')]
 
+class CoordinatorImportGuard:
+    """协调进程禁止加载仿真原生组件；CPU模型依赖仍正常导入。"""
+    def find_spec(self,fullname,path=None,target=None):
+        if fullname.split('.')[0] in {'isaaclab','isaaclab_tasks','isaacsim','carb','omni','pxr'}:
+            raise ImportError('USD coordinator must not load simulator modules: '+fullname)
+        return None
+
 def main():
     print('CACHE_PHASE ENTRY_READY',flush=True)
     parser=argparse.ArgumentParser(description=__doc__)
@@ -18,12 +25,24 @@ def main():
     parser.add_argument('--design-ids',help=argparse.SUPPRESS)
     parser.add_argument('--design-ids-file',help=argparse.SUPPRESS)
     parser.add_argument('--expected-bank-sha',help=argparse.SUPPRESS)
-    print('CACHE_PHASE IMPORTING_ISAAC_ARGUMENTS',flush=True)
-    from isaaclab.app import AppLauncher
-    AppLauncher.add_app_launcher_args(parser);args=parser.parse_args()
-    if not args.batch_worker:
+    if '--batch-worker' not in sys.argv[1:]:
+        # 协调器只解析并转发原生启动参数，绝不导入AppLauncher/Carb/Omni。
+        # 真正的导出子进程仍使用原生解析器和原样argv，仿真配置不变。
+        for option in ('headless','enable_cameras','xr','cpu','verbose','info','anim_recording_enabled'):
+            parser.add_argument('--'+option,action='store_true')
+        for option in ('device','experience','rendering_mode','kit_args'):
+            parser.add_argument('--'+option)
+        parser.add_argument('--livestream',type=int)
+        parser.add_argument('--anim_recording_start_time',type=float)
+        parser.add_argument('--anim_recording_stop_time',type=float)
+        args=parser.parse_args()
+        sys.meta_path.insert(0,CoordinatorImportGuard())
+        print('CACHE_PHASE COORDINATOR_PYTHON_ONLY',flush=True)
         from native_cache_coordinator import coordinate
         coordinate(args,sys.argv[1:]);return
+    print('CACHE_PHASE IMPORTING_ISAAC_WORKER_ONLY',flush=True)
+    from isaaclab.app import AppLauncher
+    AppLauncher.add_app_launcher_args(parser);args=parser.parse_args()
     from hybrid_support import write_new
     from hybrid_contract import sha
     bank_path=Path(args.bank).resolve();task=json.loads(bank_path.read_text(encoding='utf8')).get('task_key','stairs')
@@ -94,7 +113,10 @@ def main():
 if __name__=='__main__':
     import faulthandler
     faulthandler.enable()
-    faulthandler.dump_traceback_later(60,repeat=True)
+    # 健康协调器以心跳报告状态，不再每分钟打印容易误解的Timeout栈。
+    # 原生导出worker仍保留周期线程栈和崩溃诊断。
+    if '--batch-worker' in sys.argv[1:]:
+        faulthandler.dump_traceback_later(60,repeat=True)
     try:
         main()
     except SystemExit:
