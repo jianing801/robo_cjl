@@ -114,11 +114,102 @@ def record_run(root, task, output):
     os.replace(tmp, folder/f'{task}.json')
 
 
-def launch_expert(root, task, gpu, preview=False):
+def reject_active_expert(output, bank):
+    """只核对同一训练目录/结构库，恢复不能制造重复任务。"""
+    import psutil
+    own={os.getpid(),*[p.pid for p in psutil.Process().parents()]}
+    scripts={'start.py','train.py','train_stage.py','persistent_worker.py','amp_persistent_worker.py','prepare_native_cache.py'}
+    for process in psutil.process_iter(['pid','cmdline']):
+        if process.pid in own:continue
+        args=process.info['cmdline'] or []
+        if not any(Path(arg).name in scripts for arg in args):continue
+        if any(arg==str(output) or arg.startswith(str(output)+'/') or arg==str(bank) for arg in args):
+            raise RuntimeError(f'该结构库或训练目录仍有进程{process.pid}，不重复启动。')
+
+
+def has_initial_checkpoint(output):
+    """排除纯USD树；其他位置的模型都保留，不因尚未提交就丢弃。"""
+    for directory,dirs,files in os.walk(output,followlinks=False):
+        here=Path(directory)
+        if here==output:dirs[:]=[d for d in dirs if not d.startswith('native_cache_')]
+        if here==output/'attempts':dirs[:]=[d for d in dirs if not d.startswith('cache_')]
+        if any(Path(name).suffix.lower() in {'.pt','.pth','.ckpt'} for name in files):return True
+    return False
+
+
+def resume_expert_pause(root, task, output, preview=False):
+    marker=output/'USER_PAUSED'
+    if not marker.exists():return
+    bank=bank_path(root,task).resolve();reject_active_expert(output,bank)
+    sys.path.insert(0,str(ENTRY/'engine'))
+    from hybrid_native_cache import training_attempt_started
+    commits=list((output/'commits').glob('stage_*.json'))
+    if training_attempt_started(output) and not commits:
+        raise RuntimeError('首组已中断但没有已提交断点；明确重开请加--restart-initial，不直接删除暂停标记。')
+    if preview:
+        print('预览：明确恢复该专家暂停，不删除模型。',flush=True);return
+    folder=root/'启动记录';folder.mkdir(exist_ok=True)
+    audit=folder/f'{task}_training_resume_{datetime.now():%Y%m%d_%H%M%S_%f}.json'
+    before=marker.read_bytes()
+    audit.write_text(json.dumps(dict(explicit_training_resume=True,output=str(output),marker_sha256=hashlib.sha256(before).hexdigest()),ensure_ascii=False),encoding='utf8')
+    if marker.read_bytes()!=before:raise RuntimeError('暂停标记并发变化，未解除。')
+    marker.unlink()
+    print('已按明确恢复选项解除当前专家暂停。',flush=True)
+
+
+def prepare_initial_restart(root, task, output, preview=False):
+    """明确授权的首组重启：新目录、原bank/配置/USD，旧目录和暂停标记保留。"""
+    bank=bank_path(root,task).resolve();reject_active_expert(output,bank)
+    plan=read(output/'plan.json')
+    if (output/'completed.json').exists() or any((output/'commits').glob('*.json')) or has_initial_checkpoint(output):
+        raise RuntimeError('已有检查点或训练提交，不能重开首组；请使用--resume-paused续训。')
+    if plan.get('bootstrap_checkpoint') or plan.get('start_stage',0):raise RuntimeError('该目录是检查点续接链，不能当作初始训练重开。')
+    if plan.get('configuration')!=read(ENTRY/'configs'/f'{task}.json'):
+        raise RuntimeError('旧配置与当前正式配置不一致，不隐式改变预算或训练设置。')
+    # 避免旧索引漏掉后来手动启动且已经产生结果的同库实验。
+    for other in (root/'experts').glob(task+'*'):
+        if other==output or not (other/'plan.json').is_file():continue
+        if Path(read(other/'plan.json')['bank']).resolve()==bank and (any((other/'commits').glob('stage_*.json')) or has_initial_checkpoint(other)):
+            raise RuntimeError('同结构库另有已训练实验，请先核对启动索引，不自动重开。')
+    record=root/'启动记录'/f'{task}_asset_cache.json'
+    candidates=[Path(read(record)['cache'])] if record.is_file() else [p.parent for p in sorted(output.glob('native_cache_*/completed.json'),reverse=True)]
+    bank_value=read(bank);bank_sha=hashlib.sha256(bank.read_bytes()).hexdigest();ids={d['id'] for d in bank_value['designs']};cache_record=None
+    for cache in candidates:
+        proof_path=cache/'completed.json'
+        if not proof_path.is_file():continue
+        data=read(proof_path);rows=data.get('assets',[])
+        if (data.get('result')=='NATIVE_ASSET_CACHE_COMPLETE' and data.get('cache_schema_version')==2
+                and data.get('bank_sha256')==bank_sha and len(rows)==len(ids) and {r['design'] for r in rows}==ids):
+            cache_record=dict(cache=str(cache.resolve()),bank_sha256=bank_sha,completed_sha256=hashlib.sha256(proof_path.read_bytes()).hexdigest());break
+    if cache_record is None:raise RuntimeError('没有同bank的完整USD完成证明；不在重启时隐式重新转换。')
+    tag=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    selected=root/'experts'/f'{task}_restart_{tag}'
+    if selected.exists():raise RuntimeError('重启目录冲突，未覆盖。')
+    if not preview:
+        folder=root/'启动记录';folder.mkdir(exist_ok=True)
+        audit=folder/f'{task}_initial_restart_{tag}';audit.mkdir()
+        for name in [f'{task}.json',f'{task}_asset_cache.json']:
+            path=folder/name
+            if path.is_file():(audit/name).write_bytes(path.read_bytes())
+        (audit/'plan.before.json').write_bytes((output/'plan.json').read_bytes())
+        (audit/'authorization.json').write_text(json.dumps(dict(explicit_restart_initial=True,previous_output=str(output),new_output=str(selected),bank=str(bank),cache=cache_record['cache'],configuration=plan['configuration'],old_pause_preserved=(output/'USER_PAUSED').exists()),ensure_ascii=False,indent=2),encoding='utf8')
+        temporary=folder/f'{task}_asset_cache.{tag}.tmp';temporary.write_text(json.dumps(cache_record,ensure_ascii=False),encoding='utf8');os.replace(temporary,record)
+    print('明确重新启动首组，保留原目录和旧暂停记录。',flush=True)
+    return selected,plan.get('reference_library'),cache_record['cache']
+
+
+def launch_expert(root, task, gpu, preview=False, resume_paused=False, restart_initial=False):
     output, resume = select_run(root, task)
+    reference_override=None;cache_override=None
+    if restart_initial:
+        if not resume:raise RuntimeError('尚无旧训练计划，不需要--restart-initial，直接启动即可。')
+        output,reference_override,cache_override=prepare_initial_restart(root,task,output,preview)
+        resume=False
+    elif resume_paused:
+        resume_expert_pause(root,task,output,preview)
     print(('续训目录：' if resume else '新训练目录：')+str(output), flush=True)
-    if (output/'USER_PAUSED').exists():
-        raise RuntimeError('该任务有用户暂停标记；请明确恢复后再启动，不自动取消暂停。')
+    if (output/'USER_PAUSED').exists() and not (preview and resume_paused):
+        raise RuntimeError('该任务有用户暂停标记；续训加--resume-paused，首组无断点重开加--restart-initial。')
     if resume and task != 'amp':
         # 仅转换阶段允许通过已有审计工具迁移；PPO开始后严格拒绝改身份。
         current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -126,6 +217,10 @@ def launch_expert(root, task, gpu, preview=False):
         if read(output/'plan.json')['experiment']['hybrid_sources'] != current:
             run([sys.executable, ENTRY/'engine/refresh_cache_plan.py', '--root', output], preview=preview)
     command = expert_command(root, task, gpu, output, resume)
+    if cache_override is not None and '--asset-cache' not in command:
+        command+=['--asset-cache',cache_override]
+    if reference_override is not None and task=='amp':
+        command[command.index('--reference-library')+1]=reference_override
     if preview:
         run(command, preview=True)
         return
@@ -409,7 +504,8 @@ def main(argv=None):
     parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
     parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
-    parser.add_argument('--resume-paused', action='store_true', help='明确恢复仅转换阶段的用户暂停，不恢复PPO')
+    parser.add_argument('--resume-paused', action='store_true', help='明确恢复所选任务暂停；无首组断点重开另用--restart-initial')
+    parser.add_argument('--restart-initial', action='store_true', help='明确重开无检查点首组，自动复用USD并记住新目录')
     args = parser.parse_args(argv)
     if args.gpu < 0:
         parser.error('显卡编号不能为负数')
@@ -418,8 +514,12 @@ def main(argv=None):
     root = args.root.resolve(); action = ALIASES.get(args.操作, args.操作)
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action != 'assets':
-        parser.error('--resume-paused仅用于USD资产准备')
+    if args.resume_paused and action not in ('assets','rough','backpack','amp'):
+        parser.error('--resume-paused仅用于资产准备或专家任务')
+    if args.restart_initial and action not in ('rough','backpack','amp'):
+        parser.error('--restart-initial仅用于专家任务')
+    if args.resume_paused and args.restart_initial:
+        parser.error('续训恢复与首组重开不能同时选择')
     if action == 'status':
         print('实验目录：', root)
         for task in ('rough','backpack','amp'):
@@ -443,7 +543,7 @@ def main(argv=None):
     elif action == 'distill':
         distill(root, args.gpu, args.dry_run)
     else:
-        launch_expert(root, action, args.gpu, args.dry_run)
+        launch_expert(root, action, args.gpu, args.dry_run, args.resume_paused, args.restart_initial)
 
 
 if __name__ == '__main__':

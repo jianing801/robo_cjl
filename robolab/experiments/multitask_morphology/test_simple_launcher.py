@@ -238,3 +238,93 @@ def test_explicit_asset_resume_audits_marker_but_cannot_resume_ppo(tmp_path):
     marker.touch();(folder/'commits').mkdir();(folder/'commits/stage_0.json').write_text('{}')
     with pytest.raises(RuntimeError,match='PPO'):launcher.resume_asset_pause(tmp_path,'rough')
     assert marker.exists()
+
+
+def restart_fixture(root,monkeypatch):
+    import hashlib
+    banks(root)
+    bank=launcher.bank_path(root,'rough')
+    bank.write_text(json.dumps({'task_key':'stairs','designs':[{'id':'one'}]}))
+    output=plan(root,'rough_old');(output/'USER_PAUSED').touch()
+    (output/'attempts').mkdir();(output/'commits').mkdir()
+    config=launcher.read(launcher.ENTRY/'configs/rough.json')
+    (output/'plan.json').write_text(json.dumps({'bank':str(bank.resolve()),'configuration':config}))
+    cache=output/'native_cache_old';cache.mkdir()
+    (cache/'completed.json').write_text(json.dumps(dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,
+        bank_sha256=hashlib.sha256(bank.read_bytes()).hexdigest(),assets=[{'design':'one'}])))
+    monkeypatch.setattr(launcher,'reject_active_expert',lambda *args:None)
+    return output,cache
+
+
+def test_explicit_initial_restart_preserves_old_pause_and_reuses_cache(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    before=(output/'plan.json').read_bytes()
+    new,reference,selected_cache=launcher.prepare_initial_restart(tmp_path,'rough',output)
+    assert new!=output and not new.exists() and selected_cache==str(cache.resolve())
+    assert (output/'USER_PAUSED').exists() and (output/'plan.json').read_bytes()==before
+    assert launcher.read(tmp_path/'启动记录/rough_asset_cache.json')['cache']==str(cache.resolve())
+    audit=next((tmp_path/'启动记录').glob('rough_initial_restart_*/authorization.json'))
+    assert launcher.read(audit)['explicit_restart_initial'] is True
+
+
+def test_restart_preview_does_not_write_or_remove_anything(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    launcher.launch_expert(tmp_path,'rough',4,preview=True,restart_initial=True)
+    assert not (tmp_path/'启动记录').exists() and (output/'USER_PAUSED').exists()
+
+
+@pytest.mark.parametrize('fault',['checkpoint','commit','bootstrap','config','cache','other_checkpoint','active'])
+def test_initial_restart_refuses_to_discard_learned_state_or_change_settings(tmp_path,monkeypatch,fault):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    if fault=='checkpoint':(output/'model_0.pt').write_text('keep')
+    if fault=='commit':(output/'commits/stage_000000.json').write_text('{}')
+    if fault in ('bootstrap','config'):
+        value=launcher.read(output/'plan.json')
+        if fault=='bootstrap':value['bootstrap_checkpoint']='keep.pt'
+        else:value['configuration']={}
+        (output/'plan.json').write_text(json.dumps(value))
+    if fault=='cache':(cache/'completed.json').unlink()
+    if fault=='other_checkpoint':
+        other=plan(tmp_path,'rough_manual');(other/'model_0.pt').write_text('keep')
+    if fault=='active':
+        def reject(*args):raise RuntimeError('active')
+        monkeypatch.setattr(launcher,'reject_active_expert',reject)
+    with pytest.raises(RuntimeError):launcher.prepare_initial_restart(tmp_path,'rough',output)
+    assert (output/'USER_PAUSED').exists() and not (tmp_path/'启动记录').exists()
+
+
+def test_restart_launch_uses_unified_entry_and_remembers_new_directory(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    monkeypatch.setattr(launcher.sys,'platform','win32')
+    commands=[]
+    def run(command,**kwargs):
+        commands.append(command)
+        selected=Path(command[command.index('--output-root')+1]);selected.mkdir()
+        (selected/'plan.json').write_text(json.dumps({'bank':str(launcher.bank_path(tmp_path,'rough').resolve())}))
+    monkeypatch.setattr(launcher,'run',run)
+    launcher.launch_expert(tmp_path,'rough',4,restart_initial=True)
+    assert len(commands)==1
+    command=commands[0]
+    assert '--resume' not in command
+    assert command[command.index('--device')+1]=='cuda:4'
+    assert command[command.index('--asset-cache')+1]==str(cache.resolve())
+    selected,resume=launcher.select_run(tmp_path,'rough')
+    assert resume and selected!=output and (output/'USER_PAUSED').exists()
+
+
+def test_training_pause_resume_is_explicit_and_audited(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    (output/'commits/stage_000000.json').write_text('{}')
+    launcher.resume_expert_pause(tmp_path,'rough',output)
+    assert not (output/'USER_PAUSED').exists()
+    audit=next((tmp_path/'启动记录').glob('rough_training_resume_*.json'))
+    assert launcher.read(audit)['explicit_training_resume'] is True
+
+
+def test_no_committed_checkpoint_cannot_be_disguised_as_pause_resume(tmp_path,monkeypatch):
+    output,cache=restart_fixture(tmp_path,monkeypatch)
+    launch=output/'attempts/session_0/train';launch.mkdir(parents=True)
+    (launch/'launch.json').write_text(json.dumps({'command':['python','persistent_worker.py']}))
+    with pytest.raises(RuntimeError,match='restart-initial'):
+        launcher.resume_expert_pause(tmp_path,'rough',output)
+    assert (output/'USER_PAUSED').exists()
