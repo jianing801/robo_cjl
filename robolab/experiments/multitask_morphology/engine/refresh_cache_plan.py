@@ -7,7 +7,7 @@ from hybrid_native_cache import training_attempt_started
 from hybrid_support import write_new
 
 KNOWN_CONVERTERS = {'prepare_native_cache.py': ['0914a11665f442dc6822cac05b944fc9750d5dbd9231fdca4607f53b41deec8e', '1a7814e36b72064a4130c693885d4fc95ea450fac80cf6d5b392e63132c1da5d', '49bb0275ce660e9bc3d0d61c445c90f6d98d592819019b890d37b290189f2f31', 'b642f6695a8a92ebb7cfcfce418bfefcb842cd51f1cf8ba88928bb305747be9f'], 'native_cache_coordinator.py': ['48682f956f90326b9bee272e6c14767d96735840ab7ce6895dd2f12ce0724029', '86a3acdc5be4b9e6fcb4ba4d2b68140af2401076619a0d62024410a642f9206a', '9da8fa47dbfdc880b427010e4b585d2698cd087613ff0f2abb4fad3baf04e057', 'b6554ba09d3a4b03c307b2fcce120e3036f816c424b5bbf7aa04b2013af4d214']}
-KNOWN_REFRESH_HELPERS = ['4d75c167794e1011b3bd0ba9941cfe83d98cccdf3d220b36f46a76cb543671da', '9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
+KNOWN_REFRESH_HELPERS = ['5de7b34f719dd0f33ad35c135d1c861158593294cba3339eebe0bed3823fbf49', '4d75c167794e1011b3bd0ba9941cfe83d98cccdf3d220b36f46a76cb543671da', '9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
 
 KNOWN_IO_SOURCES = {'hybrid_assets.py': 'c9eab750c7a712966572623fd1aa22c29b579f721741f23efa81d979794f0898', 'hybrid_native_cache.py': '03153f0b0e568439f295761903c68e6a1c06201cea5dd97893386d44ad49bad0', 'train.py': '24f2c69b1f41f726cc4fe4726278dfa135d3e94f1f39329f1618bc4c8230760c'}
 
@@ -51,8 +51,10 @@ def refreshed_plan(root,plan):
     a=dict(old);b=dict(new);previous=dict(a.pop('hybrid_sources'));current=dict(b.pop('hybrid_sources'))
     if a!=b:raise ValueError('Non-converter experiment identity changed')
     for name,known in KNOWN_CONVERTERS.items():
-        if previous.pop(name,None) not in known:raise ValueError('Unknown previous converter source: '+name)
-        current.pop(name,None)
+        before=previous.pop(name,None);after=current.pop(name,None)
+        # 未改变的文件由新旧身份直接证明一致；只有迁移改变时需要旧版白名单。
+        if before is None or (before!=after and before not in known):
+            raise ValueError('Unknown previous converter source: '+name)
     previous_helper=previous.pop('refresh_cache_plan.py',None)
     if previous_helper is not None and previous_helper not in KNOWN_REFRESH_HELPERS:
         raise ValueError('Unknown previous refresh helper identity')

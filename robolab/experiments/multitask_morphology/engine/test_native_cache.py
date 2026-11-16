@@ -350,3 +350,28 @@ def test_plan_checkpoint_scan_keeps_unknown_locations_and_attempts(tmp_path):
     p.unlink()
     q=tmp_path/'unknown_models/model.pt';q.parent.mkdir();q.write_text('evidence')
     assert refresh.checkpoint_evidence(tmp_path)
+
+
+@pytest.mark.parametrize('change_unchanged_converter',[False,True])
+def test_server_actual_unchanged_importer_identity_is_not_a_migration(tmp_path,monkeypatch,change_unchanged_converter):
+    import refresh_cache_plan as refresh
+    from copy import deepcopy
+    # 服务器计划与实际文件逐字节核实得到的真实源身份；不是临时关闭校验。
+    old_sources={
+        'prepare_native_cache.py':'fa2c445c5190002375ccbf6014f728521ac4a4bc19b0fafa253d0091f69830f1',
+        'native_cache_coordinator.py':'48682f956f90326b9bee272e6c14767d96735840ab7ce6895dd2f12ce0724029',
+        'hybrid_assets.py':'c9eab750c7a712966572623fd1aa22c29b579f721741f23efa81d979794f0898',
+        'hybrid_native_cache.py':'03153f0b0e568439f295761903c68e6a1c06201cea5dd97893386d44ad49bad0',
+        'train.py':'24f2c69b1f41f726cc4fe4726278dfa135d3e94f1f39329f1618bc4c8230760c',
+        'refresh_cache_plan.py':'9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a'}
+    new_sources=dict(old_sources)
+    for name in new_sources:
+        if name!='prepare_native_cache.py':new_sources[name]='updated-reviewed-source'
+    if change_unchanged_converter:new_sources['prepare_native_cache.py']='changed-importer'
+    old=dict(native_sources={'physics':'same'},hybrid_sources=old_sources)
+    new=dict(native_sources={'physics':'same'},hybrid_sources=new_sources)
+    monkeypatch.setattr(refresh,'experiment_identity',lambda bank,config:new)
+    plan=dict(experiment=old,bank='fixture',configuration={})
+    if change_unchanged_converter:
+        with pytest.raises(ValueError,match='prepare_native_cache'):refresh.refreshed_plan(tmp_path,plan)
+    else:assert refresh.refreshed_plan(tmp_path,plan)['experiment']==new
