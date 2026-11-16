@@ -154,7 +154,7 @@ def test_asset_preparation_has_separate_gpu_threshold_and_remembered_cache(tmp_p
         return cache
     monkeypatch.setattr(launcher,'reject_asset_workers',lambda bank:None)
     monkeypatch.setitem(sys.modules,'train',SimpleNamespace(controller_lock=lambda root:nullcontext(),run_child=lambda *a:pytest.fail('测试不应执行原生子进程')))
-    monkeypatch.setitem(sys.modules,'hybrid_native_cache',SimpleNamespace(ensure_cache=ensure,sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()))
+    monkeypatch.setitem(sys.modules,'hybrid_native_cache',SimpleNamespace(validate_cache=lambda *a:None,ensure_cache=ensure,sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()))
     monkeypatch.setitem(sys.modules,'hybrid_processes',SimpleNamespace(reject_duplicate_bank_safely=lambda bank:None))
     def candidates(rows,env,**kwargs):
         assert kwargs['min_free_mib']==4096 and kwargs['requested']=='cuda:5'

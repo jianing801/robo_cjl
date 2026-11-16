@@ -257,7 +257,7 @@ def prepare_task_assets(root, task, gpu, preview=False):
         return
     sys.path[:0] = [str(ENTRY/'engine'), str(REPO/'robolab'), str(REPO/'rsl_rl')]
     from train import controller_lock
-    from hybrid_native_cache import ensure_cache, sha
+    from hybrid_native_cache import ensure_cache, sha, validate_cache
     from hybrid_processes import reject_duplicate_bank_safely
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
     bank = bank_path(root,task)
@@ -266,14 +266,25 @@ def prepare_task_assets(root, task, gpu, preview=False):
     with controller_lock(cache_root):
         reject_duplicate_bank_safely(bank)
         reject_asset_workers(bank)
-        # 这是转换的启动门槛，不是显存峰值保证；OOM保留日志并停止。
-        choices = candidates(query_gpus(), os.environ, min_free_mib=4*1024,
-                             max_utilization=100, requested=f'cuda:{gpu}')
-        with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as selected:
-            environment = child_environment(selected, os.environ)
-            kit = (f" --/renderer/activeGpu={selected['index']}"
-                   " --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0")
-            cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_cache_child)
+        # 已完成缓存只需CPU校验，不先抢占GPU，也不要求当前有空闲卡。
+        cache=None
+        for proof in sorted(cache_root.glob('native_cache_*/completed.json'),reverse=True):
+            print('USD_EXISTING_CACHE_CHECK_BEFORE_GPU',task,str(proof.parent),flush=True)
+            try:validate_cache(proof.parent,bank)
+            except (ValueError,OSError,KeyError) as error:
+                print('USD_EXISTING_CACHE_REJECTED',str(error),flush=True)
+                continue
+            cache=proof.parent
+            break
+        if cache is None:
+            # 这是转换的启动门槛，不是显存峰值保证；OOM保留日志并停止。
+            choices = candidates(query_gpus(), os.environ, min_free_mib=4*1024,
+                                 max_utilization=100, requested=f'cuda:{gpu}')
+            with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as selected:
+                environment = child_environment(selected, os.environ)
+                kit = (f" --/renderer/activeGpu={selected['index']}"
+                       " --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0")
+                cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_cache_child)
         folder = root/'启动记录'; folder.mkdir(exist_ok=True)
         record = dict(cache=str(cache.resolve()), bank_sha256=sha(bank),
                       completed_sha256=sha(cache/'completed.json'))

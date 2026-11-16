@@ -2,9 +2,23 @@
 from datetime import datetime
 import hashlib,json
 from pathlib import Path
+import functools,threading,time
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
+def validation_heartbeat(function):
+    @functools.wraps(function)
+    def wrapped(*args,**kwargs):
+        stop=threading.Event();started=time.monotonic()
+        def report():
+            while not stop.wait(10):
+                print('CACHE_VALIDATE_WAIT',f'{time.monotonic()-started:.0f}s','校验仍在进行，当前读取位置见最近的BEGIN输出',flush=True)
+        thread=threading.Thread(target=report,daemon=True);thread.start()
+        try:return function(*args,**kwargs)
+        finally:stop.set();thread.join(timeout=1)
+    return wrapped
+
+@validation_heartbeat
 def validate_cache(cache,bank_path,design_ids=None):
     cache=Path(cache);bank=json.loads(Path(bank_path).read_text(encoding='utf8'))
     proof=json.loads((cache/'completed.json').read_text(encoding='utf8'))
@@ -12,22 +26,29 @@ def validate_cache(cache,bank_path,design_ids=None):
         raise ValueError('native cache belongs to another bank')
     if proof.get('cache_schema_version')!=2:raise ValueError('native cache requires geometry-hash schema 2; rebuild cache')
     from hybrid_assets import mesh_sources,validate_asset
-    if proof.get('mesh_sources')!=mesh_sources(bank):raise ValueError('source mesh dependencies changed')
     rows=proof['assets'];expected={d['id']:d for d in bank['designs']}
     if len(rows)!=len(expected) or {r['design'] for r in rows}!=set(expected):raise ValueError('incomplete native cache')
     selected=set(expected) if design_ids is None else set(design_ids)
     if not selected.issubset(expected):raise ValueError('unknown selected cache design')
+    print('CACHE_VALIDATE_SOURCE_MESHES',len(selected),flush=True)
+    actual_meshes=mesh_sources({'designs':[d for d in bank['designs'] if d['id'] in selected]})
+    recorded=proof.get('mesh_sources',{})
+    if any(recorded.get(path)!=digest for path,digest in actual_meshes.items()):
+        raise ValueError('source mesh dependencies changed')
+    if design_ids is None and recorded!=actual_meshes:raise ValueError('source mesh dependencies changed')
+    done=0
+    print('CACHE_VALIDATE_BEGIN',len(selected),str(cache),flush=True)
     for row in rows:
         if row['design'] not in selected:continue
         usd=Path(row['usd']).resolve();directory=usd.parent
         if not usd.is_relative_to(cache.resolve()) or directory.name!=row['design'] or row['urdf_sha256']!=expected[row['design']]['urdf_sha256']:
             raise ValueError('native cache asset identity mismatch')
-        if (directory/'.asset_hash').read_text().strip()!=row['converter_hash']:
-            raise ValueError('native converter hash changed')
-        if not (directory/'config.yaml').is_file() or sha(usd)!=row['usd_sha256']:
-            raise ValueError('native converted asset is incomplete/changed')
+        if not (directory/'config.yaml').is_file():raise ValueError('native converted asset is incomplete/changed')
         if sha(expected[row['design']]['urdf'])!=row['urdf_sha256']:raise ValueError('source URDF changed')
+        print('CACHE_VALIDATE_ASSET_BEGIN',row['design'],str(usd),flush=True)
         validate_asset(row)
+        done+=1
+        print('CACHE_VALIDATE_PROGRESS',done,'/',len(selected),flush=True)
     return proof
 
 def cache_directories(cache,bank_path,design_ids=None,require_complete=False):
@@ -64,5 +85,16 @@ def ensure_cache(root,bank_path,python,kit,environment,run_child):
     for previous in sorted((root/'attempts').glob('cache_*/train/result')):
         if previous!=attempt/'train/result':command+=['--reuse-proof-root',str(previous)]
     run_child(command,attempt/'train',environment)
-    validate_cache(cache,bank_path)
+    # 子进程已逐资产校验；只交叉确认两份原子完成报告，不再次全量读取USD。
+    print('CACHE_FINALIZING_REPORTS',str(cache),flush=True)
+    proof=json.loads((cache/'completed.json').read_text(encoding='utf8'))
+    summary=json.loads((attempt/'train/result/summary.json').read_text(encoding='utf8'))
+    bank=json.loads(Path(bank_path).read_text(encoding='utf8'))
+    expected={d['id'] for d in bank['designs']}
+    rows=proof.get('assets',[])
+    if (proof!=summary or proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE'
+            or proof.get('cache_schema_version')!=2 or proof.get('bank_sha256')!=sha(bank_path)
+            or len(rows)!=len(expected) or {r['design'] for r in rows}!=expected):
+        raise ValueError('native coordinator completion reports disagree')
+    print('CACHE_FINALIZED',len(rows),'/',len(expected),flush=True)
     return cache

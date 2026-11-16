@@ -277,3 +277,48 @@ def test_coordinator_import_guard_blocks_native_components_only():
     for name in ('isaaclab.app','isaaclab_tasks','isaacsim','carb','omni.usd','pxr.Usd'):
         with pytest.raises(ImportError):guard.find_spec(name)
     assert guard.find_spec('numpy') is None and guard.find_spec('sklearn') is None
+
+
+def test_validation_reads_each_asset_file_once(tmp_path,monkeypatch,capsys):
+    root,cache,bank,usd=make_cache(tmp_path)
+    original=Path.read_bytes;reads=[]
+    def counted(path):
+        reads.append(path.resolve())
+        return original(path)
+    monkeypatch.setattr(Path,'read_bytes',counted)
+    validate_cache(cache,bank)
+    proof=json.loads((cache/'completed.json').read_text())
+    for name in proof['assets'][0]['files_sha256']:
+        assert reads.count((usd.parent/name).resolve())==1
+    assert 'CACHE_VALIDATE_PROGRESS 1 / 1' in capsys.readouterr().out
+
+
+def test_selected_validation_does_not_parse_unselected_urdfs(tmp_path,monkeypatch):
+    import hybrid_assets
+    root,cache,bank,usd=make_cache(tmp_path)
+    data=json.loads(bank.read_text())
+    data['designs'].append(dict(id='unused',urdf=str(tmp_path/'must-not-open.urdf'),urdf_sha256='unused'))
+    bank.write_text(json.dumps(data))
+    proof=json.loads((cache/'completed.json').read_text())
+    proof['bank_sha256']=sha(bank)
+    proof['assets'].append(dict(design='unused'))
+    (cache/'completed.json').write_text(json.dumps(proof))
+    validate_cache(cache,bank,['one'])
+
+
+@pytest.mark.parametrize('mismatch',[False,True])
+def test_fresh_coordinator_reports_finalize_without_second_asset_read(tmp_path,monkeypatch,mismatch):
+    import hybrid_native_cache as native
+    root=tmp_path/'run';root.mkdir();(root/'attempts').mkdir()
+    bank=tmp_path/'bank.json';bank.write_text(json.dumps({'designs':[{'id':'one'}]}))
+    def child(command,folder,environment):
+        cache=Path(command[command.index('--cache-root')+1]);cache.mkdir()
+        result=Path(command[command.index('--output-dir')+1]);result.mkdir(parents=True)
+        proof=dict(result='NATIVE_ASSET_CACHE_COMPLETE',cache_schema_version=2,bank_sha256=sha(bank),assets=[{'design':'one'}])
+        (cache/'completed.json').write_text(json.dumps(proof))
+        if mismatch:proof=dict(proof,bank_sha256='wrong')
+        (result/'summary.json').write_text(json.dumps(proof))
+    monkeypatch.setattr(native,'validate_cache',lambda *a:pytest.fail('must not reread just-verified USD'))
+    if mismatch:
+        with pytest.raises(ValueError,match='reports disagree'):ensure_cache(root,bank,'python','',{},child)
+    else:assert (ensure_cache(root,bank,'python','',{},child)/'completed.json').is_file()

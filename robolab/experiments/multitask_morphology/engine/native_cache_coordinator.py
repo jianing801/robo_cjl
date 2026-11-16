@@ -19,7 +19,7 @@ def reuse_verified_batches(roots,bank,bank_sha,cache):
     from hybrid_assets import validate_asset,mesh_sources
     expected={d['id']:d for d in bank['designs']};rows={}
     for root in roots:
-        for proof_path in sorted([*Path(root).glob('batch_*/summary.json'), *Path(root).glob('batch_*/assets/*.json')]):
+        for proof_path in [*sorted(Path(root).glob('batch_*/summary.json')), *sorted(Path(root).glob('batch_*/assets/*.json'))]:
             print('CACHE_REUSE_PROOF',str(proof_path),flush=True)
             proof=json.loads(proof_path.read_text(encoding='utf8'))
             if proof.get('result')!='NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version')!=2 or proof.get('bank_sha256')!=bank_sha:continue
