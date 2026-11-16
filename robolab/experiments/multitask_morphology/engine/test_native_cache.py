@@ -322,3 +322,31 @@ def test_fresh_coordinator_reports_finalize_without_second_asset_read(tmp_path,m
     if mismatch:
         with pytest.raises(ValueError,match='reports disagree'):ensure_cache(root,bank,'python','',{},child)
     else:assert (ensure_cache(root,bank,'python','',{},child)/'completed.json').is_file()
+
+
+def test_plan_checkpoint_scan_prunes_native_and_proven_conversion_trees(tmp_path,monkeypatch):
+    import refresh_cache_plan as refresh
+    (tmp_path/'native_cache_old/design/configuration').mkdir(parents=True)
+    folder=tmp_path/'attempts/cache_old/train';folder.mkdir(parents=True)
+    (folder/'launch.json').write_text(json.dumps({'command':['python','prepare_native_cache.py']}))
+    (folder/'result/huge_assets').mkdir(parents=True)
+    visited=[]
+    original=refresh.os.scandir
+    def guarded(path):
+        path=Path(path)
+        assert 'native_cache_old' not in path.parts
+        assert 'cache_old' not in path.parts or path==tmp_path/'attempts'
+        visited.append(path)
+        return original(path)
+    monkeypatch.setattr(refresh.os,'scandir',guarded)
+    assert not refresh.checkpoint_evidence(tmp_path)
+    assert tmp_path/'attempts' in visited
+
+
+def test_plan_checkpoint_scan_keeps_unknown_locations_and_attempts(tmp_path):
+    import refresh_cache_plan as refresh
+    p=tmp_path/'attempts/cache_unproven/model.pt';p.parent.mkdir(parents=True);p.write_text('evidence')
+    assert refresh.checkpoint_evidence(tmp_path)
+    p.unlink()
+    q=tmp_path/'unknown_models/model.pt';q.parent.mkdir();q.write_text('evidence')
+    assert refresh.checkpoint_evidence(tmp_path)

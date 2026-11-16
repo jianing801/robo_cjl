@@ -94,3 +94,10 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 入口自动寻找已登记缓存，无需复制USD路径。训练需要空闲12.5GiB；已有完整缓存时，首组60个结构先校验，通过后再申请GPU。AMP训练仍需其参考动作库，USD准备不代替参考动作生成。
 
 完整流程见[跨形态多任务共享策略训练流程](跨形态多任务共享策略训练流程.md)。
+
+
+### 启动训练停在计划检查时
+
+`CACHE_PLAN_CHECK_PPO_EVIDENCE`是在确认尚未开始PPO，随后才能更新转换相关代码身份。检查器排除顶层`native_cache_*`和有明确转换启动记录的`attempts/cache_*`，不为查找模型遍历USD目录。未知目录和未证明为转换任务的尝试仍检查；已存在训练启动或提交记录时继续拒绝修改身份。
+
+`CACHE_PLAN_SCAN_DIRECTORY`显示检查到的目录数和当前路径；`CACHE_PLAN_SKIP_CONVERSION_ATTEMPT`表示跳过已确认的纯转换尝试；`CACHE_PLAN_NO_CHECKPOINTS`表示未发现检查点，随后进入代码身份检查。此步骤不申请GPU，不转换USD。

@@ -7,14 +7,43 @@ from hybrid_native_cache import training_attempt_started
 from hybrid_support import write_new
 
 KNOWN_CONVERTERS = {'prepare_native_cache.py': ['0914a11665f442dc6822cac05b944fc9750d5dbd9231fdca4607f53b41deec8e', '1a7814e36b72064a4130c693885d4fc95ea450fac80cf6d5b392e63132c1da5d', '49bb0275ce660e9bc3d0d61c445c90f6d98d592819019b890d37b290189f2f31', 'b642f6695a8a92ebb7cfcfce418bfefcb842cd51f1cf8ba88928bb305747be9f'], 'native_cache_coordinator.py': ['48682f956f90326b9bee272e6c14767d96735840ab7ce6895dd2f12ce0724029', '86a3acdc5be4b9e6fcb4ba4d2b68140af2401076619a0d62024410a642f9206a', '9da8fa47dbfdc880b427010e4b585d2698cd087613ff0f2abb4fad3baf04e057', 'b6554ba09d3a4b03c307b2fcce120e3036f816c424b5bbf7aa04b2013af4d214']}
-KNOWN_REFRESH_HELPERS = ['9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
+KNOWN_REFRESH_HELPERS = ['4d75c167794e1011b3bd0ba9941cfe83d98cccdf3d220b36f46a76cb543671da', '9d5f2088a3ccfb6e4d47de8b1bbcce9268c02a433724dbb2ee06393c1790854a', '7001575b91e39ed067be8d2624804e01dc23350d713331017c83f12184ea86f3', 'cc5723dc26c1d150e1508885e3c755decb9fa9eafdd9cf47341514150ac09f1e']
 
 KNOWN_IO_SOURCES = {'hybrid_assets.py': 'c9eab750c7a712966572623fd1aa22c29b579f721741f23efa81d979794f0898', 'hybrid_native_cache.py': '03153f0b0e568439f295761903c68e6a1c06201cea5dd97893386d44ad49bad0', 'train.py': '24f2c69b1f41f726cc4fe4726278dfa135d3e94f1f39329f1618bc4c8230760c'}
 
 
+def checkpoint_evidence(root):
+    """转换输出不是PPO；跳过已知缓存树，其他位置仍检查未知检查点。"""
+    root=Path(root)
+    checked=0
+    for directory,dirs,files in os.walk(root,followlinks=False):
+        here=Path(directory)
+        if here==root:
+            dirs[:]=[d for d in dirs if not d.startswith('native_cache_')]
+        if here==root/'attempts':
+            remaining=[]
+            for name in dirs:
+                if name.startswith('cache_'):
+                    launch=here/name/'train/launch.json'
+                    try:
+                        command=json.loads(launch.read_text(encoding='utf8'))['command']
+                        scripts=[Path(a).name for a in command if isinstance(a,str) and a.endswith('.py')]
+                    except (OSError,ValueError,KeyError):scripts=[]
+                    if scripts==['prepare_native_cache.py']:
+                        print('CACHE_PLAN_SKIP_CONVERSION_ATTEMPT',name,flush=True)
+                        continue
+                remaining.append(name)
+            dirs[:]=remaining
+        checked+=1
+        print('CACHE_PLAN_SCAN_DIRECTORY',checked,str(here),flush=True)
+        if any(name.endswith('.pt') for name in files):return True
+    print('CACHE_PLAN_NO_CHECKPOINTS',checked,'directories',flush=True)
+    return False
+
+
 def refreshed_plan(root,plan):
     print('CACHE_PLAN_CHECK_PPO_EVIDENCE',root,flush=True)
-    if training_attempt_started(root) or any((root/'commits').glob('*.json')) or any(root.rglob('*.pt')):
+    if training_attempt_started(root) or any((root/'commits').glob('*.json')) or checkpoint_evidence(root):
         raise RuntimeError('PPO evidence exists: use the original frozen code; plan cannot be refreshed')
     print('CACHE_PLAN_CHECK_SOURCE_IDENTITY',flush=True)
     old=plan['experiment'];new=experiment_identity(plan['bank'],plan['configuration'])
