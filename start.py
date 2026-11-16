@@ -9,6 +9,10 @@ import subprocess
 import sys
 import threading
 import time
+from task_timer import start_task_timer
+
+ENTRY_STARTED_WALL=time.time()
+ENTRY_STARTED_MONOTONIC=time.monotonic()
 
 REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
@@ -210,6 +214,9 @@ def launch_expert(root, task, gpu, preview=False, resume_paused=False, restart_i
     print(('续训目录：' if resume else '新训练目录：')+str(output), flush=True)
     if (output/'USER_PAUSED').exists() and not (preview and resume_paused):
         raise RuntimeError('该任务有用户暂停标记；续训加--resume-paused，首组无断点重开加--restart-initial。')
+    if not preview:
+        target=(read(output/'plan.json')['configuration'] if resume else read(ENTRY/'configs'/f'{task}.json'))['rotation']['total_updates']
+        start_task_timer(root,task,output,target,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
     if resume and task != 'amp':
         # 仅转换阶段允许通过已有审计工具迁移；PPO开始后严格拒绝改身份。
         current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()

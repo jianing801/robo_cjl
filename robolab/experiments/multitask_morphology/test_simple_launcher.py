@@ -296,6 +296,7 @@ def test_initial_restart_refuses_to_discard_learned_state_or_change_settings(tmp
 def test_restart_launch_uses_unified_entry_and_remembers_new_directory(tmp_path,monkeypatch):
     output,cache=restart_fixture(tmp_path,monkeypatch)
     monkeypatch.setattr(launcher.sys,'platform','win32')
+    monkeypatch.setattr(launcher,'start_task_timer',lambda *a,**k:None)
     commands=[]
     def run(command,**kwargs):
         commands.append(command)
