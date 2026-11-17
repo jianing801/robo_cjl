@@ -122,7 +122,7 @@ def load_plan(path,bank_path):
     plan=json.loads(Path(path).read_text(encoding='utf8'))
     bank=load_configurable_bank(bank_path)
     validate_config(plan['configuration'],bank)
-    if plan['experiment']!=experiment_identity(bank_path,plan['configuration']):raise ValueError('bank/config/source identity changed')
+    if not controller_compatible(plan['experiment'],experiment_identity(bank_path,plan['configuration']),Path(path).parent):raise ValueError('bank/config/source identity changed')
     if plan.get('start_stage',0):
         root=Path(path).resolve().parent
         if plan.get('execution_protocol')!='persistent_v1' or type(plan['start_stage']) is not int or plan['start_stage']<1:
@@ -161,3 +161,40 @@ def validate_checkpoint(path,experiment,expected_completed):
     if not isinstance(lr,(float,int)) or not math.isfinite(lr) or lr<=0:raise ValueError('invalid learning rate')
     if not isinstance(state.get('torch_rng_state'),torch.Tensor) or not isinstance(state.get('cuda_rng_states'),list):raise ValueError('RNG state missing')
     return state
+
+
+# BEGIN_CONTROLLER_COMPATIBILITY
+
+def controller_compatible(recorded,current,root):
+    """仅接受已审阅的跨任务进程检查修复；旧模型身份完整保留。"""
+    if recorded==current:return True
+    import hashlib
+    a=dict(recorded);b=dict(current)
+    before=dict(a.pop('hybrid_sources'));after=dict(b.pop('hybrid_sources'))
+    if a!=b:return False
+    expected={'train.py':'33e38a4c10a79c8f50fd62c975f2a54572c7c719bb31b9331fa83421ddfbd7c3',
+              'hybrid_contract.py':'4a86085ab8a5800ee838966e7126f1910ad3882a4c0f79e7a2fab42cc2006ccd'}
+    # 还原这两项明确替换后必须逐字节等于旧版；不放宽任何其他源码。
+    train=(HERE/'train.py').read_text(encoding='utf8')
+    old_guard="if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')"
+    new_guard="if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args) and (str(bank_path) in args or str(root) in args or not any(flag in args for flag in ('--bank','--root','--hybrid-plan'))):raise RuntimeError(f'orphan/active same-bank or unknown hybrid worker {proc.pid}; inspect first')"
+    if train.count(new_guard)!=1:return False
+    restored_train=train.replace(new_guard,old_guard)
+    contract=(HERE/'hybrid_contract.py').read_text(encoding='utf8')
+    marker='\n\n# BEGIN_'+'CONTROLLER_COMPATIBILITY'
+    contract=contract[:contract.index(marker)]
+    restored_contract=contract.replace("if not controller_compatible(plan['experiment'],experiment_identity(bank_path,plan['configuration']),Path(path).parent):raise ValueError('bank/config/source identity changed')","if plan['experiment']!=experiment_identity(bank_path,plan['configuration']):raise ValueError('bank/config/source identity changed')")
+    for name,text in [('train.py',restored_train),('hybrid_contract.py',restored_contract)]:
+        digest=hashlib.sha256(text.encode('utf8')).hexdigest()
+        if digest!=expected[name] or before.get(name)!=digest:return False
+        before.pop(name);after.pop(name,None)
+    if before!=after:return False
+    audit=Path(root)/'controller_scope_compatibility.json'
+    value=dict(reason='same-bank worker guard only; frozen checkpoint identity retained',
+               original_sources=expected,actual_sources={k:current['hybrid_sources'][k] for k in expected})
+    if audit.exists():
+        if json.loads(audit.read_text(encoding='utf8'))!=value:return False
+    else:
+        from hybrid_support import write_new
+        write_new(audit,value)
+    return True

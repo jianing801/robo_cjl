@@ -147,7 +147,7 @@ def main(argv=None):
         import psutil
         for proc in psutil.process_iter(['cmdline']):
             args=proc.info['cmdline'] or []
-            if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')
+            if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args) and (str(bank_path) in args or str(root) in args or not any(flag in args for flag in ('--bank','--root','--hybrid-plan'))):raise RuntimeError(f'orphan/active same-bank or unknown hybrid worker {proc.pid}; inspect first')
         # 先检查首组缓存，完成后才申请GPU；不让磁盘扫描占着训练卡。
         if plan.get('execution_protocol')=='persistent_v1' and config.get('full_body_torque'):
             from hybrid_native_cache import validate_training_cache

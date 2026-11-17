@@ -221,8 +221,13 @@ def launch_expert(root, task, gpu, preview=False, resume_paused=False, restart_i
         # 仅转换阶段允许通过已有审计工具迁移；PPO开始后严格拒绝改身份。
         current = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in (ENTRY/'engine').glob('*.py') if not p.name.startswith('test_')}
-        if read(output/'plan.json')['experiment']['hybrid_sources'] != current:
-            run([sys.executable, ENTRY/'engine/refresh_cache_plan.py', '--root', output], preview=preview)
+        recorded=read(output/'plan.json')['experiment']
+        if recorded['hybrid_sources'] != current:
+            sys.path.insert(0,str(ENTRY/'engine'))
+            from hybrid_contract import controller_compatible
+            compatible=controller_compatible(recorded,dict(recorded,hybrid_sources=current),output)
+            if not compatible:
+                run([sys.executable, ENTRY/'engine/refresh_cache_plan.py', '--root', output], preview=preview)
     command = expert_command(root, task, gpu, output, resume)
     if cache_override is not None and '--asset-cache' not in command:
         command+=['--asset-cache',cache_override]
