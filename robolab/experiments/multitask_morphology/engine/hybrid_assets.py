@@ -16,7 +16,7 @@ def progress(phase,done,total):
         print(phase,done,'/',total,flush=True)
         _progress_times[key]=now
 
-def mesh_sources(bank,report=True):
+def _mesh_sources_deep(bank,report=True):
     paths=set()
     report=report and len(bank['designs'])>1
     if report:progress('CACHE_URDF_PROGRESS',0,len(bank['designs']))
@@ -84,3 +84,45 @@ def validate_asset_resume(row):
     with temporary.open('x',encoding='utf8') as stream:
         json.dump(binding,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
     os.replace(temporary,receipt)
+
+
+# BEGIN_TRAINING_MESH_CACHE
+
+_training_mesh_cache={}
+
+def mesh_sources(bank,report=True,*,use_cache=False):
+    """训练进程内复用源校验；独立USD准备和手动深检默认仍完整读取。"""
+    if not use_cache:return _mesh_sources_deep(bank,report)
+    import stat
+    key=tuple(str(d['urdf']) for d in bank['designs'])
+    def signatures(paths):
+        result={}
+        for name in paths:
+            path=Path(name);value=path.stat()
+            if not stat.S_ISREG(value.st_mode):raise ValueError('source is not a regular file: '+name)
+            result[name]=(value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_dev,value.st_ino)
+        return result
+    previous=_training_mesh_cache.get(key)
+    if previous is not None:
+        value,stamps=previous
+        if signatures(stamps)==stamps:
+            if report:progress('TRAIN_SOURCE_CACHE_HIT',len(key),len(key))
+            return dict(value)
+        _training_mesh_cache.pop(key,None)
+    # 冷启动先发现依赖并取元数据，再完整哈希，最后确认读取期间没有变化。
+    sources=set(key)
+    for name in key:
+        urdf=Path(name).resolve()
+        for mesh in ET.parse(urdf).findall('.//mesh'):
+            filename=mesh.get('filename','')
+            if filename.startswith('file://'):filename=filename[7:]
+            if not filename or '://' in filename:raise ValueError('source mesh is not local')
+            path=Path(filename)
+            sources.add(str((path if path.is_absolute() else urdf.parent/path).resolve()))
+    before=signatures(sources)
+    value=_mesh_sources_deep(bank,report)
+    after=signatures(sources)
+    if before!=after:raise ValueError('source changed during training cache verification')
+    if len(_training_mesh_cache)>=8:_training_mesh_cache.pop(next(iter(_training_mesh_cache)))
+    _training_mesh_cache[key]=(dict(value),after)
+    return value

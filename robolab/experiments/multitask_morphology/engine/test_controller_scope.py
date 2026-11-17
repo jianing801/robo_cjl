@@ -8,14 +8,14 @@ import hybrid_contract as contract
 def identities():
     current={'bank':'same','hybrid_sources':{p.name:contract.sha(p) for p in contract.HERE.glob('*.py') if not p.name.startswith('test_')}}
     old=dict(current,hybrid_sources=dict(current['hybrid_sources']))
-    old['hybrid_sources'].update({'train.py':'33e38a4c10a79c8f50fd62c975f2a54572c7c719bb31b9331fa83421ddfbd7c3','hybrid_contract.py':'4a86085ab8a5800ee838966e7126f1910ad3882a4c0f79e7a2fab42cc2006ccd'})
+    old['hybrid_sources'].update({'hybrid_assets.py':'63a9c3f657b5a089477aed55074c0b284f0634337ea19eebc7ae9e8cc3df81b0','train.py':'33e38a4c10a79c8f50fd62c975f2a54572c7c719bb31b9331fa83421ddfbd7c3','hybrid_contract.py':'4a86085ab8a5800ee838966e7126f1910ad3882a4c0f79e7a2fab42cc2006ccd'})
     return old,current
 
 
 def test_old_checkpoint_identity_accepted_without_rebinding(tmp_path):
     old,current=identities()
     assert contract.controller_compatible(old,current,tmp_path)
-    assert (tmp_path/'controller_scope_compatibility.json').exists()
+    assert (tmp_path/'training_source_cache_compatibility.json').exists()
     assert contract.controller_compatible(old,current,tmp_path)
     assert old!=current
 
@@ -38,3 +38,9 @@ def test_worker_guard_allows_other_bank_but_rejects_same_and_unknown():
     env=dict(Path=Path,bank_path=PurePosixPath('/rough/bank.json'),root=PurePosixPath('/rough/run'))
     for args,blocked in [(['python','persistent_worker.py','--bank','/backpack/bank.json','--root','/backpack/run'],False),(['python','persistent_worker.py','--bank','/rough/bank.json'],True),(['python','persistent_worker.py'],True)]:
         assert bool(eval(expr,dict(env,args=args)))==blocked
+
+
+def test_previous_controller_commit_accepted_without_checkpoint_rebinding(tmp_path):
+    old,current=identities()
+    old['hybrid_sources'].update({'train.py':'e0c542265065b39aded6d51ca7865eba8eb1ada1eee91fc6311ba7cc16bfe623','hybrid_contract.py':'f503055ab9a74e4c90eabf4660db51ac9fcedb656dc3b28b327b544fa850a113'})
+    assert contract.controller_compatible(old,current,tmp_path)

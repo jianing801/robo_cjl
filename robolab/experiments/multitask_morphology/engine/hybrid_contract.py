@@ -114,7 +114,7 @@ def experiment_identity(bank_path,config):
         from full_body_torque import source_identity as torque_identity
         result['full_body_sources']=torque_identity()
         from hybrid_assets import mesh_sources
-        result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')))
+        result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')),use_cache=True)
     return result
 
 def load_plan(path,bank_path):
@@ -173,8 +173,10 @@ def controller_compatible(recorded,current,root):
     before=dict(a.pop('hybrid_sources'));after=dict(b.pop('hybrid_sources'))
     if a!=b:return False
     expected={'train.py':'33e38a4c10a79c8f50fd62c975f2a54572c7c719bb31b9331fa83421ddfbd7c3',
-              'hybrid_contract.py':'4a86085ab8a5800ee838966e7126f1910ad3882a4c0f79e7a2fab42cc2006ccd'}
-    # 还原这两项明确替换后必须逐字节等于旧版；不放宽任何其他源码。
+              'hybrid_contract.py':'4a86085ab8a5800ee838966e7126f1910ad3882a4c0f79e7a2fab42cc2006ccd',
+              'hybrid_assets.py':'82a28ec1eb686d14dc677ef50262d89b2837004464fafec37b010f6287106543'}
+    allowed_previous={'train.py': 'e0c542265065b39aded6d51ca7865eba8eb1ada1eee91fc6311ba7cc16bfe623', 'hybrid_contract.py': 'f503055ab9a74e4c90eabf4660db51ac9fcedb656dc3b28b327b544fa850a113', 'hybrid_assets.py': '63a9c3f657b5a089477aed55074c0b284f0634337ea19eebc7ae9e8cc3df81b0'}
+    # 还原审阅替换后须符合原源码SHA；只接受已知旧版或上版控制器。
     train=(HERE/'train.py').read_text(encoding='utf8')
     old_guard="if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args):raise RuntimeError(f'orphan/active hybrid worker {proc.pid}; inspect first')"
     new_guard="if any(Path(x).name in ('train_stage.py','persistent_worker.py','probe_persistent.py') for x in args) and (str(bank_path) in args or str(root) in args or not any(flag in args for flag in ('--bank','--root','--hybrid-plan'))):raise RuntimeError(f'orphan/active same-bank or unknown hybrid worker {proc.pid}; inspect first')"
@@ -184,13 +186,17 @@ def controller_compatible(recorded,current,root):
     marker='\n\n# BEGIN_'+'CONTROLLER_COMPATIBILITY'
     contract=contract[:contract.index(marker)]
     restored_contract=contract.replace("if not controller_compatible(plan['experiment'],experiment_identity(bank_path,plan['configuration']),Path(path).parent):raise ValueError('bank/config/source identity changed')","if plan['experiment']!=experiment_identity(bank_path,plan['configuration']):raise ValueError('bank/config/source identity changed')")
-    for name,text in [('train.py',restored_train),('hybrid_contract.py',restored_contract)]:
+    restored_contract=restored_contract.replace("result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')),use_cache=True)","result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')))")
+    assets=(HERE/'hybrid_assets.py').read_text(encoding='utf8')
+    marker_assets='\n\n# BEGIN_'+'TRAINING_MESH_CACHE'
+    restored_assets=assets[:assets.index(marker_assets)].replace('def _mesh_sources_deep(bank,report=True):','def mesh_sources(bank,report=True):',1)
+    for name,text in [('train.py',restored_train),('hybrid_contract.py',restored_contract),('hybrid_assets.py',restored_assets)]:
         digest=hashlib.sha256(text.encode('utf8')).hexdigest()
-        if digest!=expected[name] or before.get(name)!=digest:return False
+        if digest!=expected[name] or before.get(name) not in (digest,allowed_previous[name]):return False
         before.pop(name);after.pop(name,None)
     if before!=after:return False
-    audit=Path(root)/'controller_scope_compatibility.json'
-    value=dict(reason='same-bank worker guard only; frozen checkpoint identity retained',
+    audit=Path(root)/'training_source_cache_compatibility.json'
+    value=dict(reason='reviewed controller scope and metadata source-cache optimization; frozen checkpoint identity retained',
                original_sources=expected,actual_sources={k:current['hybrid_sources'][k] for k in expected})
     if audit.exists():
         if json.loads(audit.read_text(encoding='utf8'))!=value:return False
