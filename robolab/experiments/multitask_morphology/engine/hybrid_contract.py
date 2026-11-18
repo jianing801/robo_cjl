@@ -21,7 +21,7 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint','full_body_torque','group_schedule'}:
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','torque_soft_constraint','full_body_torque','group_schedule','context_schema'}:
         raise ValueError('expected grid, rotation and optional torque_soft_constraint')
     if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
     if config.get('full_body_torque') and config.get('torque_soft_constraint') not in (None,{'weight':0,'limit_ratio':.8}):raise ValueError('full-body and six-joint penalties cannot both be active')
@@ -33,6 +33,8 @@ def validate_config(config, bank):
     for key in ('active_designs','updates_per_stage','total_updates'):positive(r[key],'rotation.'+key)
     if type(r['seed']) is not int:raise ValueError('rotation.seed must be integer')
     if g!=bank['configuration']:raise ValueError('grid differs from frozen full bank; generate a matching independent bank')
+    from robolab.morphology_context import validate_context_config
+    validate_context_config(config, bank)
     designs=[d for d in bank['designs'] if d['split']=='train']
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
@@ -187,6 +189,12 @@ def controller_compatible(recorded,current,root):
     contract=contract[:contract.index(marker)]
     restored_contract=contract.replace("if not controller_compatible(plan['experiment'],experiment_identity(bank_path,plan['configuration']),Path(path).parent):raise ValueError('bank/config/source identity changed')","if plan['experiment']!=experiment_identity(bank_path,plan['configuration']):raise ValueError('bank/config/source identity changed')")
     restored_contract=restored_contract.replace("result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')),use_cache=True)","result['mesh_sources']=mesh_sources(json.loads(Path(bank_path).read_text(encoding='utf8')))")
+    # This schema guard is a no-op for the legacy banks covered by the original audit.
+    restored_contract=restored_contract.replace("'full_body_torque','group_schedule','context_schema'}",
+                                                 "'full_body_torque','group_schedule'}",1)
+    restored_contract=restored_contract.replace(
+        "    from robolab.morphology_context import validate_context_config\n"
+        "    validate_context_config(config, bank)\n","",1)
     assets=(HERE/'hybrid_assets.py').read_text(encoding='utf8')
     marker_assets='\n\n# BEGIN_'+'TRAINING_MESH_CACHE'
     restored_assets=assets[:assets.index(marker_assets)].replace('def _mesh_sources_deep(bank,report=True):','def mesh_sources(bank,report=True):',1)

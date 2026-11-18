@@ -1,4 +1,5 @@
 {
+  "context_schema": "leg_motor_inertia_v1",
   "grid": {
     "num_envs": 4096,
     "length_count": 10,
@@ -11,7 +12,7 @@
       0.45
     ],
     "knee_motor_count": 5,
-    "ankle_motor_count": 6,
+    "ankle_motor_count": 5,
     "motor_seed": 42,
     "knee_pool": [
       "RS04",
@@ -25,20 +26,19 @@
       "DM-J4340P-2EC",
       "DM-J8009P-2EC-V1.1",
       "DM-J4340P-2EC-V1.1-48V",
-      "DM-J8006-2EC-V1.1",
       "DM-J6216P-2EC"
     ],
     "gp_extrapolation": true
   },
   "rotation": {
-    "active_designs": 60,
+    "active_designs": 50,
     "updates_per_stage": 50,
     "total_updates": 5000,
     "seed": 42
   },
   "full_body_torque": true,
   "group_schedule": {
-    "path": "experiments/multitask_morphology/scheduling/formal_schedule.json",
-    "sha256": "e577c3c71564bec49340c01edbeac78b21ffea471c1a4147a7d97f89f1469f64"
+    "path": "experiments/multitask_morphology/scheduling/formal_schedule_2500.json",
+    "sha256": "e91b628f5a5dfb448cf8fb025616900c61fdc8420ae31e27acebac186a531d1b"
   }
 }

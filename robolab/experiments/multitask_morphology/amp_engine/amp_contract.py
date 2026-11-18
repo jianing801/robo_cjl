@@ -21,7 +21,7 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque','group_schedule'}:raise ValueError('expected grid, rotation and optional full_body_torque/group_schedule')
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque','group_schedule','context_schema'}:raise ValueError('expected grid, rotation and recognized optional settings')
     if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
     g,r=config['grid'],config['rotation']
     if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
@@ -29,6 +29,8 @@ def validate_config(config, bank):
     for key in ('active_designs','updates_per_stage','total_updates'):positive(r[key],'rotation.'+key)
     if type(r['seed']) is not int:raise ValueError('rotation.seed must be integer')
     if g!=bank['configuration']:raise ValueError('grid differs from frozen full bank; generate a matching independent bank')
+    from robolab.morphology_context import validate_context_config
+    validate_context_config(config, bank)
     designs=[d for d in bank['designs'] if d['split']=='train']
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:

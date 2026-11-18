@@ -10,9 +10,32 @@
 git -C /data/chenjiale/robo_cjl pull --ff-only origin main
 ```
 
-下面命令已经包含环境和完整路径，不需要设置ENTRY、ROOT，也不需要先切换目录。前提是三个任务结构库已生成；你已完成这一步。
+下面命令已包含环境和完整路径。全新生成和一次性迁移使用不同的入口和实验目录。
 
-## 2. 选一种启动方式
+| 方式 | 第一次运行 | 默认输出目录 |
+|---|---|---|
+| 从头生成 | `start.py 资产 --gpu 5` | `robolab/logs/multitask_full2500_physical_v1/` |
+| 一次性迁移 | `start.py 迁移 --gpu 5` | `robolab/logs/multitask_full2500_physical_migrated_v1/` |
+
+## 一次性迁移
+
+```bash
+conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.py 迁移 --gpu 5
+```
+
+默认从旧的 3000 结构实验迁移，也可以用 `--source-root` 指定同规格旧目录。程序筛出 2500 个保留结构，重新计算 28 维输入，并把对应 URDF、报告、可用 USD 和匹配的 AMP 参考动作放进新的迁移目录。
+
+同盘的完整 USD 层优先使用硬链接，删除旧目录的文件名后，新文件仍有效。跨盘会实际复制。程序核验 USD 内部引用和新目录的实际覆盖，只在缺少有效可迁移 USD 时启动转换器。若旧 AMP 参考尚未完成，可用迁移的新结构库单独生成。
+
+**等到 `MIGRATION_READY` 再清理旧目录。** 该标志表示完成了三个任务的 2500 个资产和旧路径依赖检查。迁移命令保留旧目录。中断后重复原命令，人工暂停后加 `--resume-paused`。
+
+在迁移目录启动训练时加 `--migrated`。例如用 3 号卡跑 Rough。
+
+```bash
+conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.py rough --migrated --gpu 3
+```
+
+## 从头生成
 
 ### 一张卡依次完成三个任务
 
@@ -42,18 +65,21 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.py 资产 --任务 amp --gpu 1
 ```
 
-不同任务可以在不同终端、不同GPU上并行。不要同时运行“全部任务”和其中一个单独任务，也不要重复启动同一任务。编号与nvidia-smi一致，0表示第一张卡。每张卡转换启动门槛为空闲4GiB，不是峰值显存保证；并行仍可能争用/data存储。
+新版结构库准备好后，不同任务可以在不同终端、不同 GPU 上并行。首次准备且打算分卡转换时，可先运行 `conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.py 准备`，等 `THREE_TASK_BANKS_VALIDATED` 再分别启动。每个任务只启动一个转换进程。编号与 nvidia-smi 一致，转换启动门槛为空闲 4 GiB。
 
 ## 3. 看懂进度和完成标志
 
 | 输出 | 正在做什么 |
 |---|---|
+| MORPHOLOGY_SUBSET_SELECTED rough 2500 / 3000 | 从已有结构库筛出保留的结构 |
+| PORTABLE_USD_IMPORTED | 一次性迁入新目录的数量和需补转换的数量 |
 | USD_EXISTING_CACHE_CHECK_BEFORE_GPU | 发现完整缓存，先用CPU校验，不申请GPU |
 | CACHE_VALIDATE_SOURCE_MESHES | 本次要检查的结构数量 |
-| CACHE_URDF_PROGRESS / CACHE_MESH_PROGRESS | 结构源文件与网格依赖检查进度，如60 / 60 |
-| CACHE_VALIDATE_PROGRESS 12 / 3000 | 本次完整缓存检查已有12个结构通过 |
+| CACHE_URDF_PROGRESS / CACHE_MESH_PROGRESS | 结构源文件与网格依赖检查进度，如50 / 50 |
+| CACHE_VALIDATE_PROGRESS 12 / 2500 | 本次完整缓存检查已有12个结构通过 |
 | CACHE_VALIDATE_WAIT | 每10秒提示校验尚未结束；阶段及已完成数见最近进度 |
-| CACHE_REUSE_PROGRESS 2026 / 3000 | 已从历史尝试校验并复用2026个结构，不是重新转换 |
+| CACHE_REUSE_PROGRESS 2026 / 2500 | 已从历史尝试校验并复用2026个结构，不是重新转换 |
+| MIGRATION_READY | 已完成自包含迁移及三个任务的依赖核验 |
 | CACHE_SESSION_START | 启动原生转换子进程，处理仍缺失的结构 |
 | NATIVE_CACHE_PROGRESS | 已接受的总资产数，可能包含复用项 |
 | CACHE_HEARTBEAT | 每10秒报告运行状态及最近阶段/进度，不再输出打开文件路径 |
@@ -61,7 +87,7 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 | USD_ASSETS_READY rough / backpack / amp | 对应任务已完成缓存登记 |
 | USD_ASSETS_ALL_SELECTED_READY | 此次选定的任务全部完成 |
 
-**等到USD_ASSETS_READY及正常结束才算该任务完成。** 单独的CACHE_CHILD_EXIT、returncode=0或3000/3000不是外层登记完成标志。全库检查仍可能受存储影响，但本次转换完成后不再在外层重复全量读USD。完成标志不代表步态或训练验证成功。
+**等到USD_ASSETS_READY及正常结束才算该任务完成。** 单独的CACHE_CHILD_EXIT、returncode=0或2500/2500不是外层登记完成标志。全库检查仍可能受存储影响，但本次转换完成后不再在外层重复全量读USD。完成标志不代表步态或训练验证成功。
 
 ## 4. 暂停与继续
 
@@ -91,7 +117,7 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.py rough --gpu 3
 ```
 
-入口自动寻找已登记缓存，无需复制USD路径。训练需要空闲12.5GiB；已有完整缓存时，首组60个结构先校验，通过后再申请GPU。AMP训练仍需其参考动作库，USD准备不代替参考动作生成。
+入口自动寻找已登记缓存，无需复制USD路径。训练需要空闲12.5GiB；已有完整缓存时，首组50个结构先校验，通过后再申请GPU。AMP训练仍需其参考动作库，USD准备不代替参考动作生成。
 
 完整流程见[跨形态多任务共享策略训练流程](跨形态多任务共享策略训练流程.md)。
 
@@ -111,12 +137,12 @@ conda run --no-capture-output -n robo_cjl python /data/chenjiale/robo_cjl/start.
 
 ```text
 CACHE_PHASE CHECKING_PPO_EVIDENCE
-CACHE_URDF_PROGRESS 0 / 60
-CACHE_URDF_PROGRESS 30 / 60
-CACHE_URDF_PROGRESS 60 / 60
+CACHE_URDF_PROGRESS 0 / 50
+CACHE_URDF_PROGRESS 30 / 50
+CACHE_URDF_PROGRESS 50 / 50
 CACHE_MESH_PROGRESS 24 / 24
-CACHE_VALIDATE_PROGRESS 30 / 60
-CACHE_VALIDATE_PROGRESS 60 / 60
+CACHE_VALIDATE_PROGRESS 30 / 50
+CACHE_VALIDATE_PROGRESS 50 / 50
 ```
 
 

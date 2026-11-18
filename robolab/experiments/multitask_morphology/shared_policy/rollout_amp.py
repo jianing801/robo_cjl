@@ -25,6 +25,7 @@ def main():
     p.add_argument('--ppo-channel')
     p.add_argument('--full-body-torque',action='store_true')
     p.add_argument('--video',action='store_true')
+    p.add_argument('--bo-conditions', help='Collect independent fixed-condition BO measurements')
     AppLauncher.add_app_launcher_args(p);a=p.parse_args()
     if a.video:a.enable_cameras=True
     if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
@@ -53,7 +54,12 @@ def main():
         write_new(out/'importer_audit.json',rough_module('hybrid_importer').install_local_importer_adapter())
         bank=load_configurable_bank(spec['bank']);ids=a.design_ids.split(',')
         if len(ids)!=len(set(ids)) or not set(ids)<=set(spec['design_ids']):raise ValueError('Unknown or duplicate AMP design')
-        by_id={d['id']:d for d in bank['designs']};designs=[by_id[i] for i in ids];n=len(ids)*spec['copies']
+        from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
+        bo_conditions = parse_conditions(a, ids)
+        if bo_conditions:
+            a.speed = bo_conditions['tasks']['run']['speed_mps']
+        copies_count = bo_conditions['copies'] if bo_conditions else spec['copies']
+        by_id={d['id']:d for d in bank['designs']};designs=[by_id[i] for i in ids];n=len(ids)*copies_count
         if sha(spec['reference_library'])!=spec['reference_library_sha256']:raise ValueError('Reference manifest changed')
         library=validate_library(bank,spec['bank'],spec['reference_library'],ids)
         options=SimpleNamespace(num_envs=n,device=a.device,asset_cache=None,allow_cache_misses=True,
@@ -61,6 +67,8 @@ def main():
         cfg,agent,source_contract=configure_spatial(options,bank,designs,out,configurator=configure_amp)
         cfg,randomization_audit=configure_profile(cfg,'run',profile=a.profile,strength=a.randomization_strength,
             seed=a.seed,reset_yaw_range=a.reset_yaw_range,speed=a.speed)
+        if bo_conditions:
+            configure_conditions(cfg, 'run', bo_conditions, a.seed, randomization_audit)
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=a.reset_yaw_range,speed_command=a.speed))
         write_new(out/'randomization_audit.json',randomization_audit)
         expected_terms=['base_ang_vel','projected_gravity','velocity_commands','joint_pos','joint_vel','actions']
@@ -74,7 +82,9 @@ def main():
             raise ValueError('Cannot override frozen teacher physics')
         cache=reuse_assets(cfg,spec['asset_cache'],out,'run',designs);write_new(out/'asset_cache_audit.json',cache)
         if a.video:cfg.viewer.resolution=(960,540)
-        raw=SpatialAmpEnv(cfg,render_mode='rgb_array' if a.video else None)
+        class CaptureAmp(CaptureReset, SpatialAmpEnv):
+            pass
+        raw=CaptureAmp(cfg,render_mode='rgb_array' if a.video else None)
         class SamplingVecEnv(SpatialVecEnv):
             def step(self,actions):
                 obs,rewards,dones,extras=RslRlVecEnvWrapper.step(self,actions)
@@ -129,7 +139,8 @@ def main():
             from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
             from scenario_sampling import scenario_table
             obs=env.get_observations();groups=torch.arange(n,device=raw.device)%len(ids)
-            copies=torch.arange(n,device=raw.device)//len(ids);validation=copies==spec['copies']-1
+            copies=torch.arange(n,device=raw.device)//len(ids);validation=copies==copies_count-1
+            bo = TrialCapture(raw, 'run', bo_conditions, a.seed, motor_records(raw, bank, designs[0])) if bo_conditions else None
             static=torch.tensor([[v for row in graph_features(d['urdf'],names,q0) for v in row]+
                 unified_context(bank,d,plan['schema']) for d in designs],device=raw.device)
             io=dict(joint_names=names,default_joint_pos=q0,action_scale=.25,step_dt=.02,
@@ -144,6 +155,9 @@ def main():
                 strength=a.randomization_strength,seed=a.seed+700001);reset=None
             episodes=EpisodeTracker(n,raw.device);tracking=TrackingError(n,raw.device)
             scenarios=scenario_table('run',n,ids,profile=a.profile)
+            if bo_conditions:
+                for scenario in scenarios:
+                    scenario['fixed_bo_conditions'] = bo_conditions['tasks']['run']
             write_new(out/'scenarios.json',scenarios)
             data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation',
                 'scenario_bin','episode_id','actual_command')}
@@ -196,6 +210,8 @@ def main():
                 if not torch.isfinite(action).all():raise ValueError('Nonfinite AMP executed action')
                 action=action.clamp(-STUDENT_ACTION_CLIP,STUDENT_ACTION_CLIP)
                 before=raw.robot.data.root_pos_w.clone();obs,reward,done,extra=env.step(action)
+                if bo:
+                    bo.capture(command, done)
                 if recorder:recorder.capture(step,done)
                 delta=raw.robot.data.root_pos_w-before;active=alive&~done.bool()
                 tracking.update(command[:,0],raw.robot.data.root_lin_vel_b[:,0],active,
@@ -204,6 +220,8 @@ def main():
                 fell|=alive&raw.reset_terminated.bool();alive&=~done.bool();reset=done.bool()
                 episodes.advance(done.bool())
                 if step%100==0:print('AMP_ROLLOUT',step,'/',a.steps,'designs',len(ids),'student',bool(student),flush=True)
+                if bo and not bo.active.any():
+                    break
             if recorder:recorder.close()
             if any(not torch.equal(normalization_before[k],v) for k,v in teacher.actor_obs_normalizer.state_dict().items()):
                 raise ValueError('Frozen AMP actor normalizer changed')
@@ -225,6 +243,10 @@ def main():
                     reference_library_sha256=spec['reference_library_sha256'],history_adapter_live_verified=True,
                     native_boundaries=native_boundaries,scenarios=scenarios,run_arguments=vars(a))
                 with (out/'data.pt').open('xb') as stream:torch.save(value,stream)
+            if bo:
+                bo.publish(out, dict(design_id=ids[0], bank_sha256=spec['bank_sha256'],
+                    actor_sha256=sha(a.student) if a.student else spec['checkpoint_sha256'],
+                    plan_sha256=sha(a.plan)))
             write_new(out/'summary.json',dict(result='REAL_AMP_ROLLOUT_COMPLETE',task='run',rows=rows,design_ids=ids,
                 teacher=spec['checkpoint_sha256'],student=sha(a.student) if a.student else None,
                 steps=a.steps,seed=a.seed,**metadata,

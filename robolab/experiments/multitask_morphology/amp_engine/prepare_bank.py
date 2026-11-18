@@ -13,6 +13,7 @@ def main():
     from robolab.physical_snapshot import DEFAULT_ROOT, physical_model, generator
     from robolab.rough_geometry import file_sha, audit_candidate_urdf, neutral_foot_compensation
     from robolab.gp_extrapolation import get_generator,authorization_audit,design_extrapolation
+    from robolab.morphology_context import SCHEMA, WIDTH, bind_physical_context, validate_context_config
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default=str(Path(__file__).with_name("config.template.json")))
     p.add_argument("--task-key", choices=["run"], default="run")
@@ -23,10 +24,15 @@ def main():
     p.add_argument("--rough-bank", help="Reuse the exact existing Rough assets/context; write only a new AMP task manifest")
     p.add_argument("--generate-assets", action="store_true")
     a = p.parse_args()
-    config = json.loads(Path(a.config).read_text(encoding="utf8"))
-    config = config.get("grid", config)
+    settings = json.loads(Path(a.config).read_text(encoding="utf8"))
+    config = settings.get("grid", settings)
+    schema = settings.get("context_schema")
+    if schema not in (None, SCHEMA):
+        p.error("unsupported context schema")
     pools, excluded = eligible_pools(DEFAULT_ROOT)
     grid = select_grid(config, pools["knee"], pools["ankle"])
+    if schema is not None:
+        grid.update(context_schema=schema, context_width=WIDTH)
     print(json.dumps(dict(configuration=config, eligible_motor_pools=pools, excluded=excluded,
                          **{k: v for k, v in grid.items() if k != "designs"}), indent=2), flush=True)
     if not a.generate_assets:
@@ -35,6 +41,7 @@ def main():
         if not a.output_dir or a.template or a.mesh_dir:
             p.error('--rough-bank requires a NEW --output-dir; do not also supply template/mesh-dir')
         from amp_rough_alignment import adopt_rough_bank
+        validate_context_config(settings, json.loads(Path(a.rough_bank).read_text(encoding="utf8")))
         bank = adopt_rough_bank(a.rough_bank, config)
         out = Path(a.output_dir).resolve()
         out.mkdir(parents=True, exist_ok=False)
@@ -80,10 +87,11 @@ def main():
             contract["default_joint_pos"], max_height_shift_m=.31)
         row.update(pair_id=pair, urdf=str(urdf), urdf_sha256=file_sha(urdf), report=str(report),
             report_sha256=file_sha(report), graph=graph,
-            context=context(row, physical, grid["knees"], grid["ankles"], ranges),
             root_height_compensation_m=placement["root_height_compensation_m"],
             total_mass_kg=audit["total_mass_kg"]["candidate"],
             visuals_are_original_meshes_not_parameterized_CAD=True)
+        if schema is None:
+            row["context"] = context(row, physical, grid["knees"], grid["ankles"], ranges)
         if config.get('gp_extrapolation'):row['gp_extrapolation']=design_extrapolation(gen,physical,row)
         print(f"Generated {index+1}/{len(rows)}: {row['id']}", flush=True)
     training = dict(recipe=RECIPE, authorized_tasks=[a.task_key], source_hashes=source_identity(a.task_key),
@@ -96,6 +104,8 @@ def main():
         reference_contract_source=str(contract_path), reference_contract_sha256=file_sha(contract_path),
         canonical_semantic_contract=contract, training=training,
         no_implicit_holdout_or_update_budget=True)
+    if schema is not None:
+        bind_physical_context(bank)
     write_new(out/"bank.json", bank)
     load_configurable_bank(out/"bank.json")
     print("VALIDATED", out/"bank.json", file_sha(out/"bank.json"), flush=True)

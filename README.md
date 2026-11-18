@@ -2,7 +2,7 @@
 
 本仓库用于RPO双足机器人的结构、执行器和控制联合优化，包含Rough、负重、AMP三个跨形态专家，以及三教师蒸馏得到共享策略的流程。
 
-当前正式设置为3000种结构、4096个环境，每组60种结构、每50次PPO更新换组。正式代码集中在 `robolab/experiments/multitask_morphology/`，根目录 `start.py` 为统一启动入口，默认发布分支为 `main`。
+当前正式设置为2500种结构、4096个环境，每组50种结构、每50次PPO更新换组。正式代码集中在 `robolab/experiments/multitask_morphology/`，根目录 `start.py` 为统一启动入口，默认发布分支为 `main`。
 
 从[文档索引](docs/README.md)进入：
 

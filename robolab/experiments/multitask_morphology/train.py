@@ -13,6 +13,11 @@ def command(task, config, bank, arguments):
     value = json.loads(Path(bank).read_text(encoding='utf8'))
     if value.get('task_key') != TASKS[task]:
         raise ValueError('Task and bank identity differ')
+    settings = json.loads(Path(config).read_text(encoding='utf8'))
+    if value.get('configuration') != settings['grid']:
+        raise ValueError('Training configuration and bank grid differ; prepare the matching bank')
+    if value.get('context_schema') != settings.get('context_schema'):
+        raise ValueError('Training configuration and bank context schema differ; prepare the matching bank')
     engine = HERE / ('amp_engine' if task == 'amp' else 'engine')
     return [sys.executable, '-u', str(engine / 'train.py'), '--config', str(config),
             '--bank', str(Path(bank).resolve()), *arguments]

@@ -34,12 +34,24 @@ def schema_for(banks):
     tasks=[t for t in (*TASKS,'run') if t in banks]
     if len(tasks)!=len(banks):raise ValueError('Unknown teacher task')
     kind='rough_backpack_amp_intersection_v3' if 'run' in tasks else 'rough_backpack_intersection_mxt_v2'
-    return dict(kind=kind,tasks=tasks,
+    schema = dict(kind=kind,tasks=tasks,
         knees=sorted(knees),ankles=sorted(ankles),
         semantic_contract=first,ranges_m=banks['stairs']['ranges_m'],history_width=780,
         history_layout='frame_major_oldest_to_newest',action_scale=.25,step_dt=.02,
         physical_context='known legs, exact motor IDs and physical descriptors; no measured payload in actor',
         fixed_backpack='task indicates independent pack body; 0.3kg template is not runtime load')
+    fields = ('context_schema', 'context_fields', 'context_normalization')
+    for field in fields:
+        if any(b.get(field) != banks['stairs'].get(field) for b in banks.values()):
+            raise ValueError(f'Teacher shape description differs: {field}')
+    if banks['stairs'].get('context_schema') is not None:
+        from robolab.morphology_context import SCHEMA, WIDTH, FIELDS
+        if any(b.get('context_schema') != SCHEMA or b.get('context_width') != WIDTH
+               or b.get('context_fields') != list(FIELDS) for b in banks.values()):
+            raise ValueError('Invalid physical context contract')
+        schema.update({field: banks['stairs'][field] for field in fields})
+        schema.update(context_width=WIDTH, physical_context='known leg and actuator physical parameters')
+    return schema
 
 
 def unified_context(bank,design,schema):
@@ -48,6 +60,12 @@ def unified_context(bank,design,schema):
     if 'shared_structure_keys' in schema and list(structure_key(design)) not in schema['shared_structure_keys']:
         raise ValueError('Design is outside the shared structure intersection')
     original=design['context']
+    if bank.get('context_schema') != schema.get('context_schema'):
+        raise ValueError('Native and shared context schemas differ')
+    if schema.get('context_schema') is not None:
+        if len(original) != schema['context_width'] or not all(math.isfinite(v) for v in original):
+            raise ValueError('Invalid native physical context')
+        return original.copy()
     nk,na=len(bank['knees']),len(bank['ankles'])
     if len(original)!=18+nk+na:raise ValueError('Native context width mismatch')
     expected=[float(design['knee_motor']==m) for m in bank['knees']]
@@ -96,7 +114,9 @@ def graph_features(path,names,q0):
     return features
 
 
-def input_width(schema):return HISTORY_WIDTH+len(schema['tasks'])+STATIC_WIDTH+18+len(schema['knees'])+len(schema['ankles'])
+def input_width(schema):
+    context_width = schema.get('context_width', 18+len(schema['knees'])+len(schema['ankles']))
+    return HISTORY_WIDTH + len(schema['tasks']) + STATIC_WIDTH + context_width
 
 
 def structure_key(design):

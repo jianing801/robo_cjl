@@ -80,4 +80,5 @@ def test_full_pool_configs_share_exact_grid_and_disable_old_penalty():
         assert cfg['full_body_torque'] is True and 'torque_soft_constraint' not in cfg
         grid=cfg['grid'];assert not any('4310' in m for m in grid['ankle_pool'])
         selected=select_grid(grid,grid['knee_pool'],grid['ankle_pool'])
-        assert selected['design_count']==3000 and selected['num_envs']==4096
+        assert selected['design_count']==2500 and selected['num_envs']==4096
+        assert selected['context_width']==28

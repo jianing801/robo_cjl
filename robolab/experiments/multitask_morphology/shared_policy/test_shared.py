@@ -35,6 +35,27 @@ def test_intersection_motor_ids_not_aliases_and_native_context_unchanged():
     with pytest.raises(ValueError,match='intersection'):unified_context(b['backpack'],row,s)
 
 
+def test_three_teacher_physical_context_keeps_order_and_rejects_legacy_width():
+    from robolab.morphology_context import FIELDS, SCHEMA, WIDTH
+
+    native = banks()['stairs']
+    old = dict(native, knees=['K1', 'K2', 'K3', 'K4', 'K5'],
+               ankles=['A1', 'A2', 'A3', 'A4', 'RS06'])
+    current = dict(old, context_schema=SCHEMA, context_fields=list(FIELDS),
+                   context_width=WIDTH, context_normalization={'kind': 'training_bank_minmax_v1'})
+    teachers = {task: deepcopy(current) for task in ('stairs', 'backpack', 'run')}
+    schema = schema_for(teachers)
+    row = dict(knee_motor='K1', ankle_motor='RS06', context=[i / WIDTH for i in range(WIDTH)])
+    assert input_width(schema) == 1161
+    for bank in teachers.values():
+        assert unified_context(bank, row, schema) == row['context']
+    with pytest.raises(ValueError, match='schemas differ'):
+        unified_context(old, row, schema)
+    teachers['run'] = old
+    with pytest.raises(ValueError, match='shape description differs'):
+        schema_for(teachers)
+
+
 def test_pairing_uses_actual_leg_motor_tuple_not_names_or_motor_family():
     b=banks()
     def row(t,c,k,a,name):return dict(thigh_m=t,calf_m=c,knee_motor=k,ankle_motor=a,id=name)

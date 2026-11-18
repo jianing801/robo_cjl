@@ -11,9 +11,11 @@ spec.loader.exec_module(launcher)
 
 
 def banks(root):
-    for task in ('rough','backpack','amp'):
+    for task, key in {'rough':'stairs', 'backpack':'backpack', 'amp':'run'}.items():
         path = launcher.bank_path(root, task); path.parent.mkdir(parents=True)
-        path.write_text(json.dumps({'task_key': task}))
+        settings = launcher.read(launcher.ENTRY/'configs'/f'{task}.json')
+        path.write_text(json.dumps({'task_key': key, 'configuration': settings['grid'],
+                                    'context_schema': settings['context_schema']}))
 
 
 def plan(root, name):
@@ -68,6 +70,45 @@ def test_preview_does_not_create_output_or_launch_record(tmp_path,capsys):
     launcher.main(['rough','--root',str(tmp_path),'--gpu','0','--dry-run'])
     assert not (tmp_path/'experts').exists() and not (tmp_path/'启动记录').exists()
     assert '--device cuda:0' in capsys.readouterr().out
+
+
+def test_fresh_and_migration_actions_are_independent(tmp_path, monkeypatch):
+    old, fresh, migrated = (tmp_path/name for name in ('old', 'fresh', 'migrated'))
+    banks(old)
+    monkeypatch.setattr(launcher,'REPO',tmp_path)
+    monkeypatch.setattr(launcher,'DEFAULT_ROOT',fresh)
+    monkeypatch.setattr(launcher,'MIGRATED_ROOT',migrated)
+    monkeypatch.setattr(launcher,'PREVIOUS_FULL_ROOT',old)
+    raw = tmp_path/'robolab/data/robots/roboparty/rpo'
+    (raw/'urdf').mkdir(parents=True)
+    (raw/'meshes').mkdir()
+    (raw/'urdf/rpo.urdf').touch()
+    seen = []
+
+    def run(command, **_):
+        args = list(map(str,command))
+        seen.append(args)
+        if '--reuse-banks-from' in args:
+            banks(migrated)
+            (migrated/'bank_audit.json').touch()
+        elif 'import' in args:
+            task = args[args.index('--task')+1]
+            cache = migrated/'资产准备'/task/'native_cache_portable'
+            cache.mkdir(parents=True)
+            (cache/'completed.json').write_text('{}')
+
+    monkeypatch.setattr(launcher,'run',run)
+    launcher.main(['准备','--dry-run'])
+    assert '--template' in seen[0] and '--reuse-banks-from' not in seen[0]
+    assert str(fresh) in seen[0] and not migrated.exists()
+    monkeypatch.setattr(launcher,'prepare_task_assets',
+                        lambda *_:pytest.fail('Complete import must not start conversion'))
+    launcher.main(['迁移'])
+    assert '--reuse-banks-from' in seen[1]
+    assert [c[3] for c in seen[2:]] == ['import','import','import','verify']
+    assert (migrated/'migration_completed.json').is_file()
+    assert not (migrated/'migration_in_progress.json').exists()
+    assert old.exists() and not fresh.exists()
 
 
 def test_pause_marker_is_not_removed(tmp_path):

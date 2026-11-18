@@ -58,6 +58,7 @@ def main():
     p.add_argument('--ppo-channel')
     p.add_argument('--full-body-torque',action='store_true')
     p.add_argument('--video',action='store_true')
+    p.add_argument('--bo-conditions', help='Collect independent fixed-condition BO measurements')
     p.add_argument('--payload-kg',type=float,default=None,help='Explicit fixed backpack mass for evaluation')
     p.add_argument('--trace-stride',type=int,default=0,help='Optional diagnostic snapshots; 0 disables, does not affect actions')
     p.add_argument('--reset-yaw-range',type=float,default=.05,
@@ -112,6 +113,12 @@ def main():
         selected=args.design_ids.split(',')
         if len(set(selected))!=len(selected) or not set(selected)<=set(spec['design_ids']):raise ValueError('Unknown/duplicate selected design')
         designs=[by_id[k] for k in selected];count=len(designs);copies=spec['copies']
+        from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
+        bo_conditions=parse_conditions(args, selected)
+        if bo_conditions:
+            copies=bo_conditions['copies']
+            if args.task=='backpack':
+                args.payload_kg=bo_conditions['tasks']['backpack']['payload_kg']
         paired_stairs=args.task=='stairs' and args.profile=='robust' and args.mode=='collect' and not args.ppo_channel
         if args.task=='stairs' and args.profile=='robust':copies=max(copies,12 if paired_stairs else 6)
         n=count*copies
@@ -124,8 +131,10 @@ def main():
         cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
             strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
         cfg.capture_terminal_state=True
-        if args.task=='stairs':
+        if args.task=='stairs' and not bo_conditions:
             randomization_audit['stairs']=configure_stairs(cfg,profile=args.profile,seed=args.seed)
+        if bo_conditions:
+            configure_conditions(cfg, args.task, bo_conditions, args.seed, randomization_audit)
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=args.reset_yaw_range))
         write_new(output/'randomization_audit.json',randomization_audit)
         cfg.sim.render_interval=1000000
@@ -135,7 +144,7 @@ def main():
             raise ValueError('Cannot override frozen teacher physics')
         cache=reuse_assets(cfg,cache_roots,output,args.task,designs)
         write_new(output/'asset_cache_audit.json',cache)
-        class Capture(Env):
+        class Capture(CaptureReset, Env):
             def update_terrain_levels(self,env_ids):return {}
         if args.video:cfg.viewer.resolution=(960,540)
         raw=Capture(cfg,render_mode='rgb_array' if args.video else None)
@@ -207,10 +216,18 @@ def main():
             terrain_indices=raw.scene.terrain.terrain_types if args.task=='stairs' else None
             scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
                 profile=args.profile,properties=properties)
+            if bo_conditions:
+                fixed = bo_conditions['tasks'][args.task]
+                for scenario in scenarios:
+                    scenario['fixed_bo_conditions'] = fixed
+                    if args.task == 'stairs':
+                        scenario.update(step_height_m=fixed['step_height_m'], step_width_m=fixed['step_depth_m'])
             write_new(output/'scenarios.json',scenarios)
             condition_bins=(terrain_indices.to(raw.device) if args.task=='stairs' else
                 payload_bins(raw.robot.backpack_mass_kg))
             obs=env.get_observations()
+            bo = TrialCapture(raw, args.task, bo_conditions, args.seed, motor_records(raw, bank, designs[0]),
+                              properties) if bo_conditions else None
             if args.mode=='evaluate':
                 with (output/'initial_state.pt').open('xb') as stream:
                     torch.save(dict(root_pos_w=raw.robot.data.root_pos_w.cpu().clone(),
@@ -290,6 +307,8 @@ def main():
                 action=action.clamp(-action_clip,action_clip)
                 before=raw.robot.data.root_pos_w.clone()
                 obs,rewards,dones,extras=env.step(action)
+                if bo:
+                    bo.capture(command, dones)
                 after=raw.robot.data.root_pos_w.clone()
                 if recorder:recorder.capture(step,dones)
                 # Terminal resets may move roots; exclude that step's displacement.
@@ -303,6 +322,8 @@ def main():
                 fell |= alive&raw.reset_terminated.bool()
                 alive &= ~dones.bool()
                 if step%100==0:print('ROLLOUT',args.task,step,'/',args.steps,'designs',count,'student',bool(student),flush=True)
+                if bo and not bo.active.any():
+                    break
             rows=[]
             if recorder:recorder.close()
             tracking_rows=tracking.rows()
@@ -332,6 +353,10 @@ def main():
                     torch.save(dict(design_ids=selected,groups=groups.cpu(),trace=trace,
                         student_sha256=sha(args.student) if args.student else None,
                         teacher_sha256=spec['checkpoint_sha256'],step_dt=raw.step_dt),stream)
+            if bo:
+                bo.publish(output, dict(design_id=selected[0], bank_sha256=spec['bank_sha256'],
+                    actor_sha256=sha(args.student) if args.student else spec['checkpoint_sha256'],
+                    plan_sha256=sha(args.plan)))
             write_new(output/'summary.json',dict(result='REAL_ROLLOUT_COMPLETE',task=args.task,design_ids=selected,
                 teacher=spec['checkpoint_sha256'],student=sha(args.student) if args.student else None,
                 teacher_updates=0,steps=args.steps,seed=args.seed,

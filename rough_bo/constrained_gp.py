@@ -68,10 +68,11 @@ def key(params):
 
 
 class ConstrainedSurrogate:
-    def __init__(self, ranges, knees, ankles, *, seed=42, optimize=True):
+    def __init__(self, ranges, knees, ankles, *, seed=42, optimize=True, objective_key="mae"):
         self.ranges = ranges
         self.knees, self.ankles = list(knees), list(ankles)
         self.seed, self.optimize = int(seed), optimize
+        self.objective_key = objective_key
         self.regressor = self.classifier = None
 
     def encode(self, params):
@@ -108,22 +109,26 @@ class ConstrainedSurrogate:
             raise ValueError("feasibility labels must be booleans")
         self.feasible_count = int(labels.sum())
         self.feasibility_count = len(labels)
+        legacy = self.objective_key == "mae"
+        performance = np.array([o["feasible"] and (legacy or o.get(self.objective_key) is not None)
+                                for o in observations])
+        self.performance_count = int(performance.sum())
         self.regressor = self.classifier = None
         self.best = None
         self.fit_warnings = []
         optimizer = "fmin_l_bfgs_b" if self.optimize else None
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ConvergenceWarning)
-            if self.feasible_count:
-                y = np.array([o["mae"] for o in observations if o["feasible"]], dtype=float)
-                if not np.isfinite(y).all() or (y < 0).any():
-                    raise ValueError("successful observations require finite nonnegative MAE")
+            if self.performance_count:
+                y = np.array([o[self.objective_key] for o, include in zip(observations, performance) if include], dtype=float)
+                if not np.isfinite(y).all() or (legacy and (y < 0).any()):
+                    raise ValueError("successful performance observations require a finite objective")
                 self.best = float(y.min())
                 self.regressor = GaussianProcessRegressor(
                     kernel=ConstantKernel(1.0, (0.05, 20.0)) * MixedKernel()
                            + WhiteKernel(1e-3, (1e-6, 0.2)),
                     normalize_y=True, alpha=1e-8, optimizer=optimizer, random_state=self.seed)
-                self.regressor.fit(self.X[labels], y)
+                self.regressor.fit(self.X[performance], y)
             if 0 < self.feasible_count < len(labels):
                 self.classifier = GaussianProcessClassifier(
                     kernel=ConstantKernel(2.0, (0.1, 30.0)) * MixedKernel(),

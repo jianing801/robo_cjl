@@ -22,14 +22,26 @@ def module(path):
     ('rough','stairs','engine'), ('backpack','backpack','engine'), ('amp','run','amp_engine')])
 def test_task_routes_to_owned_runtime_and_rejects_wrong_bank(tmp_path, task, key, folder):
     entry = module(HERE/'train.py')
+    config = HERE/'configs'/f'{task}.json'
+    settings = json.loads(config.read_text(encoding='utf8'))
+    grid = settings['grid']
     bank = tmp_path/'bank.json'
-    bank.write_text(json.dumps({'task_key': key}))
-    cmd = entry.command(task, HERE/'configs'/f'{task}.json', bank, ['--execute'])
+    bank.write_text(json.dumps({'task_key': key, 'configuration': grid, 'context_width': 28}))
+    with pytest.raises(ValueError, match='context schema differ'):
+        entry.command(task, config, bank, [])
+    schema = settings['context_schema']
+    bank.write_text(json.dumps({'task_key': key, 'configuration': grid, 'context_schema': schema}))
+    cmd = entry.command(task, config, bank, ['--execute'])
     assert Path(cmd[2]) == HERE/folder/'train.py'
     assert cmd[-1] == '--execute'
-    bank.write_text(json.dumps({'task_key': 'wrong'}))
+    bank.write_text(json.dumps({'task_key': 'wrong', 'configuration': grid}))
     with pytest.raises(ValueError):
-        entry.command(task, HERE/'configs'/f'{task}.json', bank, [])
+        entry.command(task, config, bank, [])
+    grid['ankle_pool'].append('DM-J8006-2EC-V1.1')
+    grid['ankle_motor_count'] = 6
+    bank.write_text(json.dumps({'task_key': key, 'configuration': grid}))
+    with pytest.raises(ValueError, match='bank grid differ'):
+        entry.command(task, config, bank, [])
 
 
 def test_owned_source_roots_and_full_motor_curves():

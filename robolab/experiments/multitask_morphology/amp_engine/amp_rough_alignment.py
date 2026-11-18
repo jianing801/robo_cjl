@@ -45,6 +45,9 @@ def validate_alignment(amp, rough, rough_path):
     for name in SHARED_FIELDS:
         if amp[name] != rough[name]:
             raise ValueError('AMP/Rough morphology differs: '+name)
+    for name in ('schema_version', 'context_schema', 'context_fields', 'context_normalization'):
+        if amp.get(name) != rough.get(name):
+            raise ValueError('AMP/Rough context differs: '+name)
     return dict(verified=True, designs=len(rough['designs']),
         context_width=rough['context_width'], assets_reused_without_conversion=True,
         rough_bank_sha256=binding['rough_bank_sha256'])

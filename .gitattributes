@@ -15,6 +15,7 @@ robolab/experiments/multitask_morphology/amp_engine/vendor/** -text
 
 # Training configuration pins the exact frozen schedule bytes on every platform.
 robolab/experiments/multitask_morphology/scheduling/formal_schedule.json text eol=lf
+robolab/experiments/multitask_morphology/scheduling/formal_schedule_2500.json text eol=lf
 
 # Historical launchers retain their original Git bytes and archived SHA256.
 legacy/flat_co_design_2026/** -text

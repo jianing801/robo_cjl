@@ -18,7 +18,9 @@ def test_all_three_configs_have_identical_complete_pools():
     configs=[json.loads((here/'configs'/f'{task}.json').read_text())
              for task in ('rough','amp','backpack')]
     assert all(c['grid']==configs[0]['grid'] and c['full_body_torque'] for c in configs)
-    assert configs[2]['grid']['knee_motor_count']==5 and configs[2]['grid']['ankle_motor_count']==6
+    assert configs[2]['grid']['knee_motor_count']==5 and configs[2]['grid']['ankle_motor_count']==5
+    assert set(configs[2]['grid']['ankle_pool'])=={
+        'RS06','DM-J4340P-2EC','DM-J4340P-2EC-V1.1-48V','DM-J6216P-2EC','DM-J8009P-2EC-V1.1'}
 
 def test_attachment_reuses_base_without_mutation(tmp_path,monkeypatch):
     import hybrid_backpack_bank as module

@@ -21,9 +21,9 @@ from audit import audit
 
 
 def construct(bank, seed):
-    """Each group: every pair twice and every leg-axis level six times.
+    """Each group contains every motor pair twice and balances both leg axes.
 
-    Pair p belongs to one of six blocks of five pairs. Within each block,
+    Pair p belongs to a block of five pairs. Within each block,
     a[p] and z[p] are permutations of 0..4. For group (r,d):
     t=(r+a[p]) mod 5; c=(t+d+z[p]-a[p]) mod 10.
     Use both (t,c) and (t+5,(c+5) mod 10).
@@ -32,13 +32,14 @@ def construct(bank, seed):
     rng=np.random.default_rng(seed)
     rows=bank['designs'];ts=sorted({d['thigh_m'] for d in rows});cs=sorted({d['calf_m'] for d in rows})
     pairs=sorted({(d['knee_motor'],d['ankle_motor']) for d in rows})
-    if len(ts)!=10 or len(cs)!=10 or len(pairs)!=30 or len(rows)!=3000:
-        raise ValueError('This construction is specific to the complete 10x10x5x6 grid')
-    pairs=[pairs[i] for i in rng.permutation(30)]
+    pair_count=len(pairs)
+    if len(ts)!=10 or len(cs)!=10 or not pair_count or pair_count%5 or len(rows)!=100*pair_count:
+        raise ValueError('Expected a complete 10x10 grid with motor pairs in blocks of five')
+    pairs=[pairs[i] for i in rng.permutation(pair_count)]
     lookup={(ts.index(x['thigh_m']),cs.index(x['calf_m']),x['knee_motor'],x['ankle_motor']):x['id'] for x in rows}
-    if len(lookup)!=3000:raise ValueError('Not an exact full grid')
-    a=np.concatenate([rng.permutation(5) for _ in range(6)])
-    z=np.concatenate([rng.permutation(5) for _ in range(6)])
+    if len(lookup)!=len(rows):raise ValueError('Not an exact full grid')
+    a=np.concatenate([rng.permutation(5) for _ in range(pair_count//5)])
+    z=np.concatenate([rng.permutation(5) for _ in range(pair_count//5)])
     groups=[]
     for r in range(5):
         for d in range(10):
@@ -53,7 +54,7 @@ def construct(bank, seed):
 def features(groups, bank):
     rows={d['id']:d for d in bank['designs']}
     motors=[(field,m) for field in ('knee_motor','ankle_motor') for m in sorted({d[field] for d in rows.values()})]
-    out=np.zeros((50,len(motors)*9))
+    out=np.zeros((len(groups),len(motors)*9))
     for g,ids in enumerate(groups):
         for j,(field,motor) in enumerate(motors):
             selected=[rows[i] for i in ids if rows[i][field]==motor]
@@ -70,7 +71,7 @@ def objective(x):
     score=0.
     for width in (1,5,10):
         means=sum(np.roll(x,-i,axis=0) for i in range(width))/width
-        error=(means-x.mean(axis=0)).reshape(50,11,9)
+        error=(means-x.mean(axis=0)).reshape(len(x),-1,9)
         tv=np.abs(error).sum(axis=-1)/2
         # Average + worst-window term. Width weights fixed before experiments.
         score+=float((tv**2).mean()+.25*tv.max()**2)
@@ -79,10 +80,10 @@ def objective(x):
 
 def optimize(groups, bank, seed, iterations):
     rng=np.random.default_rng(seed);x=features(groups,bank)
-    order=np.arange(50);current=objective(x);best=current;best_order=order.copy()
+    order=np.arange(len(groups));current=objective(x);best=current;best_order=order.copy()
     accepted=0;trace=[]
     for i in range(iterations):
-        a,b=rng.choice(50,2,replace=False)
+        a,b=rng.choice(len(groups),2,replace=False)
         x[[a,b]]=x[[b,a]];trial=objective(x)
         temperature=.003*(.000001/.003)**(i/max(iterations-1,1))
         if trial<=current or rng.random()<math.exp(min(0.,(current-trial)/temperature)):
@@ -105,7 +106,9 @@ def main():
     if out.exists():raise ValueError('Use a NEW output; no overwrite')
     if args.candidates<1 or args.iterations<1:raise ValueError('Positive bounded search required')
     config=json.loads(Path(args.config).read_text(encoding='utf8'));grid=config['grid']
-    if config['rotation']['active_designs']!=60:raise ValueError('Expected 60 designs/group')
+    capacity=config['rotation']['active_designs']
+    if capacity!=2*grid['knee_motor_count']*grid['ankle_motor_count']:
+        raise ValueError('Expected two designs per motor pair in each group')
     selected=select_grid(grid,grid['knee_pool'],grid['ankle_pool'])
     bank=dict(designs=selected['designs'],ranges_m={'thigh':grid['thigh_range_m'],'calf':grid['calf_range_m']})
     out.mkdir(parents=True,exist_ok=False)
@@ -121,7 +124,8 @@ def main():
         final,search=optimize(initial,bank,seed,args.iterations)
         reports={name:audit(groups,bank) for name,groups in [('baseline',baseline),('constructed',initial),('optimized',final)]}
         for key in ('pair_count_range','thigh_count_range','calf_count_range'):
-            assert reports['optimized'][key]==([2,2] if key=='pair_count_range' else [6,6])
+            count=2 if key=='pair_count_range' else capacity//grid['length_count']
+            assert reports['optimized'][key]==[count,count]
         bundle=dict(seed=seed,candidates=args.candidates,search=search,metrics=reports,
             seconds=time.monotonic()-started)
         (out/f'audit_seed_{seed}.json').write_text(json.dumps(bundle,indent=2),encoding='utf8')

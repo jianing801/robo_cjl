@@ -23,11 +23,11 @@ def test_all_pairs_and_both_leg_axes_are_exactly_balanced(seed):
     assert len(groups)==50
     assert Counter(i for g in groups for i in g)==Counter(rows.keys())
     for g in groups:
-        assert len(g)==60
+        assert len(g)==50
         assert set(Counter((rows[i]['knee_motor'],rows[i]['ankle_motor']) for i in g).values())=={2}
         for axis in ('thigh_m','calf_m'):
             counts=Counter(rows[i][axis] for i in g)
-            assert len(counts)==10 and set(counts.values())=={6}
+            assert len(counts)==10 and set(counts.values())=={5}
 
 
 def test_reproducibility_and_independent_rejection():

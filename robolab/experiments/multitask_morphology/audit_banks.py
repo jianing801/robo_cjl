@@ -17,8 +17,14 @@ def audit(rough_path,amp_path,backpack_path):
     if [b['task_key'] for b in (rough,amp,pack)]!=['stairs','run','backpack']:raise ValueError('task identity mismatch')
     for field in ('configuration','knees','ankles','context_width','ranges_m','motor_pairs','canonical_semantic_contract'):
         if not rough[field]==amp[field]==pack[field]:raise ValueError('different morphology field: '+field)
-    if len(rough['knees'])!=5 or len(rough['ankles'])!=6:raise ValueError('expected full 5 by 6 candidate pool')
-    if any('4310' in motor for motor in rough['ankles']):raise ValueError('4310P is excluded')
+    for field in ('schema_version','context_schema','context_fields','context_normalization'):
+        if not rough.get(field)==amp.get(field)==pack.get(field):raise ValueError('different context field: '+field)
+    config=json.loads((Path(__file__).parent/'configs/rough.json').read_text(encoding='utf8'))
+    grid=config['grid']
+    if (rough['configuration']!=grid or set(rough['knees'])!=set(grid['knee_pool'])
+            or set(rough['ankles'])!=set(grid['ankle_pool'])
+            or rough.get('context_schema')!=config.get('context_schema') or rough['context_width']!=28):
+        raise ValueError('three-task audit expects the current formal motor pool and context')
     if rough['configuration'].get('gp_extrapolation'):
         if not rough['training']['gp_extrapolation']==amp['training'].get('gp_extrapolation')==pack['training'].get('gp_extrapolation'):
             raise ValueError('different GP extrapolation authorization')
@@ -40,12 +46,18 @@ def audit(rough_path,amp_path,backpack_path):
             raise ValueError('different physical base identity')
         if base_elements(r['urdf'])!=base_elements(p['urdf']):raise ValueError('backpack altered base robot')
         if ET.parse(p['urdf']).find("link[@name='backpack_link']") is None:raise ValueError('missing backpack')
+    length_count=grid['length_count']**2
+    motor_count=grid['knee_motor_count']*grid['ankle_motor_count']
+    if (len(seen)!=length_count*motor_count or len(pairs)!=motor_count or set(pairs.values())!={length_count}
+            or len(lengths)!=length_count or set(lengths.values())!={motor_count}):
+        raise ValueError('incomplete motor and leg-length coverage')
     return dict(result='THREE_TASK_COMMON_MORPHOLOGY_VERIFIED',designs=len(seen),
         ranges_m=rough['ranges_m'],gp_extrapolation_authorized=rough['configuration'].get('gp_extrapolation',False),
         designs_outside_registered_gp_range=sum(any(x['outside_registered_prediction_range'] for x in d.get('gp_extrapolation',{}).values()) for d in rows[0]),
         knees=sorted({k for k,a in pairs}),ankles=sorted({a for k,a in pairs}),motor_pairs=len(pairs),
         designs_per_motor_pair=sorted(set(pairs.values())),length_pairs=len(lengths),
         designs_per_length_pair=sorted(set(lengths.values())),context_width=rough['context_width'],
+        context_schema=rough.get('context_schema'),
         all_actual_urdf_hashes_verified=True,backpack_base_elements_identical=True,
         bank_sha256={b['task_key']:sha(p) for b,p in zip((rough,amp,pack),paths)})
 

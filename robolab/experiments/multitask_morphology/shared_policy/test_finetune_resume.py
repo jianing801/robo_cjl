@@ -65,12 +65,12 @@ def batches_for(model):
                  next_obs=x[-1])] * 3
 
 
-def test_candidate_maps_formal_3000_grid_exactly(tmp_path, monkeypatch):
+def test_candidate_maps_formal_2500_grid_exactly(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(joint.HERE.parent/'engine'))
     from hybrid_bank import select_grid
-    grid = select_grid(dict(num_envs=4096,length_count=10,thigh_range_m=[.2,.4],calf_range_m=[.25,.45],
-        knee_motor_count=5,ankle_motor_count=6,motor_seed=42),[f'K{i}' for i in range(5)],[f'A{i}' for i in range(6)])
-    assert grid['design_count']==3000
+    config=json.loads((joint.HERE.parent/'configs/rough.json').read_text(encoding='utf8'))['grid']
+    grid=select_grid(config,config['knee_pool'],config['ankle_pool'])
+    assert grid['design_count']==2500 and grid['context_width']==28
     _, plan = fixture_plan(tmp_path, grid['designs'])
     before = deepcopy(plan)
     selected, candidate = select_candidate(plan,design_id='backpack_1234',design_task='backpack')
@@ -79,7 +79,7 @@ def test_candidate_maps_formal_3000_grid_exactly(tmp_path, monkeypatch):
     assert all(s['design_ids']==[f'{t}_1234'] for t,s in selected['teachers'].items())
     assert select_candidate(plan,design_key=candidate['structure_key'])[1]==candidate
     with pytest.raises(ValueError,match='outside'):
-        select_candidate(plan,design_key=[.25,.3,'K0','A0'])
+        select_candidate(plan,design_key=[.25,.3,config['knee_pool'][0],config['ankle_pool'][0]])
     with pytest.raises(ValueError,match='Candidate ID'):
         select_candidate(plan,design_id='missing')
     broken=deepcopy(plan); broken['teachers']['run']['design_ids'].remove('run_1234')

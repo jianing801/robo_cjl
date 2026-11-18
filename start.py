@@ -9,16 +9,20 @@ import subprocess
 import sys
 import threading
 import time
-from task_timer import start_task_timer
+from task_timer import atomic_json, start_task_timer
 
 ENTRY_STARTED_WALL=time.time()
 ENTRY_STARTED_MONOTONIC=time.monotonic()
 
 REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
-DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
+PREVIOUS_PHYSICAL_ROOT = REPO / 'robolab/logs/multitask_full2500_balanced_v1'
+PREVIOUS_FULL_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
+DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_v1'
+MIGRATED_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_migrated_v1'
 ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
-           '蒸馏': 'distill', '微调': 'finetune', '状态': 'status', '录像': 'video', '资产': 'assets'}
+           '蒸馏': 'distill', '微调': 'finetune', '状态': 'status', '录像': 'video',
+           '资产': 'assets', '迁移': 'migrate'}
 
 
 def read(path):
@@ -38,8 +42,15 @@ def bank_path(root, task):
 
 def ensure_banks(root, preview=False):
     # 完整库直接复用；部分生成的目录绝不覆盖或擅自删除。
-    paths = [bank_path(root, t) for t in ('rough', 'backpack', 'amp')]
-    if all(p.is_file() for p in paths):
+    tasks = {'rough': 'stairs', 'backpack': 'backpack', 'amp': 'run'}
+    paths = {task: bank_path(root, task) for task in tasks}
+    if all(p.is_file() for p in paths.values()):
+        for task, path in paths.items():
+            bank = read(path)
+            settings = read(ENTRY/'configs'/f'{task}.json')
+            if (bank.get('task_key') != tasks[task] or bank.get('configuration') != settings['grid']
+                    or bank.get('context_schema') != settings.get('context_schema')):
+                raise ValueError(f'结构库与当前 {task} 电机池或物理输入不匹配：{path}。请使用新的实验目录。')
         print('已找到三个任务的结构库，直接复用。', flush=True)
         return
     if root.exists():
@@ -84,6 +95,28 @@ def select_run(root, task):
     return selected, False
 
 
+def prepared_cache(root, task):
+    index = root/'启动记录'/f'{task}_asset_cache.json'
+    if not index.is_file():
+        return None
+    value = read(index)
+    if value['bank_sha256'] != hashlib.sha256(bank_path(root,task).read_bytes()).hexdigest():
+        raise ValueError('预转换缓存绑定了不同结构库。')
+    proof = Path(value['cache'])/'completed.json'
+    if not proof.is_file() or hashlib.sha256(proof.read_bytes()).hexdigest() != value['completed_sha256']:
+        raise ValueError('预转换缓存完成证明缺失或变化，不能直接用于训练。')
+    return Path(value['cache'])
+
+
+def register_asset_cache(root, task, cache):
+    from hybrid_native_cache import sha
+    folder = root/'启动记录'
+    folder.mkdir(exist_ok=True)
+    atomic_json(folder/f'{task}_asset_cache.json',
+                dict(cache=str(cache.resolve()), bank_sha256=sha(bank_path(root,task)),
+                     completed_sha256=sha(cache/'completed.json')))
+
+
 def expert_command(root, task, gpu, output, resume):
     command = [sys.executable, '-u', str(ENTRY/'train.py'), '--task', task,
                '--bank', str(bank_path(root, task)), '--output-root', str(output),
@@ -97,16 +130,9 @@ def expert_command(root, task, gpu, output, resume):
             library = Path(read(output/'plan.json')['reference_library'])
         command += ['--reference-library', str(library),
                     '--hhtools-env', 'amp_hhtools', '--reference-device', 'cuda']
-    cached = root/'启动记录'/f'{task}_asset_cache.json'
-    if cached.is_file():
-        value = read(cached)
-        # 索引只指向本结构库的完整缓存；实际几何仍由原生worker严格校验。
-        if value['bank_sha256'] != hashlib.sha256(bank_path(root,task).read_bytes()).hexdigest():
-            raise ValueError('预转换缓存绑定了不同结构库。')
-        proof = Path(value['cache'])/'completed.json'
-        if not proof.is_file() or hashlib.sha256(proof.read_bytes()).hexdigest() != value['completed_sha256']:
-            raise ValueError('预转换缓存完成证明缺失或变化，不能直接用于训练。')
-        command += ['--asset-cache', value['cache']]
+    cached = prepared_cache(root, task)
+    if cached is not None:
+        command += ['--asset-cache', str(cached)]
     return command
 
 
@@ -375,13 +401,21 @@ def prepare_task_assets(root, task, gpu, preview=False):
         reject_asset_workers(bank)
         # 已完成缓存只需CPU校验，不先抢占GPU，也不要求当前有空闲卡。
         cache=None
-        for proof in sorted(cache_root.glob('native_cache_*/completed.json'),reverse=True):
-            print('USD_EXISTING_CACHE_CHECK_BEFORE_GPU',task,str(proof.parent),flush=True)
-            try:validate_cache(proof.parent,bank,resume_fast=True)
+        try:
+            indexed = prepared_cache(root, task)
+        except (ValueError, OSError, KeyError) as error:
+            print('USD_EXISTING_CACHE_REJECTED', str(error), flush=True)
+            indexed = None
+        candidates_to_check = [indexed] if indexed is not None else []
+        candidates_to_check.extend(proof.parent for proof in sorted(cache_root.glob('native_cache_*/completed.json'),reverse=True)
+                                   if proof.parent != indexed)
+        for candidate in candidates_to_check:
+            print('USD_EXISTING_CACHE_CHECK_BEFORE_GPU',task,str(candidate),flush=True)
+            try:validate_cache(candidate,bank,resume_fast=True)
             except (ValueError,OSError,KeyError) as error:
                 print('USD_EXISTING_CACHE_REJECTED',str(error),flush=True)
                 continue
-            cache=proof.parent
+            cache=candidate
             break
         if cache is None:
             # 这是转换的启动门槛，不是显存峰值保证；OOM保留日志并停止。
@@ -392,12 +426,7 @@ def prepare_task_assets(root, task, gpu, preview=False):
                 kit = (f" --/renderer/activeGpu={selected['index']}"
                        " --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0")
                 cache = ensure_cache(cache_root, bank, sys.executable, kit, environment, run_cache_child)
-        folder = root/'启动记录'; folder.mkdir(exist_ok=True)
-        record = dict(cache=str(cache.resolve()), bank_sha256=sha(bank),
-                      completed_sha256=sha(cache/'completed.json'))
-        temporary = folder/f'{task}_asset_cache.{os.getpid()}.tmp'
-        temporary.write_text(json.dumps(record,ensure_ascii=False),encoding='utf8')
-        os.replace(temporary,folder/f'{task}_asset_cache.json')
+        register_asset_cache(root, task, cache)
     print('USD_ASSETS_READY',task,cache,flush=True)
 
 
@@ -454,6 +483,82 @@ def prepare_assets(root, task, gpu, preview=False, resume_paused=False):
         if resume_paused:resume_asset_pause(root,current,preview)
         prepare_task_assets(root,current,gpu,preview)
     print('USD_ASSETS_ALL_SELECTED_READY' if not preview else 'USD_ASSETS_PREVIEW_ONLY',flush=True)
+
+
+def migrate_assets(root, source, gpu, preview=False, resume_paused=False):
+    """Build a standalone 5+5 snapshot and complete only missing native assets."""
+    completed = root/'migration_completed.json'
+    if completed.is_file():
+        print('MIGRATION_READY', root, flush=True)
+        return
+    if source is None:
+        source = next((p for p in (PREVIOUS_FULL_ROOT, PREVIOUS_PHYSICAL_ROOT)
+                      if all(bank_path(p,t).is_file() for t in ('rough','backpack','amp'))), PREVIOUS_FULL_ROOT)
+    source = source.resolve()
+    if root == DEFAULT_ROOT or root.is_relative_to(source) or source.is_relative_to(root):
+        raise ValueError('迁移源和目标必须是独立目录。全新生成目录保留给“准备”和“资产”。')
+    state_path = root/'migration_in_progress.json'
+    tasks = ('rough','backpack','amp')
+    sys.path.insert(0,str(ENTRY/'engine'))
+    from hybrid_native_cache import sha
+    identity = dict(source=str(source), source_banks={t:sha(bank_path(source,t)) for t in tasks})
+    bank_command = [sys.executable,'-u',ENTRY/'prepare.py','--output-root',root,
+                    '--reuse-banks-from',source,'--generate-assets']
+    worker = ENTRY/'engine/portable_usd.py'
+    from portable_usd import runtime_environment
+    environment = runtime_environment(os.environ)
+    command = [sys.executable,'-u',worker]
+    arguments = ['--root',root,'--source',source]
+    if preview:
+        if not (root/'bank_audit.json').is_file():
+            run(bank_command,preview=True)
+        for task in tasks:
+            run([*command,'import',*arguments,'--task',task],preview=True)
+        run([*command,'verify',*arguments],preview=True)
+        return
+
+    # Lock adjacent to the target so this cannot be mistaken for a prepared bank.
+    sys.path.insert(0,str(ENTRY/'shared_policy'))
+    from persistence import run_lock
+    with run_lock(root):
+        if completed.is_file():
+            print('MIGRATION_READY',root,flush=True)
+            return
+        if state_path.is_file():
+            state = read(state_path)
+            if state['identity'] != identity:
+                raise ValueError('迁移源路径或结构清单已变化。请恢复原源目录或另选迁移目标。')
+            if state.get('paused') and not resume_paused:
+                raise RuntimeError('迁移有暂停标记，继续时加 --resume-paused。')
+        else:
+            if root.exists():
+                raise FileExistsError(f'迁移目标已存在，请另选独立目录：{root}')
+            root.mkdir(parents=True,exist_ok=False)
+        atomic_json(state_path,dict(identity=identity,paused=False))
+        try:
+            if not (root/'bank_audit.json').is_file():
+                run(bank_command)
+            for task in tasks:
+                if resume_paused:
+                    resume_asset_pause(root,task)
+                if prepared_cache(root,task) is not None:
+                    continue
+                run([*command,'import',*arguments,'--task',task],env=environment)
+                cache = root/'资产准备'/task/'native_cache_portable'
+                if (cache/'completed.json').is_file():
+                    register_asset_cache(root,task,cache)
+                else:
+                    print('MIGRATION_CONVERTING_MISSING',task,flush=True)
+                    prepare_task_assets(root,task,gpu)
+            run([*command,'verify',*arguments],env=environment)
+            atomic_json(completed,dict(result='MIGRATION_READY',root=str(root),
+                bank_sha256={task:sha(bank_path(root,task)) for task in tasks},
+                amp_references_ready=(root/'references/library.json').is_file()))
+            state_path.unlink()
+        except KeyboardInterrupt:
+            atomic_json(state_path,dict(identity=identity,paused=True))
+            raise
+    print('MIGRATION_READY',root,flush=True)
 
 
 def distill(root, gpu, preview=False, collection_profile='robust', randomization_strength=1.,
@@ -558,7 +663,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','rough','负重','amp','蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -568,7 +673,9 @@ def main(argv=None):
     parser.add_argument('--finetune-updates', type=int, default=100)
     parser.add_argument('--finetune-output', type=Path, help='可选：为候选微调指定独立实验目录')
     parser.add_argument('--finetune-evaluation-seeds', default='20261118')
-    parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
+    parser.add_argument('--root', type=Path, help='高级选项：自定义实验根目录')
+    parser.add_argument('--migrated', action='store_true', help='使用默认的独立迁移目录')
+    parser.add_argument('--source-root', type=Path, help='仅用于迁移：指定旧实验目录')
     parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
     parser.add_argument('--resume-paused', action='store_true', help='明确恢复所选任务暂停；无首组断点重开另用--restart-initial')
     parser.add_argument('--restart-initial', action='store_true', help='明确重开无检查点首组，自动复用USD并记住新目录')
@@ -597,15 +704,27 @@ def main(argv=None):
         parser.error('显卡编号不能为负数')
     os.environ.setdefault('PYTHONUTF8', '1')
     os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-    root = args.root.resolve(); action = ALIASES.get(args.操作, args.操作)
+    action = ALIASES.get(args.操作, args.操作)
+    if args.root and args.migrated:
+        parser.error('--root 与 --migrated 只选一个')
+    root = (args.root or (MIGRATED_ROOT if args.migrated or action == 'migrate' else DEFAULT_ROOT)).resolve()
+    if args.source_root is not None and action != 'migrate':
+        parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action not in ('assets','rough','backpack','amp','distill','finetune'):
-        parser.error('--resume-paused仅用于资产准备、专家任务、蒸馏或微调')
+    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','distill','finetune'):
+        parser.error('--resume-paused仅用于迁移、资产准备、专家任务、蒸馏或微调')
     if args.restart_initial and action not in ('rough','backpack','amp'):
         parser.error('--restart-initial仅用于专家任务')
     if args.resume_paused and args.restart_initial:
         parser.error('续训恢复与首组重开不能同时选择')
+    if action == 'migrate':
+        if args.任务:
+            parser.error('一次性迁移包含全部三个任务')
+        migrate_assets(root,args.source_root,args.gpu,args.dry_run,args.resume_paused)
+        return
+    if (args.migrated or (root/'migration_in_progress.json').is_file()) and not (root/'migration_completed.json').is_file():
+        parser.error('该迁移库尚未完成。先运行 start.py 迁移。')
     if action == 'status':
         print('实验目录：', root)
         for task in ('rough','backpack','amp'):

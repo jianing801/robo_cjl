@@ -105,11 +105,15 @@ def context(row, physical, knees, ankles, ranges):
 
 def load_configurable_bank(path):
     from robolab.rough_geometry import file_sha
+    from robolab.morphology_context import validate_physical_context, verified_raw_context
     from hybrid_support import source_identity
     from robolab.physical_snapshot import validate_physical_model
     bank = json.loads(Path(path).read_text(encoding="utf8"))
-    if bank["kind"] != KIND or bank["schema_version"] != 2:
+    if bank["kind"] != KIND or bank["schema_version"] not in (2, 3):
         raise ValueError("wrong configurable bank schema")
+    physical_context = bank["schema_version"] == 3
+    if not physical_context and "context_schema" in bank:
+        raise ValueError("Legacy bank must not advertise a physical context schema")
     from robolab.gp_extrapolation import validate_authorization
     validate_authorization(bank['configuration'],bank['training'])
     pools, excluded = eligible_pools(bank["snapshot_root"])
@@ -117,7 +121,8 @@ def load_configurable_bank(path):
     expected_ranges = dict(thigh=bank["configuration"]["thigh_range_m"], calf=bank["configuration"]["calf_range_m"])
     if bank["ranges_m"] != expected_ranges:
         raise ValueError("range/context scaling differs from configuration")
-    for field in ("num_envs", "knees", "ankles", "context_width"):
+    fields = ("num_envs", "knees", "ankles") if physical_context else ("num_envs", "knees", "ankles", "context_width")
+    for field in fields:
         if bank[field] != grid[field]:
             raise ValueError(f"bank selection changed: {field}")
     task = bank.get("task_key", "stairs")
@@ -135,6 +140,10 @@ def load_configurable_bank(path):
         base=json.loads(Path(binding['bank']).read_text(encoding='utf8'))
         if base.get('task_key','stairs')!='stairs' or base['configuration']!=bank['configuration']:
             raise ValueError('Backpack/Rough grid mismatch')
+        for key in ('schema_version', 'context_schema', 'context_fields', 'context_normalization'):
+            if base.get(key) != bank.get(key):raise ValueError('Backpack/Rough context schema mismatch: '+key)
+        if len(base['designs']) != len(bank['designs']):
+            raise ValueError('Backpack/Rough design count mismatch')
         for actual,original in zip(bank['designs'],base['designs']):
             for key in ('id','thigh_m','calf_m','knee_motor','ankle_motor','context','pair_id','root_height_compensation_m'):
                 if actual[key]!=original[key]:raise ValueError('Backpack/Rough structure mismatch: '+key)
@@ -153,22 +162,31 @@ def load_configurable_bank(path):
         from robolab.physical_snapshot import generator
         gp_gen=generator(bank['snapshot_root'])
     pair_suffixes={}
+    samples = []
     for actual, expected in zip(bank["designs"], grid["designs"]):
         if any(actual[k] != v for k, v in expected.items()):
             raise ValueError("design differs from frozen Cartesian grid")
-        for name in ("urdf", "report"):
-            if file_sha(actual[name]) != actual[name+"_sha256"]:
-                raise ValueError(f"{name} asset changed")
+        if file_sha(actual["report"]) != actual["report_sha256"]:
+            raise ValueError("report asset changed")
+        if not physical_context and file_sha(actual["urdf"]) != actual["urdf_sha256"]:
+            raise ValueError("urdf asset changed")
         pair = actual["knee_motor"]+"__"+actual["ankle_motor"]
         if gp_gen is not None:
             from robolab.gp_extrapolation import design_extrapolation
             if actual.get('gp_extrapolation')!=design_extrapolation(gp_gen,bank['motor_pairs'][pair],actual):
                 raise ValueError('design GP extrapolation markers changed')
+        if actual["pair_id"] != pair:
+            raise ValueError("physical motor pair identity changed")
+        if physical_context:
+            samples.append(verified_raw_context(actual, bank["motor_pairs"][pair]))
+            continue
         if pair not in pair_suffixes:
             pair_suffixes[pair]=context(actual,bank['motor_pairs'][pair],bank['knees'],bank['ankles'],bank['ranges_m'])[2:]
         lengths=[(actual[field]-(bank['ranges_m'][segment][0]+bank['ranges_m'][segment][1])/2)/
             ((bank['ranges_m'][segment][1]-bank['ranges_m'][segment][0])/2)
             for field,segment in (('thigh_m','thigh'),('calf_m','calf'))]
-        if actual["pair_id"] != pair or actual["context"] != lengths+pair_suffixes[pair]:
+        if actual["context"] != lengths+pair_suffixes[pair]:
             raise ValueError("physical/context identity changed")
+    if physical_context:
+        validate_physical_context(bank, samples)
     return bank

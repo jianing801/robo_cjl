@@ -90,6 +90,17 @@ def validate_asset_resume(row):
 
 _training_mesh_cache={}
 
+def urdf_mesh_paths(path):
+    urdf=Path(path).resolve()
+    paths=set()
+    for mesh in ET.parse(urdf).findall('.//mesh'):
+        name=mesh.get('filename','')
+        if name.startswith('file://'):name=name[7:]
+        if not name or '://' in name:raise ValueError('mesh must resolve to a local file before training')
+        mesh_path=Path(name)
+        paths.add(str((mesh_path if mesh_path.is_absolute() else urdf.parent/mesh_path).resolve()))
+    return paths
+
 def mesh_sources(bank,report=True,*,use_cache=False):
     """训练进程内复用源校验；独立USD准备和手动深检默认仍完整读取。"""
     if not use_cache:return _mesh_sources_deep(bank,report)
@@ -112,13 +123,7 @@ def mesh_sources(bank,report=True,*,use_cache=False):
     # 冷启动先发现依赖并取元数据，再完整哈希，最后确认读取期间没有变化。
     sources=set(key)
     for name in key:
-        urdf=Path(name).resolve()
-        for mesh in ET.parse(urdf).findall('.//mesh'):
-            filename=mesh.get('filename','')
-            if filename.startswith('file://'):filename=filename[7:]
-            if not filename or '://' in filename:raise ValueError('source mesh is not local')
-            path=Path(filename)
-            sources.add(str((path if path.is_absolute() else urdf.parent/path).resolve()))
+        sources.update(urdf_mesh_paths(name))
     before=signatures(sources)
     value=_mesh_sources_deep(bank,report)
     after=signatures(sources)

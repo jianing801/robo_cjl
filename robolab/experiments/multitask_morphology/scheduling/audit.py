@@ -6,14 +6,16 @@ import numpy as np
 def audit(groups, bank, windows=(1,5,10)):
     rows={d['id']:d for d in bank['designs'] if d['split']=='train'}
     flat=[i for group in groups for i in group]
-    if len(groups)!=50 or any(len(g)!=60 for g in groups):
-        raise ValueError('Expected 50 groups of 60')
-    if len(flat)!=len(set(flat)) or set(flat)!=set(rows):
-        raise ValueError('Duplicate, missing or foreign structure')
     knees=sorted({d['knee_motor'] for d in rows.values()})
     ankles=sorted({d['ankle_motor'] for d in rows.values()})
     thighs=sorted({d['thigh_m'] for d in rows.values()})
     calves=sorted({d['calf_m'] for d in rows.values()})
+    capacity=2*len(knees)*len(ankles)
+    if (not capacity or len(groups)*capacity!=len(rows)
+            or any(len(g)!=capacity for g in groups)):
+        raise ValueError(f'Expected complete groups of {capacity} structures')
+    if len(flat)!=len(set(flat)) or set(flat)!=set(rows):
+        raise ValueError('Duplicate, missing or foreign structure')
     def region(v, bounds):return min(2,max(0,int(3*(v-bounds[0])/(bounds[1]-bounds[0]))))
     def cells(ids, motor_field, motor, dim):
         result=np.zeros((3,3),dtype=int) if dim=='joint' else np.zeros(3,dtype=int)
@@ -31,7 +33,7 @@ def audit(groups, bank, windows=(1,5,10)):
         t=Counter(rows[i]['thigh_m'] for i in group);c=Counter(rows[i]['calf_m'] for i in group)
         groups_stats.append(dict(pair_counts=[pair[k,a] for k in knees for a in ankles],
             thigh_counts=[t[x] for x in thighs],calf_counts=[c[x] for x in calves]))
-    report=dict(valid=True,design_count=len(flat),group_count=len(groups),group_size=60,
+    report=dict(valid=True,design_count=len(flat),group_count=len(groups),group_size=capacity,
         pair_count_range=[min(min(s['pair_counts']) for s in groups_stats),max(max(s['pair_counts']) for s in groups_stats)],
         thigh_count_range=[min(min(s['thigh_counts']) for s in groups_stats),max(max(s['thigh_counts']) for s in groups_stats)],
         calf_count_range=[min(min(s['calf_counts']) for s in groups_stats),max(max(s['calf_counts']) for s in groups_stats)],

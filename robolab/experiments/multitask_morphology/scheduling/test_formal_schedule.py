@@ -19,7 +19,8 @@ from audit import audit
 def setup(task):
     cfg=json.loads((HERE.parent/'configs'/f'{task}.json').read_text(encoding='utf8'))
     grid=cfg['grid'];selected=select_grid(grid,grid['knee_pool'],grid['ankle_pool'])
-    bank=dict(configuration=grid,designs=selected['designs'],ranges_m={'thigh':grid['thigh_range_m'],'calf':grid['calf_range_m']})
+    bank=dict(configuration=grid,designs=selected['designs'],context_schema=cfg['context_schema'],
+              ranges_m={'thigh':grid['thigh_range_m'],'calf':grid['calf_range_m']})
     return cfg,bank
 
 
@@ -29,12 +30,12 @@ def test_actual_dispatch_and_full_absolute_budget(task):
     module.validate_config(cfg,b)
     first=module.cycle_groups(b,cfg,0)
     assert first==groups_for(b,cfg,0)
-    assert len(first)==50 and all(len(g)==60 for g in first)
+    assert len(first)==50 and all(len(g)==50 for g in first)
     for cycle in range(5):
         groups=module.cycle_groups(b,cfg,cycle)
         assert [set(g) for g in groups]==[set(g) for g in first]
         assert Counter(i for g in groups for i in g)==Counter(d['id'] for d in b['designs'])
-        assert groups[0]==first[0][cycle*16%60:]+first[0][:cycle*16%60]
+        assert groups[0]==first[0][cycle*46%50:]+first[0][:cycle*46%50]
     assert module.stage_spec(b,cfg,49)['end_update']==2500
     assert module.stage_spec(b,cfg,50)['cycle']==1
     last=cfg['rotation']['total_updates']//50-1
@@ -46,7 +47,7 @@ def test_exact_hard_constraints_independent_audit_and_joint_task_binding():
     cfg,b=setup('rough');g=groups_for(b,cfg,0)
     report=audit(g,b,windows=())
     assert report['pair_count_range']==[2,2]
-    assert report['thigh_count_range']==report['calf_count_range']==[6,6]
+    assert report['thigh_count_range']==report['calf_count_range']==[5,5]
     assert [json.loads((HERE.parent/'configs'/f'{t}.json').read_text())['group_schedule']
             for t in ('rough','backpack','amp')]==[cfg['group_schedule']]*3
     identity=schedule_identity(b,cfg)
@@ -68,9 +69,9 @@ def test_corrupt_hash_grid_and_modified_membership_are_rejected(tmp_path):
 def test_replica_allocation_rotates_without_modifying_frozen_bytes():
     cfg,b=setup('rough');value,path=load_schedule(b,cfg);original=path.read_bytes()
     extra_counts=Counter()
-    for cycle in range(15):
+    for cycle in range(25):
         group=groups_for(b,cfg,cycle)[0]
-        extra_counts.update(group[:4096%60])
-    # A stride of16 modulo60 has period15; every slot receives four extras.
-    assert set(extra_counts.values())=={4} and len(extra_counts)==60
+        extra_counts.update(group[:4096%50])
+    # A stride of 46 modulo 50 has period 25; every slot receives 23 extras.
+    assert set(extra_counts.values())=={23} and len(extra_counts)==50
     assert path.read_bytes()==original

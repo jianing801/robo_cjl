@@ -29,7 +29,8 @@ def test_real_short_process_completion_and_visible_result(tmp_path,task,target):
         timer.monitor(r,poll_seconds=.01,write_interval=.01,display_interval=99)
         result=json.loads((output/'timing.json').read_text())
         assert result['status']=='completed' and result['task']==task
-        assert result['task_total_wall_seconds']>=0
+        assert result['accumulated_run_seconds']>=0
+        assert 'task_total_wall_seconds' not in result
         assert result['includes_preparation_and_scene_loading'] is True
         assert json.loads(r.read_text())['target_updates']==target
     finally:p.wait()
@@ -46,16 +47,16 @@ def test_stopped_process_never_becomes_training_complete(tmp_path,paused):
     assert result['completed_at'] is None
 
 
-def test_resume_includes_pause_in_total_but_not_accumulated_running_time(tmp_path):
+def test_resume_keeps_only_accumulated_running_time(tmp_path):
     output=tmp_path/'expert';p=child(.01);r=record(tmp_path,p,output=output);p.wait()
     first=json.loads(r.read_text());first.update(started_epoch=100,started_at=timer.timestamp(100),updated_epoch=110,ended_epoch=110,status='paused',elapsed_seconds=10)
     timer.atomic_json(r,first)
     second=dict(first,started_epoch=130,started_at=timer.timestamp(130),updated_epoch=150,ended_epoch=150,status='completed',elapsed_seconds=20)
     timer.atomic_json(r.parent/'launch_second.json',second)
     result=timer.summarize(r.parent)
-    assert result['task_total_wall_seconds']==50
     assert result['accumulated_run_seconds']==30
-    assert result['between_launches_seconds']==20
+    assert 'task_total_wall_seconds' not in result
+    assert 'between_launches_seconds' not in result
     assert result['launch_count']==2
 
 
@@ -87,7 +88,6 @@ def test_old_completed_task_does_not_reset_original_finish_time(tmp_path):
         timer.atomic_json(r.parent/'launch_check_again.json',extra)
         after=timer.summarize(r.parent)
         assert after['completed_at']==before['completed_at']
-        assert after['task_total_wall_seconds']==before['task_total_wall_seconds']
         assert after['accumulated_run_seconds']==before['accumulated_run_seconds']
     finally:p.wait()
 
@@ -96,3 +96,25 @@ def test_pid_reuse_and_long_duration_format():
     import psutil
     assert not timer.process_matches(os.getpid(),psutil.Process().create_time()-100)
     assert timer.duration(49*3600+62)=='49:01:02'
+
+
+def test_hourly_display_carries_over_previous_launch(tmp_path, monkeypatch, capsys):
+    times = iter([0, 1, 2, 3])
+    current = {'time': 0}
+    def tick(_):
+        current['time'] = next(times)
+    tick(None)
+    monkeypatch.setattr(timer.time, 'monotonic', lambda: 100 + current['time'])
+    monkeypatch.setattr(timer.time, 'time', lambda: 50_000 + current['time'])
+    monkeypatch.setattr(timer.time, 'sleep', tick)
+    monkeypatch.setattr(timer, 'process_matches', lambda pid, _: pid == 1 and current['time'] < 3)
+    prior = dict(task='rough', output=str(tmp_path/'absent'), started_epoch=10,
+                 elapsed_seconds=3598, updated_epoch=3608, status='paused', pid=2, pid_create_time=2)
+    timer.atomic_json(tmp_path/'launch_prior.json', prior)
+    path = tmp_path/'launch_current.json'
+    timer.atomic_json(path, dict(prior, started_epoch=50_000, started_monotonic=100, elapsed_seconds=0,
+        updated_epoch=50_000, status='running', pid=1, pid_create_time=1, completed_at_start=False))
+    timer.monitor(path)
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == ['TASK_TIMER rough 累计训练用时 01:00:00',
+                     'TASK_TIMER_FINISHED rough stopped_or_failed 累计训练用时 01:00:01']

@@ -19,7 +19,7 @@ def test_explicit_extrapolation_does_not_modify_pinned_generator():
     with pytest.raises(ValueError):extended.predict_properties(key,.199)
 
 def test_all_eleven_motors_all_ten_lengths_have_valid_physics():
-    cfg=json.loads(Path(__file__).with_name('config.fullbody3000.json').read_text())['grid']
+    cfg=json.loads((Path(__file__).resolve().parents[1]/'configs/rough.json').read_text())['grid']
     gen=get_generator(DEFAULT_ROOT,True)
     assert cfg['thigh_range_m']==[.2,.4] and cfg['calf_range_m']==[.25,.45] and cfg['gp_extrapolation']
     for role,segment in (('knee','thigh'),('ankle','calf')):
