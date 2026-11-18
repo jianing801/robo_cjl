@@ -10,12 +10,15 @@ from types import SimpleNamespace
 
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context
+from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 
 def main():
     from isaaclab.app import AppLauncher
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('plan','design-ids','output'):p.add_argument('--'+name,required=True)
     p.add_argument('--student');p.add_argument('--mode',choices=['collect','evaluate'],default='collect')
+    p.add_argument('--profile',choices=['nominal','robust'],default='nominal')
+    p.add_argument('--randomization-strength',type=float,default=1.)
     p.add_argument('--steps',type=int,default=1000);p.add_argument('--stride',type=int,default=2)
     p.add_argument('--seed',type=int,default=20261030);p.add_argument('--speed',type=float,default=2.)
     p.add_argument('--reset-yaw-range',type=float,default=.05)
@@ -45,7 +48,7 @@ def main():
         from amp_policy import SpatialActorCritic
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
         from rollout import reuse_assets,canonical_input
-        from amp_adapter import decode_amp_frames,StreamingHistory
+        from amp_adapter import decode_amp_frames
         from student import load_student
         write_new(out/'importer_audit.json',rough_module('hybrid_importer').install_local_importer_adapter())
         bank=load_configurable_bank(spec['bank']);ids=a.design_ids.split(',')
@@ -56,21 +59,10 @@ def main():
         options=SimpleNamespace(num_envs=n,device=a.device,asset_cache=None,allow_cache_misses=True,
             reference_library=spec['reference_library'],full_body_torque=spec['full_body_torque'])
         cfg,agent,source_contract=configure_spatial(options,bank,designs,out,configurator=configure_amp)
-        cfg.seed=a.seed;cfg.observations.policy.enable_corruption=False
-        for name,event in list(vars(cfg.events).items()):
-            if getattr(event,'mode',None) in ('startup','interval'):setattr(cfg.events,name,None)
-        cfg.events.reset_base.params['pose_range']={k:(-.01,.01) if k in ('x','y') else (-a.reset_yaw_range,a.reset_yaw_range) if k=='yaw' else (0.,0.)
-            for k in cfg.events.reset_base.params['pose_range']}
-        cfg.events.reset_base.params['velocity_range']={k:(0.,0.) for k in cfg.events.reset_base.params['velocity_range']}
-        if cfg.events.reset_robot_joints.func.__name__!='reset_joints_by_scale':
-            raise ValueError('Unknown native AMP reset semantics')
-        cfg.events.reset_robot_joints.params.update(position_range=(.99,1.01),velocity_range=(0.,0.))
-        for actuator in cfg.scene.robot.actuators.values():
-            if hasattr(actuator,'min_delay'):actuator.min_delay=0;actuator.max_delay=0
-        command=cfg.commands.base_velocity
-        command.resampling_time_range=(1000.,1000.);command.rel_standing_envs=0.;command.rel_heading_envs=1.
-        command.ranges.lin_vel_x=(a.speed,a.speed);command.ranges.lin_vel_y=(0.,0.)
-        command.ranges.ang_vel_z=(-.4,.4);command.ranges.heading=(0.,0.)
+        cfg,randomization_audit=configure_profile(cfg,'run',profile=a.profile,strength=a.randomization_strength,
+            seed=a.seed,reset_yaw_range=a.reset_yaw_range,speed=a.speed)
+        metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=a.reset_yaw_range,speed_command=a.speed))
+        write_new(out/'randomization_audit.json',randomization_audit)
         expected_terms=['base_ang_vel','projected_gravity','velocity_commands','joint_pos','joint_vel','actions']
         for name in expected_terms:
             term=getattr(cfg.observations.policy,name)
@@ -107,9 +99,8 @@ def main():
         write_new(out/'reference_cache_parity.json',dict(native_outputs_exact=True,
             packed_native_lookup_verified=routing.merged_verified,packed_fallback_reason=routing.merge_fallback_reason,
             changed='Native reference values/interpolation retained; deterministic table lookup or membership cache; sampling order/RNG unchanged'))
-        masses=raw.robot.root_physx_view.get_masses().sum(-1)
-        for i,d in enumerate(designs):
-            if abs(float(masses[i])-d['total_mass_kg'])>2e-4:raise ValueError('AMP actual physical mass differs')
+        from physical_audit import audit_physics
+        write_new(out/'physics_audit.json',audit_physics(raw,cfg,designs,profile=a.profile))
         import xml.etree.ElementTree as ET
         geometry=[]
         for i,d in enumerate(designs):
@@ -133,24 +124,34 @@ def main():
         if student and student.schema!=plan['schema']:raise ValueError('Student schema differs')
         normalization_before={k:v.clone() for k,v in teacher.actor_obs_normalizer.state_dict().items()}
         import random,numpy as np
-        random.seed(a.seed+999);np.random.seed(a.seed+999);torch.manual_seed(a.seed+999);torch.cuda.manual_seed_all(a.seed+999)
+        random.seed(a.seed+999);np.random.seed((a.seed+999) % 2**32);torch.manual_seed(a.seed+999);torch.cuda.manual_seed_all(a.seed+999)
         with torch.inference_mode():
+            from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
+            from scenario_sampling import scenario_table
             obs=env.get_observations();groups=torch.arange(n,device=raw.device)%len(ids)
             copies=torch.arange(n,device=raw.device)//len(ids);validation=copies==spec['copies']-1
             static=torch.tensor([[v for row in graph_features(d['urdf'],names,q0) for v in row]+
                 unified_context(bank,d,plan['schema']) for d in designs],device=raw.device)
             io=dict(joint_names=names,default_joint_pos=q0,action_scale=.25,step_dt=.02,
                 observation_scales={k:1. for k in ('lin_vel','ang_vel','projected_gravity','commands','joint_pos','joint_vel','actions','height_scan')},
-                history_layout='frame_major_oldest_to_newest',history_width=780)
+                history_layout='frame_major_oldest_to_newest',history_width=780,**boundary_contract())
             write_new(out/'io_contract.json',io)
             if a.mode=='evaluate':
                 with (out/'initial_state.pt').open('xb') as stream:torch.save(dict(root_pos_w=raw.robot.data.root_pos_w.cpu().clone(),
                     root_quat_w=raw.robot.data.root_quat_w.cpu().clone(),joint_pos=raw.robot.data.joint_pos.cpu().clone(),
                     joint_vel=raw.robot.data.joint_vel.cpu().clone()),stream)
-            history=StreamingHistory(n,raw.device);reset=None
-            data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation')}
+            history=StudentHistory(n,raw.device,'run',profile=a.profile,
+                strength=a.randomization_strength,seed=a.seed+700001);reset=None
+            episodes=EpisodeTracker(n,raw.device);tracking=TrackingError(n,raw.device)
+            scenarios=scenario_table('run',n,ids,profile=a.profile)
+            write_new(out/'scenarios.json',scenarios)
+            data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation',
+                'scenario_bin','episode_id','actual_command')}
             alive=torch.ones(n,device=raw.device,dtype=torch.bool);elapsed=torch.zeros(n,device=raw.device)
             forward=elapsed.clone();side=elapsed.clone();fell=~alive.clone();native_clip=agent.get('clip_actions')
+            if native_clip not in (None,STUDENT_ACTION_CLIP):
+                raise ValueError('Native action boundary is incompatible with the shared action contract')
+            native_boundaries=dict(action_clip=native_clip,observation_clip=None)
             if a.ppo_channel:
                 from ppo_channel import serve
                 from rsl_rl.modules.amp import AMPDiscriminator,LossType
@@ -166,7 +167,8 @@ def main():
                 def amp_reward(o,reward):
                     style,_=discriminator.predict_style_reward(discriminator.get_disc_obs(o),dt=raw.step_dt)
                     return discriminator.lerp_reward(task_reward=reward,style_reward=style)
-                serve(a.ppo_channel,'run',env,raw,obs,canonical,native_clip,amp_reward)
+                serve(a.ppo_channel,'run',env,raw,obs,canonical,STUDENT_ACTION_CLIP,amp_reward,
+                    protocol=metadata['collection_protocol'])
                 status=0
                 return
             recorder=None
@@ -181,26 +183,35 @@ def main():
                     raw.command_manager.get_command('base_velocity'),raw.robot.data.joint_pos-raw.robot.data.default_joint_pos,
                     raw.robot.data.joint_vel-raw.robot.data.default_joint_vel,raw.action_manager.action),-1)
                 if not torch.allclose(latest,expected,atol=2e-5,rtol=1e-5):raise ValueError('AMP history decoder differs from actual physical observations')
+                command=raw.command_manager.get_command('base_velocity').clone()
                 base=history.append(latest,reset);label=teacher.act_inference(obs).detach()
                 if not torch.isfinite(label).all():raise ValueError('Nonfinite AMP teacher labels')
-                if native_clip is not None:label=label.clamp(-native_clip,native_clip)
+                label=label.clamp(-STUDENT_ACTION_CLIP,STUDENT_ACTION_CLIP)
                 if a.mode=='collect' and step%a.stride==0:
                     for k,v in dict(base_obs=base,teacher_actions=label,design_index=groups,
-                        environment_ids=torch.arange(n,device=raw.device),validation=validation).items():data[k].append(v.cpu().clone())
+                        environment_ids=torch.arange(n,device=raw.device),validation=validation,
+                        scenario_bin=speed_bins(command,'run'),episode_id=episodes.episode,
+                        actual_command=command).items():data[k].append(v.cpu().clone())
                 action=student(canonical_input(base,plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))) if student else label
                 if not torch.isfinite(action).all():raise ValueError('Nonfinite AMP executed action')
-                if native_clip is not None:action=action.clamp(-native_clip,native_clip)
+                action=action.clamp(-STUDENT_ACTION_CLIP,STUDENT_ACTION_CLIP)
                 before=raw.robot.data.root_pos_w.clone();obs,reward,done,extra=env.step(action)
                 if recorder:recorder.capture(step,done)
                 delta=raw.robot.data.root_pos_w-before;active=alive&~done.bool()
+                tracking.update(command[:,0],raw.robot.data.root_lin_vel_b[:,0],active,
+                    dt=raw.step_dt,command_valid=alive)
                 forward[active]+=delta[active,0];side[active]+=delta[active,1];elapsed[alive]+=raw.step_dt
                 fell|=alive&raw.reset_terminated.bool();alive&=~done.bool();reset=done.bool()
+                episodes.advance(done.bool())
                 if step%100==0:print('AMP_ROLLOUT',step,'/',a.steps,'designs',len(ids),'student',bool(student),flush=True)
             if recorder:recorder.close()
             if any(not torch.equal(normalization_before[k],v) for k,v in teacher.actor_obs_normalizer.state_dict().items()):
                 raise ValueError('Frozen AMP actor normalizer changed')
+            tracking_rows=tracking.rows()
             rows=[dict(design=ids[i%len(ids)],environment=i,payload_kg=None,seconds=float(elapsed[i]),fell=bool(fell[i]),
-                forward_m=float(forward[i]),lateral_m=float(side[i]),mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02))) for i in range(n)]
+                forward_m=float(forward[i]),lateral_m=float(side[i]),mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02)),
+                **tracking_rows[i]) for i in range(n)]
+            assert_protocol_unchanged(metadata['collection_protocol'])
             if a.mode=='collect':
                 value={k:torch.cat(v) for k,v in data.items()}
                 value.update(kind='real_rough_backpack_teacher_data_v1',task='run',plan_sha256=sha(a.plan),
@@ -209,13 +220,14 @@ def main():
                     student_sha256=sha(a.student) if a.student else None,
                     source='real_teacher_execution' if not student else 'real_student_DAgger_with_frozen_native_teacher_labels',
                     native_history='three term-major frames; original trained normalizer restored and frozen',
-                    seed=a.seed,reset_yaw_range_rad=a.reset_yaw_range,
+                    seed=a.seed,**metadata,
                     canonical_history='ten real streaming frames; reset-aware first-frame fill only',
-                    reference_library_sha256=spec['reference_library_sha256'],history_adapter_live_verified=True)
+                    reference_library_sha256=spec['reference_library_sha256'],history_adapter_live_verified=True,
+                    native_boundaries=native_boundaries,scenarios=scenarios,run_arguments=vars(a))
                 with (out/'data.pt').open('xb') as stream:torch.save(value,stream)
             write_new(out/'summary.json',dict(result='REAL_AMP_ROLLOUT_COMPLETE',task='run',rows=rows,design_ids=ids,
                 teacher=spec['checkpoint_sha256'],student=sha(a.student) if a.student else None,
-                steps=a.steps,speed_command=a.speed,reset_yaw_range_rad=a.reset_yaw_range,
+                steps=a.steps,seed=a.seed,**metadata,
                 actor_normalizer_unchanged=True,native_clip_actions=native_clip,
                 teacher_updates=0,reference_routing_verified=True,history_adapter_live_verified=True))
             write_new(out/'reference_cache_stats.json',dict(hits=routing.hits,misses=routing.misses))

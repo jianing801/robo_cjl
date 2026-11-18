@@ -1,102 +1,304 @@
-"""Exactly N synchronized PPO updates of one actor from three native tasks."""
-import argparse,json,os,subprocess,sys,time
+"""Exact-candidate, resumable three-task PPO followed by independent evaluation."""
+import argparse
+import json
+import os
 from pathlib import Path
-import torch
-from student import load_student,save_student
-from contract import load_plan,sha,write_new
-from ppo_channel import publish
-HERE=Path(__file__).resolve().parent
+import random
+import subprocess
+import sys
+import time
+import uuid
 
-def returns(reward,done,timeout,value,last,gamma=.99,lam=.95):
-    result=torch.empty_like(reward);adv=torch.zeros_like(last)
-    reward=reward+gamma*value*timeout.float()
+import numpy as np
+import torch
+
+from contract import load_plan, sha, write_new
+from finetune_state import select_candidate, save_checkpoint, load_checkpoint, validate_batch
+from persistence import run_lock, resume_pause
+from randomization import protocol_metadata, assert_protocol_unchanged
+from student import load_student, save_student
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[2]))
+STEPS_PER_TASK = 24
+ENVS_PER_TASK = 8
+ACTION_STD = .05
+
+
+def worker_command(plan, student, root, task, design_id, profile, strength, seed, full_body_torque=False):
+    script = HERE / ('rollout_amp.py' if task == 'run' else 'rollout.py')
+    cmd = [sys.executable, '-u', str(script), '--plan', str(plan), '--design-ids', design_id,
+        '--output', str(Path(root)/f'worker_{task}'), '--mode', 'evaluate', '--student', str(student),
+        '--ppo-channel', str(root), '--profile', profile, '--randomization-strength', str(strength),
+        '--headless', '--device', 'cuda:0', '--seed', str(seed)]
+    if task != 'run': cmd += ['--task', task]
+    if full_body_torque: cmd += ['--full-body-torque']
+    return cmd
+
+
+def returns(reward, done, timeout, value, last, gamma=.99, lam=.95):
+    result = torch.empty_like(reward); adv = torch.zeros_like(last)
+    reward = reward + gamma * value * timeout.float()
     for t in reversed(range(len(reward))):
-        nxt=last if t==len(reward)-1 else value[t+1]
-        live=1-done[t].float()
-        adv=reward[t]+gamma*nxt*live-value[t]+gamma*lam*live*adv
-        result[t]=adv+value[t]
+        nxt = last if t == len(reward)-1 else value[t+1]
+        live = 1-done[t].float()
+        adv = reward[t] + gamma*nxt*live-value[t] + gamma*lam*live*adv
+        result[t] = adv+value[t]
     return result
 
-def main():
-    p=argparse.ArgumentParser();p.add_argument('--plan',required=True);p.add_argument('--student',required=True)
-    p.add_argument('--output',required=True);p.add_argument('--updates',type=int,default=100)
-    p.add_argument('--full-body-torque',action='store_true')
-    a=p.parse_args();torch.set_num_threads(2)
-    root=Path(a.output).resolve();root.mkdir(exist_ok=False);plan=load_plan(a.plan)
-    selected={}
-    for task,spec in plan['teachers'].items():
-        bank=json.loads(Path(spec['bank']).read_text(encoding='utf8'))
-        matching=[d for d in bank['designs'] if abs(d['thigh_m']-.25)<1e-8 and abs(d['calf_m']-.30)<1e-8
-            and d['knee_motor']=='DM-J10010L-2EC' and d['ankle_motor']=='RS06' and d['id'] in spec['design_ids']]
-        if len(matching)!=1:raise ValueError(f'Target exact design missing: {task}')
-        selected[task]=matching[0];spec['copies']=8
-    frozen=root/'plan.json';write_new(frozen,plan);load_plan(frozen)
-    model,_=load_student(a.student);critic=torch.nn.Sequential(torch.nn.Linear(model.width,256),torch.nn.ELU(),torch.nn.Linear(256,128),torch.nn.ELU(),torch.nn.Linear(128,1))
-    optimizer=torch.optim.Adam([{'params':model.parameters(),'lr':3e-6},{'params':critic.parameters(),'lr':1e-3}])
-    manifest=dict(initial_actor_sha256=sha(a.student),target=selected,updates=a.updates,
-        full_body_torque=a.full_body_torque,
-        method='joint clipped PPO; all three tasks collected before each shared update',
-        steps_per_task=24,envs_per_task=8,actor_lr=3e-6,critic_lr=1e-3,std=.05,
-        AMP='frozen native trained discriminator and normalization; native task/style reward interpolation',
-        teacher_actor_updates=0,critic_initialization='fresh task-conditioned canonical input')
-    write_new(root/'manifest.json',manifest)
-    workers=[];handles=[]
-    try:
-        for task,d in selected.items():
-            folder=root/f'worker_{task}';script=HERE/('rollout_amp.py' if task=='run' else 'rollout.py')
-            cmd=[sys.executable,'-u',str(script),'--plan',str(frozen),'--design-ids',d['id'],
-                '--output',str(folder),'--mode','evaluate','--student',a.student,'--ppo-channel',str(root),
-                '--headless','--device','cuda:0','--seed','20261104']
-            if task!='run':cmd+=['--task',task]
-            if a.full_body_torque:cmd+=['--full-body-torque']
-            outs=[open(root/f'{task}.{s}.log','x',encoding='utf8') for s in ('stdout','stderr')];handles+=outs
-            kwargs={'creationflags':subprocess.CREATE_NO_WINDOW} if os.name=='nt' else {}
-            proc=subprocess.Popen(cmd,stdout=outs[0],stderr=outs[1],**kwargs);workers.append(proc)
-            write_new(root/f'{task}.launch.json',dict(pid=proc.pid,command=cmd))
-            # Stagger scene initialization to avoid converter/Kit peaks.
-            time.sleep(3)
-        for index in range(a.updates):
-            if (root/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
-            actor=root/f'actor_{index:03d}.pt';save_student(actor,model,ppo_updates=index)
-            write_new(root/f'request_{index:03d}.json',dict(student=str(actor),std=.05,steps=24))
-            started=time.monotonic();batches=[]
-            while not all((root/f'{task}_{index:03d}.pt').exists() for task in selected):
-                if (root/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED')
-                for proc in workers:
-                    if proc.poll() is not None:raise RuntimeError(f'Physical worker exited {proc.pid}: {proc.returncode}; inspect native logs')
-                if time.monotonic()-started>900:raise TimeoutError('Physical task batch timeout')
-                time.sleep(.2)
-            for task in selected:
-                data=torch.load(root/f'{task}_{index:03d}.pt',weights_only=True)
-                x=data['obs'];shape=x.shape[:2]
-                with torch.no_grad():
-                    v=critic(x.flatten(0,1)).reshape(shape);last=critic(data['next_obs']).squeeze(-1)
-                    target=returns(data['reward'],data['done'],data['timeout'],v,last)
-                    adv=target-v;adv=(adv-adv.mean())/(adv.std()+1e-8)
-                batches.append((x.flatten(0,1),data['actions'].flatten(0,1),data['logp'].flatten(),target.flatten(),adv.flatten()))
-            x,act,oldlog,target,adv=[torch.cat(parts) for parts in zip(*batches)]
-            logs=[]
-            for epoch in range(4):
-                order=torch.randperm(len(x))
-                for ids in order.split(192):
-                    dist=torch.distributions.Normal(model(x[ids]),.05);log=dist.log_prob(act[ids]).sum(-1)
-                    ratio=(log-oldlog[ids]).exp();policy=-torch.minimum(ratio*adv[ids],ratio.clamp(.8,1.2)*adv[ids]).mean()
-                    value=(critic(x[ids]).squeeze(-1)-target[ids]).square().mean()
-                    loss=policy+value
-                    optimizer.zero_grad();loss.backward()
-                    norm=torch.nn.utils.clip_grad_norm_([*model.parameters(),*critic.parameters()],1.)
-                    if not torch.isfinite(loss) or not torch.isfinite(norm):raise ValueError('Nonfinite PPO update')
-                    optimizer.step();logs.append(float(loss.detach()))
-            publish(root/f'ppo_{index+1:03d}.pt',dict(actor=model.state_dict(),critic=critic.state_dict(),optimizer=optimizer.state_dict(),completed_updates=index+1))
-            write_new(root/f'update_{index+1:03d}.json',dict(completed_updates=index+1,loss=sum(logs)/len(logs),tasks=list(selected),samples=len(x)))
-            print('JOINT_PPO_UPDATE',index+1,'/',a.updates,flush=True)
-        final=root/'shared_actor_finetuned.pt';save_student(final,model,ppo_updates=a.updates,initial_actor_sha256=sha(a.student))
-        write_new(root/'completed.json',dict(completed_updates=a.updates,student=str(final),student_sha256=sha(final),requires_evaluation=True))
-    finally:
-        (root/'STOP').touch()
-        for proc in workers:
-            try:proc.wait(timeout=20)
-            except subprocess.TimeoutExpired:proc.terminate()
-        for handle in handles:handle.close()
 
-if __name__=='__main__':main()
+def ppo_update(model, critic, optimizer, batches):
+    prepared = []
+    for data in batches:
+        x = data['obs']; shape = x.shape[:2]
+        with torch.no_grad():
+            value = critic(x.flatten(0, 1)).reshape(shape)
+            last = critic(data['next_obs']).squeeze(-1)
+            target = returns(data['reward'], data['done'], data['timeout'], value, last)
+            advantage = target-value
+            advantage = (advantage-advantage.mean())/(advantage.std()+1e-8)
+        prepared.append((x.flatten(0, 1), data['actions'].flatten(0, 1), data['logp'].flatten(),
+                         target.flatten(), advantage.flatten()))
+    x, actions, oldlog, target, advantage = [torch.cat(parts) for parts in zip(*prepared)]
+    losses = []; model.train(); critic.train()
+    for _ in range(4):
+        for ids in torch.randperm(len(x)).split(192):
+            distribution = torch.distributions.Normal(model(x[ids]), ACTION_STD)
+            ratio = (distribution.log_prob(actions[ids]).sum(-1)-oldlog[ids]).exp()
+            policy = -torch.minimum(ratio*advantage[ids], ratio.clamp(.8, 1.2)*advantage[ids]).mean()
+            loss = policy+(critic(x[ids]).squeeze(-1)-target[ids]).square().mean()
+            optimizer.zero_grad(set_to_none=True); loss.backward()
+            norm = torch.nn.utils.clip_grad_norm_([*model.parameters(), *critic.parameters()], 1.)
+            if not torch.isfinite(loss) or not torch.isfinite(norm):
+                raise ValueError('Nonfinite PPO update')
+            optimizer.step(); losses.append(float(loss.detach()))
+    return dict(loss=sum(losses)/len(losses), samples=len(x))
+
+
+def check_pause(root):
+    if (Path(root)/'USER_PAUSED').exists():
+        raise KeyboardInterrupt('USER_PAUSED')
+
+
+def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_sha256, protocol, environment):
+    from pipeline import stop_child
+    attempt = root/'attempts'/uuid.uuid4().hex
+    attempt.mkdir(parents=True)
+    attempt_number = len(list((root/'attempts').iterdir()))-1
+    worker_seed = (a.seed + completed*1009 + attempt_number*9176) % 2**32
+    while worker_seed in a.evaluation_seeds: worker_seed = (worker_seed+1) % 2**32
+    session = dict(kind='shared_ppo_session_v2', session_id=attempt.name, control_root=str(root),
+        start_update=completed, manifest_sha256=manifest_sha256, collection_protocol=protocol,
+        tasks=list(plan['teachers']), steps_per_task=STEPS_PER_TASK, std=ACTION_STD,
+        worker_seed=worker_seed, simulator_state_restored=False,
+        resume_scope='actor, critic, Adam, coordinator RNG and update count; fresh simulator episodes')
+    write_new(attempt/'session.json', session)
+    workers = []; handles = []
+    try:
+        for task, spec in plan['teachers'].items():
+            check_pause(root)
+            command = worker_command(root/'plan.json', a.student, attempt, task, spec['design_ids'][0],
+                a.profile, a.randomization_strength, worker_seed, a.full_body_torque)
+            logs = [open(attempt/f'{task}.{suffix}.log', 'x', encoding='utf8') for suffix in ('stdout', 'stderr')]
+            handles.extend(logs)
+            options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+            process = subprocess.Popen(command, stdout=logs[0], stderr=logs[1],
+                env=dict(environment, PYTHONUTF8='1', PYTHONIOENCODING='utf-8'), **options)
+            workers.append(process)
+            write_new(attempt/f'{task}.launch.json', dict(pid=process.pid, command=command))
+            time.sleep(3)
+        for index in range(completed, a.updates):
+            check_pause(root); assert_protocol_unchanged(protocol)
+            actor = attempt/f'actor_{index:03d}.pt'
+            save_student(actor, model, ppo_updates=index, collection_protocol=protocol, manifest_sha256=manifest_sha256)
+            actor_sha256 = sha(actor)
+            write_new(attempt/f'request_{index:03d}.json', dict(kind='shared_ppo_request_v2',
+                session_id=session['session_id'], manifest_sha256=manifest_sha256, index=index,
+                student=str(actor), student_sha256=actor_sha256, std=ACTION_STD, steps=STEPS_PER_TASK,
+                collection_protocol=protocol))
+            started = time.monotonic()
+            while not all((attempt/f'{task}_{index:03d}.pt').exists() for task in plan['teachers']):
+                check_pause(root)
+                for process in workers:
+                    if process.poll() is not None:
+                        raise RuntimeError(f'Physical worker exited {process.pid}: {process.returncode}; see {attempt}')
+                if time.monotonic()-started > a.timeout_seconds:
+                    raise TimeoutError('Physical task batch timeout')
+                time.sleep(.2)
+            batches = [validate_batch(torch.load(attempt/f'{task}_{index:03d}.pt', weights_only=True),
+                task=task, index=index, session=session, actor_sha256=actor_sha256, width=model.width)
+                for task in plan['teachers']]
+            check_pause(root)
+            metrics = ppo_update(model, critic, optimizer, batches)
+            check_pause(root); assert_protocol_unchanged(protocol)
+            save_checkpoint(root, model, critic, optimizer, index+1, manifest_sha256, metrics)
+            print('JOINT_PPO_UPDATE', index+1, '/', a.updates, flush=True)
+    finally:
+        (attempt/'STOP').touch(exist_ok=True)
+        try:
+            for process in workers:
+                try: process.wait(timeout=5)
+                except subprocess.TimeoutExpired: stop_child(process)
+        finally:
+            for handle in handles: handle.close()
+
+
+def evaluate_candidate(a, plan, root, actor, candidate, environment):
+    from pipeline import run_evaluation
+    from evaluation import aggregate_evaluations, evaluation_criteria
+    jobs = [(task, spec['design_ids']) for task, spec in plan['teachers'].items()]
+    profiles = ('nominal', 'robust') if a.evaluation_profile == 'both' else (a.evaluation_profile,)
+    criteria = dict(tracking_rel_tol=a.tracking_rel_tolerance,
+                    min_command_progress_ratio=a.min_command_progress_ratio)
+    results = {}
+    for profile in profiles:
+        records = []
+        for seed in a.evaluation_seeds:
+            check_pause(root)
+            records.extend(run_evaluation(plan, root/'plan.json', root, jobs, str(actor), profile,
+                1. if profile == 'robust' else 0., seed,
+                f'post_finetune/{profile}/seed_{seed}', environment, a.timeout_seconds, criteria))
+        results[profile] = dict(task_metrics=aggregate_evaluations(records, plan['schema']['tasks']),
+                                evaluations=records)
+    return dict(kind='shared_candidate_evaluation_v1', candidate=candidate,
+        student=str(actor), student_sha256=sha(actor), ppo_updates=a.updates,
+        evaluation_criteria=evaluation_criteria(**criteria), profiles=results,
+        evaluation_seeds=a.evaluation_seeds, requires_evaluation=False,
+        bo_interface='Per-task post-finetuning observations; no invented multi-task scalar objective',
+        scalar_objective=None, requires_bo_objective_definition=True)
+
+
+def run(a):
+    original = load_plan(a.plan)
+    if original['schema']['tasks'] != ['stairs', 'backpack', 'run']:
+        raise ValueError('Candidate finetuning requires the three-task shared plan')
+    plan, candidate = select_candidate(original, design_id=a.design_id,
+        design_task=a.design_task, design_key=a.design_key)
+    if a.full_body_torque and any(not s['full_body_torque'] for s in plan['teachers'].values()):
+        raise ValueError('Cannot override frozen teacher physics')
+    protocol = protocol_metadata(a.profile, a.randomization_strength)
+    root = Path(a.output).resolve()
+    sources = ('joint_finetune.py', 'finetune_state.py', 'ppo_channel.py', 'persistence.py', 'contract.py',
+               'student.py', 'pipeline.py', 'evaluation.py')
+    manifest = dict(kind='shared_candidate_finetuning_v2', plan_sha256=sha(a.plan),
+        initial_actor_sha256=sha(a.student), candidate=candidate, updates=a.updates,
+        full_body_torque=a.full_body_torque, collection_protocol=protocol, seed=a.seed,
+        evaluation_profile=a.evaluation_profile, evaluation_seeds=a.evaluation_seeds,
+        robust_evaluation_strength=1.,
+        tracking_rel_tolerance=a.tracking_rel_tolerance, min_command_progress_ratio=a.min_command_progress_ratio,
+        sources={name: sha(HERE/name) for name in sources},
+        steps_per_task=STEPS_PER_TASK, envs_per_task=ENVS_PER_TASK, std=ACTION_STD,
+        actor_lr=3e-6, critic_lr=1e-3, teacher_actor_updates=0,
+        method='joint clipped PPO; all three tasks collected before each shared update',
+        resume_scope='Committed PPO update; all learning state restored, simulator episodes restarted')
+    if a.resume:
+        if json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest:
+            raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
+    else:
+        root.mkdir(parents=True, exist_ok=False)
+        write_new(root/'manifest.json', manifest)
+    frozen = root/'plan.json'
+    if frozen.exists():
+        if json.loads(frozen.read_text(encoding='utf8')) != plan:
+            raise ValueError('Frozen candidate plan changed')
+    else:
+        write_new(frozen, plan)
+    load_plan(frozen)
+    manifest_sha256 = sha(root/'manifest.json')
+    torch.manual_seed(a.seed); random.seed(a.seed); np.random.seed(a.seed)
+    model, _ = load_student(a.student)
+    if model.schema != plan['schema']:
+        raise ValueError('Initial actor schema differs from candidate plan')
+    critic = torch.nn.Sequential(torch.nn.Linear(model.width, 256), torch.nn.ELU(),
+        torch.nn.Linear(256, 128), torch.nn.ELU(), torch.nn.Linear(128, 1))
+    optimizer = torch.optim.Adam([{'params': model.parameters(), 'lr': 3e-6},
+                                  {'params': critic.parameters(), 'lr': 1e-3}])
+    completed = load_checkpoint(root, model, critic, optimizer, manifest_sha256)
+    if completed is None:
+        completed = 0
+        save_checkpoint(root, model, critic, optimizer, 0, manifest_sha256)
+    if completed > a.updates:
+        raise ValueError('Checkpoint exceeds the frozen PPO budget')
+    resume_pause(root, a.resume_paused)
+    if (root/'completed.json').exists():
+        record = json.loads((root/'completed.json').read_text(encoding='utf8'))
+        if (record['manifest_sha256'] != manifest_sha256 or record['ppo_updates'] != completed
+                or sha(record['student']) != record['student_sha256']
+                or sha(record['evaluation']) != record['evaluation_sha256']):
+            raise ValueError('Completed candidate result changed')
+        print('CANDIDATE_ALREADY_COMPLETE', root); return
+    from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
+    choices = candidates(query_gpus(), os.environ, min_free_mib=a.gpu_min_free_gb*1024,
+                         max_utilization=a.gpu_max_utilization, requested=a.device)
+    with gpu_lease(choices, HERE.parents[2]/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
+        environment = child_environment(gpu, os.environ)
+        if completed < a.updates:
+            train_updates(a, root, plan, model, critic, optimizer, completed, manifest_sha256, protocol, environment)
+        check_pause(root); assert_protocol_unchanged(protocol)
+        actor = root/'shared_actor_finetuned.pt'
+        if actor.exists():
+            previous, metadata = load_student(actor)
+            if (metadata.get('manifest_sha256') != manifest_sha256 or metadata['ppo_updates'] != a.updates
+                    or any(not torch.equal(v, previous.state_dict()[k]) for k, v in model.state_dict().items())):
+                raise ValueError('Published finetuned actor differs from the committed learning state')
+        else:
+            save_student(actor, model, ppo_updates=a.updates, initial_actor_sha256=sha(a.student),
+                         collection_protocol=protocol, manifest_sha256=manifest_sha256)
+        result = evaluate_candidate(a, plan, root, actor, candidate, environment)
+        assert_protocol_unchanged(protocol)
+        result['manifest_sha256'] = manifest_sha256
+        evaluation = root/'candidate_result.json'
+        if evaluation.exists():
+            if json.loads(evaluation.read_text(encoding='utf8')) != result:
+                raise ValueError('Published candidate evaluation changed')
+        else: write_new(evaluation, result)
+        write_new(root/'completed.json', dict(result='CANDIDATE_FINETUNED_EVALUATED',
+            candidate=candidate, ppo_updates=a.updates, manifest_sha256=manifest_sha256,
+            student=str(actor), student_sha256=sha(actor), evaluation=str(evaluation),
+            evaluation_sha256=sha(evaluation), requires_evaluation=False))
+        print('CANDIDATE_FINETUNED_EVALUATED', evaluation, flush=True)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('plan', 'student', 'output'): parser.add_argument('--'+name, required=True)
+    selector = parser.add_mutually_exclusive_group(required=True)
+    selector.add_argument('--design-id', help='Exact structure ID in the selected native task bank')
+    selector.add_argument('--design-key', nargs=4, metavar=('THIGH_M', 'CALF_M', 'KNEE', 'ANKLE'))
+    parser.add_argument('--design-task', choices=['stairs', 'backpack', 'run'], default='stairs')
+    parser.add_argument('--updates', type=int, default=100)
+    parser.add_argument('--full-body-torque', action='store_true')
+    parser.add_argument('--profile', choices=['nominal', 'robust'], default='robust')
+    parser.add_argument('--randomization-strength', type=float, default=1.)
+    parser.add_argument('--seed', type=int, default=20261104)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--resume-paused', action='store_true')
+    parser.add_argument('--evaluation-profile', choices=['nominal', 'robust', 'both'], default='both')
+    parser.add_argument('--evaluation-seeds', default='20261118')
+    parser.add_argument('--tracking-rel-tolerance', type=float, default=.25)
+    parser.add_argument('--min-command-progress-ratio', type=float, default=.5)
+    parser.add_argument('--device')
+    parser.add_argument('--timeout-seconds', type=int, default=900)
+    parser.add_argument('--gpu-min-free-gb', type=float, default=4.)
+    parser.add_argument('--gpu-max-utilization', type=int, default=30)
+    a = parser.parse_args(argv)
+    if a.resume_paused: a.resume = True
+    a.evaluation_seeds = [int(v) for v in a.evaluation_seeds.split(',')]
+    if (a.updates < 1 or not 0 <= a.randomization_strength <= 1 or not 0 <= a.seed < 2**32
+            or not a.evaluation_seeds or len(set(a.evaluation_seeds)) != len(a.evaluation_seeds)
+            or any(not 0 <= s < 2**32 or s == a.seed for s in a.evaluation_seeds)
+            or a.timeout_seconds < 1):
+        raise ValueError('Invalid PPO budget, randomization or independent evaluation seeds')
+    from evaluation import evaluation_criteria
+    evaluation_criteria(tracking_rel_tol=a.tracking_rel_tolerance,
+                        min_command_progress_ratio=a.min_command_progress_ratio)
+    if a.profile == 'nominal': a.randomization_strength = 0.
+    torch.set_num_threads(2)
+    with run_lock(a.output):
+        try: return run(a)
+        except KeyboardInterrupt:
+            if Path(a.output).is_dir(): (Path(a.output)/'USER_PAUSED').touch(exist_ok=True)
+            raise
+
+
+if __name__ == '__main__': main()

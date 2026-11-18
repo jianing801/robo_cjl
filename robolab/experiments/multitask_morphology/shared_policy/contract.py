@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
+from persistence import write_json_new
 
 TASKS=('stairs','backpack')
 HISTORY_WIDTH=780
@@ -18,8 +19,7 @@ def sha(path):
 
 
 def write_new(path,value):
-    with Path(path).open('x',encoding='utf8') as stream:
-        json.dump(value,stream,indent=2,ensure_ascii=False,allow_nan=False)
+    write_json_new(path,value)
 
 
 def schema_for(banks):

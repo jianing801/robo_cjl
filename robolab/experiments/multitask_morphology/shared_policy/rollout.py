@@ -11,6 +11,7 @@ import traceback
 
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context,input_width
+from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 
 
 def reuse_assets(cfg,roots,output,task,designs):
@@ -50,6 +51,8 @@ def main():
     p.add_argument('--design-ids',required=True);p.add_argument('--output',required=True)
     p.add_argument('--asset-cache-root');p.add_argument('--student')
     p.add_argument('--mode',choices=['collect','evaluate'],default='collect')
+    p.add_argument('--profile',choices=['nominal','robust'],default='nominal')
+    p.add_argument('--randomization-strength',type=float,default=1.)
     p.add_argument('--steps',type=int,default=1000);p.add_argument('--stride',type=int,default=5)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--ppo-channel')
@@ -85,6 +88,9 @@ def main():
         import isaaclab_tasks,robolab.tasks
         from types import SimpleNamespace
         from student import load_student
+        from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
+        from scenario_sampling import configure_stairs, route_stairs, payload_properties, payload_bins, scenario_table
+        from physical_audit import audit_physics
         # Process-local importer compatibility; installed dependencies are not changed.
         importer_path=HERE.parent/'engine/hybrid_importer.py'
         s=importlib.util.spec_from_file_location('shared_student_importer',importer_path)
@@ -105,34 +111,23 @@ def main():
         by_id={d['id']:d for d in bank['designs']}
         selected=args.design_ids.split(',')
         if len(set(selected))!=len(selected) or not set(selected)<=set(spec['design_ids']):raise ValueError('Unknown/duplicate selected design')
-        designs=[by_id[k] for k in selected];count=len(designs);copies=spec['copies'];n=count*copies
+        designs=[by_id[k] for k in selected];count=len(designs);copies=spec['copies']
+        paired_stairs=args.task=='stairs' and args.profile=='robust' and args.mode=='collect' and not args.ppo_channel
+        if args.task=='stairs' and args.profile=='robust':copies=max(copies,12 if paired_stairs else 6)
+        n=count*copies
         for design in designs:
             if sha(design['urdf'])!=design['urdf_sha256']:raise ValueError('Physical URDF changed')
         options=SimpleNamespace(num_envs=n,device=args.device,asset_cache=None,allow_cache_misses=True,
                                 torque_soft_constraint=None,full_body_torque=spec['full_body_torque'])
         kwargs={'configurator':configurator} if configurator else {}
         cfg,agent,source_contract=configure_spatial(options,bank,designs,output,**kwargs)
-        cfg.seed=args.seed;cfg.noise.add_noise=False;cfg.capture_terminal_state=True
-        for name,event in list(vars(cfg.events).items()):
-            if getattr(event,'mode',None) in ('startup','interval'):setattr(cfg.events,name,None)
-        cfg.events.reset_base.params['pose_range']={k:(-.01,.01) if k in ('x','y') else (-args.reset_yaw_range,args.reset_yaw_range) if k=='yaw' else (0.,0.)
-            for k in cfg.events.reset_base.params['pose_range']}
-        cfg.events.reset_base.params['velocity_range']={k:(0.,0.) for k in cfg.events.reset_base.params['velocity_range']}
-        cfg.events.reset_robot_joints.params.update(position_range=(-.01,.01),velocity_range=(0.,0.))
-        for motor in cfg.scene.robot.actuators.values():motor.min_delay=0;motor.max_delay=0
-        cfg.commands.rel_standing_envs=0.;cfg.commands.rel_heading_envs=1.
-        cfg.commands.resampling_time_range=(1000.,1000.)
-        cfg.commands.ranges.lin_vel_x=(.5,.5);cfg.commands.ranges.lin_vel_y=(0.,0.)
-        cfg.commands.ranges.ang_vel_z=(-.4,.4);cfg.commands.ranges.heading=(0.,0.)
+        cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
+            strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
+        cfg.capture_terminal_state=True
         if args.task=='stairs':
-            import isaaclab.terrains as terrains
-            from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
-            generator=TerrainGeneratorCfg(seed=args.seed,curriculum=True,size=(40.,40.),border_width=2.,
-                num_rows=1,num_cols=1,horizontal_scale=.05,vertical_scale=.005,difficulty_range=(.5,.5),use_cache=False,
-                sub_terrains={'stairs':terrains.MeshInvertedPyramidStairsTerrainCfg(proportion=1.,
-                    step_height_range=(.1,.1),step_width=.25,platform_width=2.,border_width=1.,holes=False)})
-            for terrain in (cfg.scene.terrain,cfg.scene_context):
-                terrain.terrain_type='generator';terrain.terrain_generator=generator;terrain.max_init_terrain_level=0
+            randomization_audit['stairs']=configure_stairs(cfg,profile=args.profile,seed=args.seed)
+        metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=args.reset_yaw_range))
+        write_new(output/'randomization_audit.json',randomization_audit)
         cfg.sim.render_interval=1000000
         cache_roots=[*spec['asset_cache']]
         if args.asset_cache_root:cache_roots.insert(0,args.asset_cache_root)
@@ -152,6 +147,8 @@ def main():
                 obs,rewards,dones,extras=RslRlVecEnvWrapper.step(self,actions)
                 return self._extend(obs),rewards,dones,extras
         env=SamplingVecEnv(raw,None,agent.get('clip_actions'))
+        if agent.get('clip_actions') not in (None,STUDENT_ACTION_CLIP):
+            raise ValueError('Native wrapper action boundary differs from the shared action contract')
         names=bank['canonical_semantic_contract']['joint_names']
         if list(raw.robot.joint_names)!=names:raise ValueError('Actual action order mismatch')
         if abs(raw.step_dt-.02)>1e-10 or abs(raw.action_scale-.25)>1e-10:raise ValueError('Control timing/action scale mismatch')
@@ -163,9 +160,8 @@ def main():
         actual_ids=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
         if actual_ids!=[designs[i%count]['id'] for i in range(n)]:raise ValueError('Physical design/context routing mismatch')
         geometry=[]
-        masses=raw.robot.root_physx_view.get_masses().sum(-1)
+        write_new(output/'physics_audit.json',audit_physics(raw,cfg,designs,profile=args.profile))
         for i,design in enumerate(designs):
-            if abs(float(masses[i])-design['total_mass_kg'])>2e-4:raise ValueError('Actual base mass differs from audited bank')
             xml=ET.parse(design['urdf']).getroot()
             for joint in ('left_knee_joint','right_knee_joint','left_ankle_pitch_joint','right_ankle_pitch_joint'):
                 node=next(j for j in xml.findall('joint') if j.get('name')==joint)
@@ -188,26 +184,32 @@ def main():
         groups=torch.arange(n,device=raw.device)%count
         copy_index=torch.arange(n,device=raw.device)//count
         if args.payload_kg is not None and (args.task!='backpack' or not 0<args.payload_kg<=15):raise ValueError('Fixed payload requires backpack and mass in (0,15]kg')
-        payload=[args.payload_kg]*4 if args.payload_kg is not None else [.3,5.,10.,15.]
+        properties=None
         # Constructing an extra student consumes RNG. Reseed AFTER both actors
         # exist, so paired teacher/student evaluation starts from the same states.
         import random
         import numpy as np
-        random.seed(args.seed+999);np.random.seed(args.seed+999)
+        random.seed(args.seed+999);np.random.seed((args.seed+999) % 2**32)
         torch.manual_seed(args.seed+999);torch.cuda.manual_seed_all(args.seed+999)
         with torch.inference_mode():
-            if args.task=='backpack':
+            if args.task=='stairs':
+                validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs)
+                raw.reset()
+            elif args.task=='backpack':
                 from robolab.tasks.direct.backpack_walk import backpack_urdf as module
-                properties=[]
-                for i in range(n):
-                    properties+=module.sample_backpack_properties(1,seed=args.seed+i,
-                        mass_range_kg=(payload[int(copy_index[i])//2],)*2,
-                        inertia_size_scale_range=(1.,1.),mount_surface_offset_max_m=(0.,0.),com_offset_max_m=(0.,0.,0.))
+                properties=payload_properties(module,n,count,seed=args.seed,profile=args.profile,
+                    strength=args.randomization_strength,fixed_mass=args.payload_kg)
                 raw.reset();audit=module.apply_backpack_properties(raw.robot,properties);raw.reset()
                 write_new(output/'payload_audit.json',dict(properties=properties,audit=audit))
                 validation=(copy_index%2)==1
             else:
                 validation=copy_index==copies-1
+            terrain_indices=raw.scene.terrain.terrain_types if args.task=='stairs' else None
+            scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
+                profile=args.profile,properties=properties)
+            write_new(output/'scenarios.json',scenarios)
+            condition_bins=(terrain_indices.to(raw.device) if args.task=='stairs' else
+                payload_bins(raw.robot.backpack_mass_kg))
             obs=env.get_observations()
             if args.mode=='evaluate':
                 with (output/'initial_state.pt').open('xb') as stream:
@@ -222,19 +224,31 @@ def main():
             static=torch.tensor(static,device=raw.device,dtype=torch.float32)
             io=dict(joint_names=names,default_joint_pos=expected.cpu().tolist(),action_scale=float(raw.action_scale),
                 step_dt=raw.step_dt,observation_scales={k:float(v) for k,v in vars(raw.obs_scales).items() if isinstance(v,(int,float))},
-                history_layout='frame_major_oldest_to_newest',history_width=780)
+                history_layout='frame_major_oldest_to_newest',history_width=780,**boundary_contract())
             write_new(output/'io_contract.json',io)
-            data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation')}
+            data={k:[] for k in ('base_obs','teacher_actions','design_index','environment_ids','validation',
+                'scenario_bin','episode_id','actual_command')}
             alive=torch.ones(n,device=raw.device,dtype=torch.bool)
             elapsed=torch.zeros(n,device=raw.device);forward=elapsed.clone();side=elapsed.clone();ascent=elapsed.clone()
             fell=torch.zeros(n,device=raw.device,dtype=torch.bool)
             action_clip=float(raw.clip_actions)
             if action_clip!=100. or float(raw.clip_obs)!=100.:raise ValueError('Unexpected native clipping contract')
+            native_boundaries=dict(action_clip=action_clip,observation_clip=float(raw.clip_obs))
+            action_clip=STUDENT_ACTION_CLIP
+            history=StudentHistory(n,raw.device,args.task,profile=args.profile,
+                strength=args.randomization_strength,seed=args.seed+700001)
+            reset=None;episodes=EpisodeTracker(n,raw.device);tracking=TrackingError(n,raw.device)
+            def student_base(o,r):
+                # Match AMP ordering: fresh clean physical frame, student noise,
+                # then the shared numerical clip. Native teacher history stays intact.
+                clean,_=raw.compute_current_observations()
+                return history.append(clean,r)
             clipped=torch.zeros(n,device=raw.device)
             if args.ppo_channel:
                 from ppo_channel import serve
                 serve(args.ppo_channel,args.task,env,raw,obs,
-                    lambda o,r:canonical_input(o['policy'][:,:780],plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks'])),action_clip)
+                    lambda o,r:canonical_input(student_base(o,r),plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks'])),action_clip,
+                    protocol=metadata['collection_protocol'])
                 exit_code=0
                 return
             trace=[]
@@ -245,7 +259,8 @@ def main():
             for step in range(args.steps):
                 native=obs['policy']
                 if native.shape[1]!=780+spec['context_width']:raise ValueError('Native teacher observation mismatch')
-                base=native[:,:780]
+                command=raw.command_generator.command.clone()
+                base=student_base(obs,reset)
                 label=teacher.act_inference(obs).detach()
                 if not torch.isfinite(label).all():raise ValueError('Nonfinite teacher action')
                 # The native PD and actor-observation paths already clip at 100.
@@ -254,7 +269,9 @@ def main():
                 label=label.clamp(-action_clip,action_clip)
                 if args.mode=='collect' and step%args.stride==0:
                     for k,v in dict(base_obs=base,teacher_actions=label,design_index=groups,
-                                    environment_ids=torch.arange(n,device=raw.device),validation=validation).items():
+                                    environment_ids=torch.arange(n,device=raw.device),validation=validation,
+                                    scenario_bin=condition_bins*3+speed_bins(command,args.task),
+                                    episode_id=episodes.episode,actual_command=command).items():
                         data[k].append(v.detach().cpu().clone())
                 action=student(canonical_input(base,plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks']))) if student else label
                 if not torch.isfinite(action).all():raise ValueError('Nonfinite executing actor action')
@@ -277,6 +294,9 @@ def main():
                 if recorder:recorder.capture(step,dones)
                 # Terminal resets may move roots; exclude that step's displacement.
                 active=alive&~dones.bool()
+                tracking.update(command[:,0],raw.robot.data.root_lin_vel_b[:,0],active,
+                    dt=raw.step_dt,command_valid=alive)
+                reset=dones.bool();episodes.advance(reset)
                 delta=after-before
                 forward[active]+=delta[active,0];side[active]+=delta[active,1];ascent[active]+=delta[active,2]
                 elapsed[alive]+=raw.step_dt
@@ -285,13 +305,16 @@ def main():
                 if step%100==0:print('ROLLOUT',args.task,step,'/',args.steps,'designs',count,'student',bool(student),flush=True)
             rows=[]
             if recorder:recorder.close()
+            tracking_rows=tracking.rows()
             for i in range(n):
                 rows.append(dict(design=designs[int(groups[i])]['id'],environment=i,
-                    payload_kg=payload[int(copy_index[i])//2] if args.task=='backpack' else None,
+                    payload_kg=float(raw.robot.backpack_mass_kg[i]) if args.task=='backpack' else None,
                     seconds=float(elapsed[i]),fell=bool(fell[i]),forward_m=float(forward[i]),
                     lateral_m=float(side[i]),ascent_m=float(ascent[i]),
                     native_action_clipping_fraction=float(clipped[i]/args.steps),
-                    mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02))))
+                    mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02)),
+                    **tracking_rows[i]))
+            assert_protocol_unchanged(metadata['collection_protocol'])
             if args.mode=='collect':
                 value={k:torch.cat(v) for k,v in data.items()}
                 value.update(kind='real_rough_backpack_teacher_data_v1',task=args.task,
@@ -299,8 +322,9 @@ def main():
                     student_sha256=sha(args.student) if args.student else None,
                     schema=plan['schema'],io_contract=io,design_ids=selected,static_context=static.cpu(),
                     source='real_teacher_execution' if not student else 'real_student_DAgger_with_frozen_native_teacher_labels',
-                    seed=args.seed,reset_yaw_range_rad=args.reset_yaw_range,
-                    physical_profile='startup/interval DR and noise off; fixed command; explicitly recorded independent reset offsets',
+                    seed=args.seed,**metadata,
+                    native_boundaries=native_boundaries,scenarios=scenarios,
+                    physical_profile=args.profile,run_arguments=vars(args),
                     actual_payload_not_in_actor=True)
                 with (output/'data.pt').open('xb') as stream:torch.save(value,stream)
             if trace:
@@ -310,8 +334,9 @@ def main():
                         teacher_sha256=spec['checkpoint_sha256'],step_dt=raw.step_dt),stream)
             write_new(output/'summary.json',dict(result='REAL_ROLLOUT_COMPLETE',task=args.task,design_ids=selected,
                 teacher=spec['checkpoint_sha256'],student=sha(args.student) if args.student else None,
-                teacher_updates=0,steps=args.steps,reset_yaw_range_rad=args.reset_yaw_range,
-                rows=rows,data=str(output/'data.pt') if args.mode=='collect' else None))
+                teacher_updates=0,steps=args.steps,seed=args.seed,
+                rows=rows,**metadata,
+                data=str(output/'data.pt') if args.mode=='collect' else None))
             exit_code=0
     except BaseException:
         write_new(output/'failure.json',dict(traceback=traceback.format_exc()))

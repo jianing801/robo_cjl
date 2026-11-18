@@ -89,7 +89,8 @@ def test_strict_student_roundtrip_and_wrong_kind(tmp_path):
     m,x=model_and_input();m.eval();path=tmp_path/'student.pt'
     save_student(path,m,teacher_updates=0)
     restored,data=load_student(path)
-    assert torch.equal(m(x),restored(x)) and data['PPO_updates']==0 and not data['critic_trained']
+    assert torch.equal(m(x),restored(x)) and data['ppo_updates']==0 and not data['critic_trained']
+    assert 'PPO_updates' not in data
     wrong=tmp_path/'wrong.pt';torch.save({'kind':'old_fixed_run_stairs'},wrong)
     with pytest.raises(ValueError,match='kind'):load_student(wrong)
 
@@ -107,7 +108,7 @@ def test_task_balance_independent_of_design_counts():
     x,y=batch(groups,torch.Generator().manual_seed(1),plan)
     assert x.shape==(256,1153) and y.shape==(256,23)
     assert x[:,780].sum()==128 and x[:,781].sum()==128
-def test_epoch_budget_scales_with_task_data_and_preserves_explicit_cap():
+def test_epoch_budget_scales_with_design_sources_not_raw_rows_and_preserves_explicit_cap():
     from fit import training_budget
     import torch
     def group(n):
@@ -115,8 +116,8 @@ def test_epoch_budget_scales_with_task_data_and_preserves_explicit_cap():
     small={('stairs','a'):group(128),('backpack','a'):group(256)}
     large={('stairs',str(i)):group(128) for i in range(200)}
     large.update({('backpack',str(i)):group(256) for i in range(200)})
-    assert training_budget(small,0)[0]==2
-    assert training_budget(large,0)[0]==400
+    assert training_budget(small,0)[0]==1
+    assert training_budget(large,0)[0]==50
     assert training_budget(large,500)[0]==500
 
 

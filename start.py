@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
 DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
 ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
-           '蒸馏': 'distill', '状态': 'status', '录像': 'video', '资产': 'assets'}
+           '蒸馏': 'distill', '微调': 'finetune', '状态': 'status', '录像': 'video', '资产': 'assets'}
 
 
 def read(path):
@@ -456,7 +456,12 @@ def prepare_assets(root, task, gpu, preview=False, resume_paused=False):
     print('USD_ASSETS_ALL_SELECTED_READY' if not preview else 'USD_ASSETS_PREVIEW_ONLY',flush=True)
 
 
-def distill(root, gpu, preview=False):
+def distill(root, gpu, preview=False, collection_profile='robust', randomization_strength=1.,
+            initial_randomization_strength=.25, evaluation_profile='both', selection_designs=12,
+            candidate_every_epochs=5, screen_designs=6, promotion_count=2,
+            selection_seeds='20261117,20261119,20261120', samples_per_design_per_epoch=32,
+            validation_rows_per_design_shard=128, replay_cache_shards=2,
+            tracking_rel_tolerance=.25, min_command_progress_ratio=.5, resume_paused=False):
     teachers = {t: select_run(root, t)[0] for t in ('rough', 'backpack', 'amp')}
     if not all((p/'completed.json').is_file() for p in teachers.values()):
         raise RuntimeError('请先完成三个专家；尚未完成的任务可用“状态”查看。')
@@ -476,9 +481,52 @@ def distill(root, gpu, preview=False):
     command = [sys.executable, '-u', ENTRY/'distill.py', '--plan', plan, '--output', output,
                '--device', f'cuda:{gpu}', '--batch-designs', '10', '--collect-steps', '1000',
                '--stride', '5', '--epochs', '20', '--dagger-rounds', '3',
+               '--collection-profile', collection_profile,
+               '--randomization-strength', str(randomization_strength),
+               '--initial-randomization-strength', str(initial_randomization_strength),
+               '--evaluation-profile', evaluation_profile, '--selection-designs', str(selection_designs),
+               '--candidate-every-epochs', str(candidate_every_epochs), '--screen-designs', str(screen_designs),
+               '--promotion-count', str(promotion_count), '--selection-seeds', selection_seeds,
+               '--samples-per-design-per-epoch', str(samples_per_design_per_epoch),
+               '--validation-rows-per-design-shard', str(validation_rows_per_design_shard),
+               '--replay-cache-shards', str(replay_cache_shards),
+               '--tracking-rel-tolerance', str(tracking_rel_tolerance),
+               '--min-command-progress-ratio', str(min_command_progress_ratio),
                '--timeout-seconds', '1800', '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100']
     if (output/'manifest.json').is_file():
         command.append('--resume')
+    if resume_paused:command.append('--resume-paused')
+    run(command, preview=preview)
+
+
+def finetune(root, gpu, design_id, design_task='stairs', updates=100, preview=False,
+             resume_paused=False, output=None, evaluation_profile='both', evaluation_seeds='20261118',
+             tracking_rel_tolerance=.25, min_command_progress_ratio=.5):
+    plan_path = root/'shared_plan/plan.json'
+    complete_path = root/'shared_policy/completed.json'
+    if not plan_path.is_file() or not complete_path.is_file():
+        raise RuntimeError('请先完成共享策略蒸馏，再选择候选结构微调。')
+    plan = read(plan_path); complete = read(complete_path)
+    if design_task not in plan['teachers'] or design_id not in plan['teachers'][design_task]['design_ids']:
+        raise ValueError('候选结构ID不在所选任务的共享结构库中。')
+    records = read(plan['shared_bank'])['structures']
+    matches = [row for row in records if row['design_ids'][design_task] == design_id]
+    if len(matches) != 1:
+        raise ValueError('候选结构必须在共同结构表中唯一对应。')
+    key = matches[0]['key']
+    token = hashlib.sha256(json.dumps(key,separators=(',',':')).encode()).hexdigest()[:16]
+    output = Path(output).resolve() if output else root/'candidate_finetuning'/token
+    command = [sys.executable, '-u', ENTRY/'finetune.py', '--plan', plan_path,
+        '--student', complete['student'], '--output', output, '--design-task', design_task,
+        '--design-id', design_id, '--updates', str(updates), '--profile', 'robust',
+        '--randomization-strength', '1', '--device', f'cuda:{gpu}',
+        '--evaluation-profile', evaluation_profile, '--evaluation-seeds', evaluation_seeds,
+        '--tracking-rel-tolerance', str(tracking_rel_tolerance),
+        '--min-command-progress-ratio', str(min_command_progress_ratio),
+        '--timeout-seconds', '1800', '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100']
+    if (output/'manifest.json').is_file(): command.append('--resume')
+    if resume_paused: command.append('--resume-paused')
+    print('候选结构：', key, '微调输出：', output)
     run(command, preview=preview)
 
 
@@ -494,6 +542,7 @@ def video(root, task, gpu, index, preview=False):
     command = [sys.executable, '-u', ENTRY/'shared_policy'/('rollout_amp.py' if task=='amp' else 'rollout.py'),
                '--plan', plan, '--design-ids', ids[index], '--student', read(complete)['student'],
                '--output', output, '--mode', 'evaluate', '--steps', '1000', '--video', '--headless',
+               '--profile', 'nominal', '--randomization-strength', '0',
                '--device', 'cuda:0', f'--kit_args=--/renderer/activeGpu={gpu} --/renderer/multiGpu/enabled=false --/physics/cudaDevice=0']
     if task != 'amp':
         command += ['--task', native]
@@ -509,16 +558,41 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','rough','负重','amp','蒸馏','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','rough','负重','amp','蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
     parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
+    parser.add_argument('--candidate-design-id', help='微调所选任务结构库中的真实结构ID')
+    parser.add_argument('--candidate-task', choices=['stairs','backpack','run'], default='stairs')
+    parser.add_argument('--finetune-updates', type=int, default=100)
+    parser.add_argument('--finetune-output', type=Path, help='可选：为候选微调指定独立实验目录')
+    parser.add_argument('--finetune-evaluation-seeds', default='20261118')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='高级选项：自定义实验根目录')
     parser.add_argument('--dry-run', action='store_true', help='只预览，不创建实验或启动训练')
     parser.add_argument('--resume-paused', action='store_true', help='明确恢复所选任务暂停；无首组断点重开另用--restart-initial')
     parser.add_argument('--restart-initial', action='store_true', help='明确重开无检查点首组，自动复用USD并记住新目录')
+    parser.add_argument('--collection-profile', choices=['nominal','robust'], default='robust', help='共享蒸馏采集配置，默认按任务随机化')
+    parser.add_argument('--randomization-strength', type=float, default=1., help='共享蒸馏目标随机化强度，0到1')
+    parser.add_argument('--initial-randomization-strength', type=float, default=.25, help='共享BC首轮随机化强度，逐轮增加至目标')
+    parser.add_argument('--evaluation-profile', choices=['nominal','robust','both'], default='both', help='共享最终评估，默认名义与随机化分别运行')
+    parser.add_argument('--candidate-every-epochs', type=int, default=5, help='每隔多少epoch参加闭环筛选，末epoch始终参加')
+    parser.add_argument('--screen-designs', type=int, default=6, help='所有候选初筛的共同结构数')
+    parser.add_argument('--promotion-count', type=int, default=2, help='进入扩大验证的初筛候选数')
+    parser.add_argument('--selection-designs', type=int, default=12, help='扩大验证及跨轮闭环选模的共同结构数')
+    parser.add_argument('--selection-seeds', default='20261117,20261119,20261120', help='扩大验证随机种子，逗号分隔；首个同时用于初筛')
+    parser.add_argument('--samples-per-design-per-epoch', type=int, default=32, help='每结构每数据源每epoch的计算预算，不截断训练数据')
+    parser.add_argument('--validation-rows-per-design-shard', type=int, default=128, help='每结构每数据源的监督验证行预算')
+    parser.add_argument('--replay-cache-shards', type=int, default=2, help='内存中的回放分片缓存数量')
+    parser.add_argument('--tracking-abs-tolerance', type=float, default=None, help='已停用：运动跟踪不再使用绝对误差下限')
+    parser.add_argument('--standing-speed-tolerance', type=float, default=None, help='已停用：共享策略已关闭站立指令并移除站立验收项')
+    parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help='仅运动阶段的跟踪RMSE相对运动指令速度RMS的容差')
+    parser.add_argument('--min-command-progress-ratio', type=float, default=.5, help='运动指令下实际进度与指令进度的最小比例')
     args = parser.parse_args(argv)
+    if args.tracking_abs_tolerance is not None:
+        parser.error('--tracking-abs-tolerance已停用；运动跟踪仅使用--tracking-rel-tolerance')
+    if args.standing_speed_tolerance is not None:
+        parser.error('--standing-speed-tolerance已停用；共享策略已关闭站立指令并移除站立验收项')
     if args.gpu < 0:
         parser.error('显卡编号不能为负数')
     os.environ.setdefault('PYTHONUTF8', '1')
@@ -526,8 +600,8 @@ def main(argv=None):
     root = args.root.resolve(); action = ALIASES.get(args.操作, args.操作)
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action not in ('assets','rough','backpack','amp'):
-        parser.error('--resume-paused仅用于资产准备或专家任务')
+    if args.resume_paused and action not in ('assets','rough','backpack','amp','distill','finetune'):
+        parser.error('--resume-paused仅用于资产准备、专家任务、蒸馏或微调')
     if args.restart_initial and action not in ('rough','backpack','amp'):
         parser.error('--restart-initial仅用于专家任务')
     if args.resume_paused and args.restart_initial:
@@ -545,6 +619,13 @@ def main(argv=None):
             parser.error('录像请一次选择一个任务')
         video(root, ALIASES.get(task,task), args.gpu, args.结构, args.dry_run)
         return
+    if action == 'finetune':
+        if not args.candidate_design_id or args.finetune_updates < 1:
+            parser.error('微调需要--candidate-design-id和正数更新预算')
+        finetune(root,args.gpu,args.candidate_design_id,args.candidate_task,args.finetune_updates,
+            args.dry_run,args.resume_paused,args.finetune_output,args.evaluation_profile,args.finetune_evaluation_seeds,
+            args.tracking_rel_tolerance,args.min_command_progress_ratio)
+        return
     ensure_banks(root, args.dry_run)
     if action == 'prepare':
         return
@@ -553,7 +634,11 @@ def main(argv=None):
     elif action == 'assets':
         prepare_assets(root, args.任务 or '全部', args.gpu, args.dry_run, args.resume_paused)
     elif action == 'distill':
-        distill(root, args.gpu, args.dry_run)
+        distill(root, args.gpu, args.dry_run, args.collection_profile, args.randomization_strength,
+                args.initial_randomization_strength, args.evaluation_profile, args.selection_designs,
+                args.candidate_every_epochs,args.screen_designs,args.promotion_count,args.selection_seeds,
+                args.samples_per_design_per_epoch,args.validation_rows_per_design_shard,args.replay_cache_shards,
+                args.tracking_rel_tolerance,args.min_command_progress_ratio,args.resume_paused)
     else:
         launch_expert(root, action, args.gpu, args.dry_run, args.resume_paused, args.restart_initial)
 

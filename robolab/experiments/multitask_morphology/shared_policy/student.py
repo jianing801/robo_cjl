@@ -8,6 +8,7 @@ import copy
 import torch
 from torch import nn
 from contract import input_width
+from persistence import atomic_publish
 
 
 class SharedActor(nn.Module):
@@ -84,15 +85,30 @@ class SharedMLPActor(nn.Module):
 
 
 def save_student(path,model,**metadata):
-    with open(path,'xb') as stream:
-        torch.save(dict(kind='rough_backpack_shared_mxt_actor_v1',schema=model.schema,
-            architecture=model.architecture,state_dict=model.state_dict(),
-            critic_trained=False,PPO_updates=0,**metadata),stream)
+    metadata = training_metadata(metadata)
+    value=dict(kind='rough_backpack_shared_mxt_actor_v1',schema=model.schema,
+        architecture=model.architecture,state_dict=model.state_dict(),**metadata)
+    atomic_publish(path,lambda stream:torch.save(value,stream))
+
+
+def training_metadata(metadata):
+    """One canonical counter; accept unambiguous old distillation checkpoints."""
+    metadata=dict(metadata)
+    old=metadata.pop('PPO_updates',None)
+    count=metadata.get('ppo_updates',0 if old is None else old)
+    if type(count) is not int or count<0 or (old is not None and old!=count):
+        raise ValueError('Invalid or conflicting PPO update counters')
+    trained=metadata.get('critic_trained',count>0)
+    if type(trained) is not bool or trained!=(count>0):
+        raise ValueError('Critic training metadata contradicts PPO update count')
+    metadata.update(ppo_updates=count,critic_trained=trained)
+    return metadata
 
 
 def load_student(path,device='cpu'):
     data=torch.load(path,map_location='cpu',weights_only=True)
     if data.get('kind')!='rough_backpack_shared_mxt_actor_v1':raise ValueError('Wrong student kind')
+    data=training_metadata(data)
     cls=SharedMLPActor if data['architecture'].get('type')=='mlp' else SharedActor
     model=cls(data['schema'],data['architecture']).to(device)
     model.load_state_dict(data['state_dict'],strict=True)
