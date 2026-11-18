@@ -18,8 +18,8 @@ REPO = Path(__file__).resolve().parent
 ENTRY = REPO / 'robolab/experiments/multitask_morphology'
 PREVIOUS_PHYSICAL_ROOT = REPO / 'robolab/logs/multitask_full2500_balanced_v1'
 PREVIOUS_FULL_ROOT = REPO / 'robolab/logs/multitask_full3000_balanced_v2'
-DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_v1'
-MIGRATED_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_migrated_v1'
+DEFAULT_ROOT = REPO / 'robolab/logs/multitask_full2500_physical'
+MIGRATED_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_migrated'
 ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
            '蒸馏': 'distill', '微调': 'finetune', '状态': 'status', '录像': 'video',
            '资产': 'assets', '迁移': 'migrate'}

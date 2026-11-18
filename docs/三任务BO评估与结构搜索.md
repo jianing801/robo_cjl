@@ -2,7 +2,7 @@
 
 流程为共享策略 → 每个候选的三任务联合 PPO 微调 → 固定工况独立测量 → BO 选下一个结构。按 [专家训练与运行操作](专家训练与运行操作.md) 和 [共享策略蒸馏详细说明](共享策略蒸馏详细说明.md) 完成前置步骤。入口自动读取默认实验目录中的共同结构表和选定的共享模型。
 
-使用一次性迁移的结构库时，在 `evaluate` 和 `search` 命令末尾加 `--root robolab/logs/multitask_full2500_physical_migrated_v1`。
+使用一次性迁移的结构库时，在 `evaluate` 和 `search` 命令末尾加 `--root robolab/logs/multitask_full2500_physical_migrated`。
 
 ## 1. 测一个候选
 

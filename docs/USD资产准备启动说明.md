@@ -14,8 +14,10 @@ git -C /data/chenjiale/robo_cjl pull --ff-only origin main
 
 | 方式 | 第一次运行 | 默认输出目录 |
 |---|---|---|
-| 从头生成 | `start.py 资产 --gpu 5` | `robolab/logs/multitask_full2500_physical_v1/` |
-| 一次性迁移 | `start.py 迁移 --gpu 5` | `robolab/logs/multitask_full2500_physical_migrated_v1/` |
+| 从头生成 | `start.py 资产 --gpu 5` | `robolab/logs/multitask_full2500_physical/` |
+| 一次性迁移 | `start.py 迁移 --gpu 5` | `robolab/logs/multitask_full2500_physical_migrated/` |
+
+已有实验继续使用原路径。在相应命令末尾加 `--root` 和该实验根目录，即可继续使用其中的结构库、缓存和检查点。
 
 ## 一次性迁移
 

@@ -10,7 +10,7 @@ from uuid import uuid4
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SHARED = HERE/'shared_policy'
-DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical_v1'
+DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
 from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
