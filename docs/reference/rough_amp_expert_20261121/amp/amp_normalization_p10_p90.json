@@ -1,0 +1,47 @@
+{
+  "method": "linear_percentile_anchors",
+  "formula": "(x-P10)/(P90-P10)",
+  "percentile_interpolation": "linear",
+  "clipping": false,
+  "direction": "smaller_is_better",
+  "metric_input": "per_structure_mean_of_three_successful_trials",
+  "source_table": "amp_structure_metrics.csv",
+  "source_table_sha256": "50adc3b41513f219dcc857e7e3ca10f1855d853a34c202e875cdc6ff20441425",
+  "structures": 50,
+  "speed_mps": 1.5,
+  "duration_s": 20.0,
+  "schedule_group": 21,
+  "checkpoint_sha256": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0",
+  "metrics": {
+    "cot": {
+      "p10": 0.2174674592444224,
+      "p90": 0.25178087430283547,
+      "scale": 0.034313415058413066,
+      "normalized_median": 0.4595237777012918,
+      "normalized_min": -0.3143999101254498,
+      "normalized_max": 2.2328351161635522,
+      "lower_than_zero": 5,
+      "higher_than_one": 5
+    },
+    "forward_rmse_mps": {
+      "p10": 0.21568517737331763,
+      "p90": 0.2404091868620337,
+      "scale": 0.02472400948871606,
+      "normalized_median": 0.35404454071061997,
+      "normalized_min": -0.22563312462418902,
+      "normalized_max": 1.663129826261873,
+      "lower_than_zero": 5,
+      "higher_than_one": 5
+    },
+    "knee_ankle_max_rated_ratio": {
+      "p10": 0.7155366515106129,
+      "p90": 1.2967041713807315,
+      "scale": 0.5811675198701186,
+      "normalized_median": 0.4728888177006073,
+      "normalized_min": -0.18024038673366632,
+      "normalized_max": 1.2987498336043826,
+      "lower_than_zero": 5,
+      "higher_than_one": 5
+    }
+  }
+}

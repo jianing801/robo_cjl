@@ -1,0 +1,42 @@
+{
+  "method": "fixed_p90_minus_p10_multiplier",
+  "formula": "raw * (1 / (P90-P10))",
+  "calibration_subset": "three successful and top-reaching trials",
+  "baseline_design_count": 50,
+  "checkpoint_sha256": "358247fdf142fddc2ac1874f9aa2463acc1e66039717bc13e02b83a8180be18f",
+  "horizon_s": 20.0,
+  "speed_mps": 0.5,
+  "step_height_m": 0.075,
+  "step_depth_m": 0.3,
+  "seeds": [
+    20261118,
+    20261119,
+    20261120
+  ],
+  "metrics": {
+    "cot": {
+      "p10": 0.3255088302881625,
+      "median": 0.35655630312211517,
+      "p90": 0.4745252929541942,
+      "scale": 0.1490164626660317,
+      "scale_multiplier": 6.710667949763043,
+      "structures": 50
+    },
+    "forward_rmse_mps": {
+      "p10": 0.0871680151525864,
+      "median": 0.10209629666044305,
+      "p90": 0.1124477438524242,
+      "scale": 0.0252797286998378,
+      "scale_multiplier": 39.55738654768143,
+      "structures": 50
+    },
+    "roll_pitch_rms_rad_s": {
+      "p10": 0.3303780458110998,
+      "median": 0.3752113782167733,
+      "p90": 0.4104912391485906,
+      "scale": 0.08011319333749078,
+      "scale_multiplier": 12.4823385305255,
+      "structures": 50
+    }
+  }
+}

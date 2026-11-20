@@ -1,0 +1,37 @@
+{
+  "structures": 50,
+  "trials": 150,
+  "successful_trials": 150,
+  "successful_climbs": 150,
+  "any_top": 150,
+  "falls": 0,
+  "fully_successful_structures": 50,
+  "fully_climbing_structures": 50,
+  "failure_reasons": {},
+  "calibration": {
+    "cot": {
+      "p10": 0.3255088302881625,
+      "median": 0.35655630312211517,
+      "p90": 0.4745252929541942,
+      "scale": 0.1490164626660317,
+      "scale_multiplier": 6.710667949763043,
+      "structures": 50
+    },
+    "forward_rmse_mps": {
+      "p10": 0.0871680151525864,
+      "median": 0.10209629666044305,
+      "p90": 0.1124477438524242,
+      "scale": 0.0252797286998378,
+      "scale_multiplier": 39.55738654768143,
+      "structures": 50
+    },
+    "roll_pitch_rms_rad_s": {
+      "p10": 0.3303780458110998,
+      "median": 0.3752113782167733,
+      "p90": 0.4104912391485906,
+      "scale": 0.08011319333749078,
+      "scale_multiplier": 12.4823385305255,
+      "structures": 50
+    }
+  }
+}

@@ -4,6 +4,8 @@
 
 使用一次性迁移的结构库时，在 `evaluate` 和 `search` 命令末尾加 `--root robolab/logs/multitask_full2500_physical_migrated`。
 
+已完成的 Rough、AMP 专家参考数据和固定 P10–P90 尺度见 [Rough 与 AMP 专家评估及评分记录](Rough与AMP专家评估及评分记录.md)。参考评估使用 30 cm 楼梯踏面和 1.5 m/s 跑步指令，采用下文的三任务预试验配置时需重新校准。
+
 ## 1. 测一个候选
 
 进入服务器上的仓库根目录。把 `真实结构ID` 换成共同库中的 Rough ID。命令会完成候选的专属微调，再做 BO 测量。

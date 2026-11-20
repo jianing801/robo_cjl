@@ -1,0 +1,14 @@
+{
+  "step_height_range_m": [
+    0.05,
+    0.1
+  ],
+  "tread_depth_options_m": [
+    0.25,
+    0.35
+  ],
+  "training_runtime_sha256": "fca388ffd911af6d6aa0202ad05a0b433a696007df3f88344733a8a1effa9487",
+  "code_revision": "7aa31364c609e4773b7dd35257f50e89ebe8a88d",
+  "checkpoint_updates": 12000,
+  "checkpoint_sha256": "358247fdf142fddc2ac1874f9aa2463acc1e66039717bc13e02b83a8180be18f"
+}

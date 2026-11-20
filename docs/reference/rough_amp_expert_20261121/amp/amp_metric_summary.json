@@ -1,0 +1,64 @@
+{
+  "structures": 50,
+  "trials": 150,
+  "seeds": [
+    20261118,
+    20261119,
+    20261120
+  ],
+  "commanded_speed_mps": 1.5,
+  "horizon_s": 20.0,
+  "schedule_group": 21,
+  "checkpoint_sha256": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0",
+  "metric_order": [
+    "cot",
+    "forward_rmse_mps",
+    "knee_ankle_max_rated_ratio"
+  ],
+  "statistics": {
+    "cot": {
+      "valid_structures": 50,
+      "median": 0.23323528935789678,
+      "p10": 0.2174674592444224,
+      "p90": 0.25178087430283547,
+      "median_repeat_std": 0.00025239193408164865
+    },
+    "forward_rmse_mps": {
+      "valid_structures": 50,
+      "median": 0.22443857795727512,
+      "p10": 0.21568517737331763,
+      "p90": 0.2404091868620337,
+      "median_repeat_std": 0.00025968404895702023
+    },
+    "knee_ankle_max_rated_ratio": {
+      "valid_structures": 50,
+      "median": 0.9903642728679874,
+      "p10": 0.7155366515106129,
+      "p90": 1.2967041713807315,
+      "median_repeat_std": 0.0016320770338809133
+    }
+  },
+  "success_counts": {
+    "3": 50
+  },
+  "successful_trials": 150,
+  "fully_valid_structures": 50,
+  "spearman": [
+    [
+      0.9999999999999999,
+      -0.16465786314525807,
+      -0.27260504201680674
+    ],
+    [
+      -0.16465786314525807,
+      0.9999999999999999,
+      0.09992797118847539
+    ],
+    [
+      -0.27260504201680674,
+      0.09992797118847539,
+      0.9999999999999999
+    ]
+  ],
+  "failures": {}
+}

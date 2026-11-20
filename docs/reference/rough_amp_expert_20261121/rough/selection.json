@@ -1,0 +1,407 @@
+{
+  "amp_selection_sha256": "877ad8d68d793ca9bcc6e8c877a5cfbf7f115a8144dddd83f85eb779e91a7cfd",
+  "schedule_group": 21,
+  "motor_pairs": 25,
+  "structures": [
+    {
+      "amp_id": "tr_c7b74a795560",
+      "id": "tr_c7b74a795560",
+      "thigh_m": 0.22222222222222224,
+      "calf_m": 0.31666666666666665,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_f9db7ca80fd8",
+      "id": "tr_f9db7ca80fd8",
+      "thigh_m": 0.33333333333333337,
+      "calf_m": 0.4277777777777778,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_cc647fda2f34",
+      "id": "tr_cc647fda2f34",
+      "thigh_m": 0.2888888888888889,
+      "calf_m": 0.2722222222222222,
+      "knee_motor": "RS04",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_401a649ca267",
+      "id": "tr_401a649ca267",
+      "thigh_m": 0.4,
+      "calf_m": 0.38333333333333336,
+      "knee_motor": "RS04",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_87ef42db178d",
+      "id": "tr_87ef42db178d",
+      "thigh_m": 0.2,
+      "calf_m": 0.29444444444444445,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_e60fd36c78d0",
+      "id": "tr_e60fd36c78d0",
+      "thigh_m": 0.3111111111111111,
+      "calf_m": 0.40555555555555556,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_c68f592cd0be",
+      "id": "tr_c68f592cd0be",
+      "thigh_m": 0.24444444444444446,
+      "calf_m": 0.3611111111111111,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_3b1c389026b5",
+      "id": "tr_3b1c389026b5",
+      "thigh_m": 0.35555555555555557,
+      "calf_m": 0.25,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_da4f18c8ed96",
+      "id": "tr_da4f18c8ed96",
+      "thigh_m": 0.2666666666666667,
+      "calf_m": 0.3388888888888889,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_c1569f1b5001",
+      "id": "tr_c1569f1b5001",
+      "thigh_m": 0.37777777777777777,
+      "calf_m": 0.45,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_1ba0652f0407",
+      "id": "tr_1ba0652f0407",
+      "thigh_m": 0.22222222222222224,
+      "calf_m": 0.31666666666666665,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_472d70b8eeb6",
+      "id": "tr_472d70b8eeb6",
+      "thigh_m": 0.33333333333333337,
+      "calf_m": 0.4277777777777778,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_7e38f47e2897",
+      "id": "tr_7e38f47e2897",
+      "thigh_m": 0.2666666666666667,
+      "calf_m": 0.3388888888888889,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_dd5e1b95287e",
+      "id": "tr_dd5e1b95287e",
+      "thigh_m": 0.37777777777777777,
+      "calf_m": 0.45,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_bcf9e6771127",
+      "id": "tr_bcf9e6771127",
+      "thigh_m": 0.24444444444444446,
+      "calf_m": 0.38333333333333336,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_5953f3a1ccbc",
+      "id": "tr_5953f3a1ccbc",
+      "thigh_m": 0.35555555555555557,
+      "calf_m": 0.2722222222222222,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_294ee13039eb",
+      "id": "tr_294ee13039eb",
+      "thigh_m": 0.2,
+      "calf_m": 0.3611111111111111,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_ebc27ae99871",
+      "id": "tr_ebc27ae99871",
+      "thigh_m": 0.3111111111111111,
+      "calf_m": 0.25,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_15d68686ba56",
+      "id": "tr_15d68686ba56",
+      "thigh_m": 0.2888888888888889,
+      "calf_m": 0.40555555555555556,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_f32dcb4ed485",
+      "id": "tr_f32dcb4ed485",
+      "thigh_m": 0.4,
+      "calf_m": 0.29444444444444445,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_dd99659bdae1",
+      "id": "tr_dd99659bdae1",
+      "thigh_m": 0.2,
+      "calf_m": 0.3611111111111111,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_8e8b972e2497",
+      "id": "tr_8e8b972e2497",
+      "thigh_m": 0.3111111111111111,
+      "calf_m": 0.25,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_06b0e4641a5b",
+      "id": "tr_06b0e4641a5b",
+      "thigh_m": 0.2888888888888889,
+      "calf_m": 0.40555555555555556,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_a38d10304555",
+      "id": "tr_a38d10304555",
+      "thigh_m": 0.4,
+      "calf_m": 0.29444444444444445,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_5afe6e47c980",
+      "id": "tr_5afe6e47c980",
+      "thigh_m": 0.22222222222222224,
+      "calf_m": 0.31666666666666665,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_68cf2cdcd6f2",
+      "id": "tr_68cf2cdcd6f2",
+      "thigh_m": 0.33333333333333337,
+      "calf_m": 0.4277777777777778,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_19d824cd2f40",
+      "id": "tr_19d824cd2f40",
+      "thigh_m": 0.2666666666666667,
+      "calf_m": 0.38333333333333336,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_25caa6308078",
+      "id": "tr_25caa6308078",
+      "thigh_m": 0.37777777777777777,
+      "calf_m": 0.2722222222222222,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_1133114d34db",
+      "id": "tr_1133114d34db",
+      "thigh_m": 0.24444444444444446,
+      "calf_m": 0.3388888888888889,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_86c7398124f5",
+      "id": "tr_86c7398124f5",
+      "thigh_m": 0.35555555555555557,
+      "calf_m": 0.45,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_650041ee470b",
+      "id": "tr_650041ee470b",
+      "thigh_m": 0.2,
+      "calf_m": 0.38333333333333336,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_4cbbdbb77f85",
+      "id": "tr_4cbbdbb77f85",
+      "thigh_m": 0.3111111111111111,
+      "calf_m": 0.2722222222222222,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_b6a69e898b8d",
+      "id": "tr_b6a69e898b8d",
+      "thigh_m": 0.24444444444444446,
+      "calf_m": 0.31666666666666665,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_fdc3f19b0e3c",
+      "id": "tr_fdc3f19b0e3c",
+      "thigh_m": 0.35555555555555557,
+      "calf_m": 0.4277777777777778,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_47642a4d1ceb",
+      "id": "tr_47642a4d1ceb",
+      "thigh_m": 0.2666666666666667,
+      "calf_m": 0.29444444444444445,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_d127f6892180",
+      "id": "tr_d127f6892180",
+      "thigh_m": 0.37777777777777777,
+      "calf_m": 0.40555555555555556,
+      "knee_motor": "RS04",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_109a4013680e",
+      "id": "tr_109a4013680e",
+      "thigh_m": 0.22222222222222224,
+      "calf_m": 0.3611111111111111,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_874f5a9092e3",
+      "id": "tr_874f5a9092e3",
+      "thigh_m": 0.33333333333333337,
+      "calf_m": 0.25,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "RS06"
+    },
+    {
+      "amp_id": "tr_103c533bbc62",
+      "id": "tr_103c533bbc62",
+      "thigh_m": 0.2888888888888889,
+      "calf_m": 0.45,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_2a22931666f6",
+      "id": "tr_2a22931666f6",
+      "thigh_m": 0.4,
+      "calf_m": 0.3388888888888889,
+      "knee_motor": "DM-J10422P-2EC",
+      "ankle_motor": "DM-J4340P-2EC-V1.1-48V"
+    },
+    {
+      "amp_id": "tr_9da0e846c9b1",
+      "id": "tr_9da0e846c9b1",
+      "thigh_m": 0.2,
+      "calf_m": 0.38333333333333336,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_abc290f70f47",
+      "id": "tr_abc290f70f47",
+      "thigh_m": 0.3111111111111111,
+      "calf_m": 0.2722222222222222,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J4340P-2EC"
+    },
+    {
+      "amp_id": "tr_2032aaa9bd0f",
+      "id": "tr_2032aaa9bd0f",
+      "thigh_m": 0.2888888888888889,
+      "calf_m": 0.4277777777777778,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_fbf07e1e4a89",
+      "id": "tr_fbf07e1e4a89",
+      "thigh_m": 0.4,
+      "calf_m": 0.31666666666666665,
+      "knee_motor": "DM-J6248P-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_b97f69a1df13",
+      "id": "tr_b97f69a1df13",
+      "thigh_m": 0.22222222222222224,
+      "calf_m": 0.3611111111111111,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_70f578762b8c",
+      "id": "tr_70f578762b8c",
+      "thigh_m": 0.33333333333333337,
+      "calf_m": 0.25,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J6216P-2EC"
+    },
+    {
+      "amp_id": "tr_8cacc93edc96",
+      "id": "tr_8cacc93edc96",
+      "thigh_m": 0.24444444444444446,
+      "calf_m": 0.3388888888888889,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_6736a0eec306",
+      "id": "tr_6736a0eec306",
+      "thigh_m": 0.35555555555555557,
+      "calf_m": 0.45,
+      "knee_motor": "DM-J10010L-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_7d1e46bd14dc",
+      "id": "tr_7d1e46bd14dc",
+      "thigh_m": 0.2666666666666667,
+      "calf_m": 0.29444444444444445,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    },
+    {
+      "amp_id": "tr_201b58f58e4e",
+      "id": "tr_201b58f58e4e",
+      "thigh_m": 0.37777777777777777,
+      "calf_m": 0.40555555555555556,
+      "knee_motor": "DM-J10010-2EC",
+      "ankle_motor": "DM-J8009P-2EC-V1.1"
+    }
+  ]
+}
