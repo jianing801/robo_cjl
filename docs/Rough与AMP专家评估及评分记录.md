@@ -48,7 +48,7 @@ Rough 综合分 = 2.236889316588 × C + 13.185795515894 × R + 4.160779510175 ×
 AMP   综合分 = 11.657248318743 × C + 16.178605665985 × R + 0.344134854688 × T
 ```
 
-- OECD/European Union/EC-JRC（2008），*Handbook on Constructing Composite Indicators: Methodology and User Guide*。第 5.3 节给出线性缩放及固定参照样本的做法，第 6.4 节式（31）给出归一化指标的线性加权求和。[DOI 10.1787/9789264043466-en](https://doi.org/10.1787/9789264043466-en)
+- OECD/European Union/EC-JRC（2008），*Handbook on Constructing Composite Indicators: Methodology and User Guide*。第 5.3 节给出线性缩放及固定参照样本的做法，第 6.10 节式（31）给出归一化指标的线性加权求和。[DOI 10.1787/9789264043466-en](https://doi.org/10.1787/9789264043466-en)
 - Wang, Y., Sun, X., Li, J., Hong, S., Xiang, A., Shi, S., & Ding, T.（2026），*Optimized Dynamic Classification of Offshore Gas Wells Using Principal-Factor Screening and Cluster Analysis*，*Processes* 14(15), 2482。第 3.2 节式（12）用 P10、P90 作为线性端点，并将结果限制在 0–1。本记录采用其端点思想，最终评分对区间外的值继续线性计算，权重由本实验确定。[DOI 10.3390/pr14152482](https://doi.org/10.3390/pr14152482)
 
 ## 最终图与资料
