@@ -15,6 +15,7 @@ from contract import load_plan,sha,write_new,graph_features,unified_context,inpu
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 from scenario_sampling import rollout_env_count, verify_collection_layout, verify_stair_origins
 from stair_course import APPROACH_M, COURSE, outside_flight
+from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
 from shared_bo_metrics import DT
 
 
@@ -208,6 +209,7 @@ def main():
         from types import SimpleNamespace
         from student import load_student
         from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
+        from student_observations import forward_velocity
         from scenario_sampling import configure_stairs, route_stairs, payload_properties, payload_bins, scenario_table
         from physical_audit import audit_physics
         # Process-local importer compatibility; installed dependencies are not changed.
@@ -240,6 +242,9 @@ def main():
         cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
             strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
         cfg.capture_terminal_state=True
+        velocity_frame=None
+        if args.mode=='evaluate' and not args.ppo_channel:
+            velocity_frame=FIXED_COURSE_VELOCITY_FRAME if bo_conditions else EVALUATION_VELOCITY_FRAME
         evaluation_stairs=None
         if args.task=='stairs' and not bo_conditions:
             timed=args.mode=='evaluate' and not args.ppo_channel
@@ -250,6 +255,8 @@ def main():
                 randomization_audit['reset']['base']['pose_range']['x']=(0.,0.)
         if bo_conditions:
             configure_conditions(cfg, args.task, bo_conditions, args.seed, randomization_audit)
+        if velocity_frame:
+            randomization_audit['velocity_frame']=velocity_frame
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=args.reset_yaw_range))
         write_new(output/'randomization_audit.json',randomization_audit)
         cfg.sim.render_interval=1000000
@@ -459,7 +466,7 @@ def main():
                 if recorder:recorder.capture(step,dones)
                 # Terminal resets may move roots; exclude that step's displacement.
                 active=alive&~dones.bool()
-                tracking.update(command[:,0],raw.robot.data.root_lin_vel_b[:,0],active,
+                tracking.update(command[:,0],forward_velocity(raw.robot.data,velocity_frame),active,
                     dt=raw.step_dt,command_valid=alive)
                 reset=dones.bool();episodes.advance(reset)
                 delta=after-before
@@ -478,7 +485,7 @@ def main():
                     fields=['step','relative_x_m','relative_y_m','relative_z_m'],
                     environments={str(i):v for i,v in zip(ids,first_exit[ids].cpu().tolist(),strict=True)}))
                 raise ValueError(f'Stair flight boundary reached in environments {ids}; extend the course before scoring')
-            tracking_rows=tracking.rows()
+            tracking_rows=tracking.rows(horizontal=velocity_frame is not None)
             for i in range(n):
                 rows.append(dict(design=designs[int(groups[i])]['id'],environment=i,
                     payload_kg=float(raw.robot.backpack_mass_kg[i]) if args.task=='backpack' else None,
@@ -513,6 +520,7 @@ def main():
                 teacher=spec['checkpoint_sha256'],student=sha(args.student) if args.student else None,
                 teacher_updates=0,steps=args.steps,seed=args.seed,
                 rows=rows,**metadata,
+                **({'velocity_frame': velocity_frame} if velocity_frame else {}),
                 data=str(output/'data.pt') if args.mode=='collect' else None))
             exit_code=0
     except BaseException:

@@ -89,6 +89,17 @@ def test_negative_command_uses_matching_direction_for_progress():
     assert row['command_aligned_distance_m'] == .02
 
 
+def test_horizontal_evaluation_records_progress_and_mean_speed_without_tracking_error():
+    tracker = TrackingError(2, 'cpu')
+    tracker.update(torch.tensor([.5, .5]), torch.tensor([.25, .3]), torch.tensor([True, False]),
+                   dt=.02, command_valid=torch.tensor([True, True]))
+    measured, unmeasured = tracker.rows(horizontal=True)
+    assert measured['command_aligned_distance_m'] == pytest.approx(.005)
+    assert measured['mean_horizontal_forward_speed_m_s'] == .25
+    assert unmeasured['mean_horizontal_forward_speed_m_s'] is None
+    assert all('rmse' not in key for key in measured)
+
+
 def test_tracking_rejects_nonfinite_valid_samples_and_untimed_reports():
     error = TrackingError(1, 'cpu')
     with pytest.raises(ValueError, match='Nonfinite'):

@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,11 +16,11 @@ from contract import load_plan,sha,write_new,design_ids_for_keys
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from randomization import protocol_metadata
 from stair_course import COURSE
-from stair_resume import frozen_engine, upgrade_manifest
+from stair_resume import frozen_engine, upgrade_manifest, upgrade_tracking_manifest
 from persistence import run_lock,resume_pause
 from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_rank,
                         evaluation_criteria, teacher_comparison, SELECTION_RULE, GATE_VERSION,
-                        COMPARISON_VERSION)
+                        COMPARISON_VERSION, EVALUATION_VELOCITY_FRAME)
 
 
 def stop_child(process):
@@ -90,7 +91,7 @@ def evaluation_copies(task, spec, profile):
     return max(spec['copies'], 6) if task == 'stairs' and profile == 'robust' else spec['copies']
 
 
-def validate_evaluation_report(report, task, ids, spec, student_sha, protocol):
+def validate_evaluation_report(report, task, ids, spec, student_sha, protocol, *, velocity_frame=None):
     if (report.get('collection_protocol') != protocol or report.get('task') != task
             or report.get('teacher') != spec['checkpoint_sha256']
             or report.get('student') != student_sha or report.get('design_ids') != ids
@@ -104,28 +105,39 @@ def validate_evaluation_report(report, task, ids, spec, student_sha, protocol):
             or sorted(environments) != list(range(len(ids)*copies))
             or any(row['design'] != ids[row['environment'] % len(ids)] for row in rows)):
         raise ValueError('Incomplete or duplicate gait evaluation environment/design coverage')
+    if velocity_frame is not None:
+        if report.get('velocity_frame') != velocity_frame:
+            raise ValueError('Evaluation velocity frame differs from the request')
+        for row in rows:
+            speed = row.get('mean_horizontal_forward_speed_m_s')
+            duration = row['moving_tracking_seconds']
+            if ('mean_horizontal_forward_speed_m_s' not in row or
+                    (duration == 0 and speed is not None) or
+                    (duration > 0 and (type(speed) not in (float, int) or not math.isclose(
+                        speed * duration, row['command_aligned_distance_m'], rel_tol=1e-9, abs_tol=1e-9)))):
+                raise ValueError('Missing or inconsistent horizontal speed in evaluation')
     return rows
 
 
 def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed,
-                   suite, environment, timeout, criteria=None, frozen=None):
+                   suite, environment, timeout, criteria=None):
     """Persist fixed-seed evaluation separately from training and from final tests."""
     policy = 'student' if student else 'teacher'
     evaluations = []
     criteria_parameters = criteria or {}
     declared_criteria = evaluation_criteria(**criteria_parameters)
     for index, (task, ids) in enumerate(jobs):
-        engine, metadata = frozen[:2] if frozen and task != 'stairs' else (HERE, protocol_metadata)
-        protocol = metadata(profile, strength)
+        protocol = protocol_metadata(profile, strength)
         expected = dict(profile=profile, protocol=protocol, seed=seed, design_ids=ids,evaluation_criteria=declared_criteria,
-                        policy=policy, actor_sha256=sha(student) if student else plan['teachers'][task]['checkpoint_sha256'])
-        suffix = '_' + COURSE if task == 'stairs' else ''
+                        policy=policy, actor_sha256=sha(student) if student else plan['teachers'][task]['checkpoint_sha256'],
+                        velocity_frame=EVALUATION_VELOCITY_FRAME)
+        suffix = f'_{COURSE}_{EVALUATION_VELOCITY_FRAME}' if task == 'stairs' else f'_{EVALUATION_VELOCITY_FRAME}'
         commit = root/'evaluation_commits'/suite/f'{index:04d}_{task}_{policy}{suffix}.json'
         new_commit = not commit.exists()
         if new_commit:
             folder = root/'evaluation'/suite/f'{index:04d}_{task}_{policy}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
             command = [sys.executable, '-X', 'faulthandler', '-u',
-                       str(engine/('rollout_amp.py' if task == 'run' else 'rollout.py')),
+                       str(HERE/('rollout_amp.py' if task == 'run' else 'rollout.py')),
                        '--plan', str(plan_path), '--design-ids', ','.join(ids), '--output', str(folder),
                        '--mode', 'evaluate', '--profile', profile, '--randomization-strength', str(strength),
                        '--steps', '1000', '--seed', str(seed), '--headless', '--device', 'cuda:0']
@@ -144,23 +156,23 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
                 raise ValueError('Committed evaluation profile, policy or results changed')
         report = json.loads((folder/'summary.json').read_text())
         rows = validate_evaluation_report(report, task, ids, plan['teachers'][task],
-            expected['actor_sha256'] if student else None, protocol)
+            expected['actor_sha256'] if student else None, protocol, velocity_frame=EVALUATION_VELOCITY_FRAME)
         statistics = evaluation_statistics(task, rows, profile, **criteria_parameters)
         if new_commit:
             commit.parent.mkdir(parents=True, exist_ok=True)
             write_new(commit, dict(folder=str(folder), identity=expected, summary_sha256=sha(folder/'summary.json')))
         evaluations.append(dict(task=task, policy=policy, profile=profile, seed=seed, designs=ids,
-                                evaluation_protocol=protocol,
+                                evaluation_protocol=protocol, velocity_frame=EVALUATION_VELOCITY_FRAME,
                                 summary=str(folder/'summary.json'), **statistics))
     return evaluations
 
 
 def run_selection_suite(plan, plan_path, root, jobs, student, profile, strength, seeds,
-                        suite, environment, timeout, criteria=None, frozen=None):
+                        suite, environment, timeout, criteria=None):
     records, by_seed = [], {}
     for seed in seeds:
         current = run_evaluation(plan, plan_path, root, jobs, student, profile, strength,
-                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria, frozen)
+                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria)
         records.extend(current)
         by_seed[str(seed)] = aggregate_evaluations(current, plan['schema']['tasks'])
     return dict(task_metrics=aggregate_evaluations(records, plan['schema']['tasks']),
@@ -186,7 +198,7 @@ def summarize_final_evaluations(records, tasks, profiles):
         result[profile] = dict(policy_metrics=policy_metrics,
             teacher_comparison=teacher_comparison(policy_metrics['student'], policy_metrics['teacher']),
             comparison_version=COMPARISON_VERSION,
-            policy_all_episodes_command_tracking_passed=all_episodes_passed,
+            policy_all_episodes_locomotion_passed=all_episodes_passed,
             scope='Observed per-policy episodes only; no distillation acceptance or optimal-control claim')
     return result
 
@@ -209,9 +221,9 @@ def main(argv=None):
                    help='First BC round strength; linearly reaches target at the last DAgger round')
     p.add_argument('--selection-profile',choices=['nominal','robust'],default='robust')
     p.add_argument('--selection-seeds',default='20261117,20261119,20261120')
-    p.add_argument('--tracking-abs-tolerance',type=float,default=None,help='Retired; moving tracking has no absolute tolerance floor')
+    p.add_argument('--tracking-abs-tolerance',type=float,default=None,help=argparse.SUPPRESS)
     p.add_argument('--standing-speed-tolerance',type=float,default=None,help='Retired; standing commands and their acceptance gate have been removed')
-    p.add_argument('--tracking-rel-tolerance',type=float,default=.25,help='Moving-only RMSE tolerance relative to moving commanded vx RMS')
+    p.add_argument('--tracking-rel-tolerance',type=float,default=.25,help=argparse.SUPPRESS)
     p.add_argument('--min-command-progress-ratio',type=float,default=.5,help='Minimum realized/commanded forward progress for moving commands')
     p.add_argument('--resume',action='store_true');p.add_argument('--device')
     p.add_argument('--resume-paused',action='store_true',help='Resume a manually paused run after identity checks')
@@ -221,7 +233,7 @@ def main(argv=None):
     a=p.parse_args(argv)
     if a.resume_paused:a.resume=True
     if a.tracking_abs_tolerance is not None:
-        raise ValueError('--tracking-abs-tolerance is retired; moving tracking uses only --tracking-rel-tolerance.')
+        raise ValueError('--tracking-abs-tolerance is retired; selection uses survival and forward progress.')
     if a.standing_speed_tolerance is not None:
         raise ValueError('--standing-speed-tolerance is retired; standing commands and their acceptance gate have been removed.')
     if a.max_rows_per_design_shard is not None:
@@ -247,7 +259,6 @@ def execute_pipeline(a,seeds):
     frozen=frozen_engine(root,HERE,previous,a.resume_paused) if previous else None
     collector,collection_metadata=frozen[:2] if frozen else (HERE,protocol_metadata)
     criteria_parameters=dict(duration_s=20.,time_tolerance_s=.1,
-        tracking_rel_tol=a.tracking_rel_tolerance,
         min_command_progress_ratio=a.min_command_progress_ratio,max_missing_tracking_steps=1)
     criteria=evaluation_criteria(**criteria_parameters)
     collection_keys=select_collection_grid(plan['selected_structure_keys'])
@@ -270,7 +281,7 @@ def execute_pipeline(a,seeds):
         selection=protocol_metadata(a.selection_profile,a.randomization_strength if a.selection_profile=='robust' else 0.),
         selection_seeds=seeds,selection_keys=selected_keys,calibration_keys=reserved,
         selection_version=SELECTION_VERSION,selection_budget=budget,
-        stair_evaluation=COURSE,
+        stair_evaluation=COURSE,evaluation_velocity_frame=EVALUATION_VELOCITY_FRAME,
         comparison_version=COMPARISON_VERSION,
         evaluation_criteria=criteria,evaluation_version=GATE_VERSION,
         implementation_sha256=sha(__file__),fit_implementation_sha256=sha(HERE/'fit.py'),
@@ -280,9 +291,13 @@ def execute_pipeline(a,seeds):
     if a.resume:
         expected={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused')}
         if previous['arguments']!=expected or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
-        if frozen and 'stair_evaluation' not in previous['protocol']:
-            current=json.loads(json.dumps(dict(previous,protocol=protocol,protocol_sha256=protocol_sha256)))
-            upgrade_manifest(root,previous,current)
+        if frozen and previous['protocol'].get('evaluation_velocity_frame') != EVALUATION_VELOCITY_FRAME:
+            current=json.loads(json.dumps(dict(previous,protocol=protocol,protocol_sha256=protocol_sha256,
+                                               selection_rule=SELECTION_RULE)))
+            if 'stair_evaluation' in previous['protocol']:
+                upgrade_tracking_manifest(root,previous,current,explicit=a.resume_paused)
+            else:
+                upgrade_manifest(root,previous,current)
             previous=current
         if previous.get('protocol_sha256')!=protocol_sha256:
             raise ValueError('Collection/selection protocol changed or this is a legacy run. Keep old data; use a new output directory.')
@@ -378,11 +393,11 @@ def execute_pipeline(a,seeds):
                 continue
             if teacher_baseline is None:
                 teacher_reference=run_selection_suite(plan,Path(a.plan).resolve(),root,selected_jobs,None,
-                    a.selection_profile,selection_strength,seeds,'selection/teacher',environment,a.timeout_seconds,criteria_parameters,frozen)
+                    a.selection_profile,selection_strength,seeds,'selection/teacher',environment,a.timeout_seconds,criteria_parameters)
                 teacher_baseline=teacher_reference['task_metrics']
             assessment=run_selection_suite(plan,Path(a.plan).resolve(),root,selected_jobs,student,
                 a.selection_profile,selection_strength,seeds,f'selection/round_{round_index}',environment,
-                a.timeout_seconds,criteria_parameters,frozen)
+                a.timeout_seconds,criteria_parameters)
             measured=assessment['task_metrics']
             selection_reports.append(dict(round_report,**assessment,rank=candidate_rank(measured,teacher_baseline),
                 teacher_comparison=teacher_comparison(measured,teacher_baseline)))

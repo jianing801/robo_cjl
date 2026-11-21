@@ -195,8 +195,13 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
         profile=command[command.index('--profile')+1]; seed=int(command[command.index('--seed')+1])
         actor=command[command.index('--student')+1]; design=command[command.index('--design-ids')+1]
         evaluations.append((task,profile,seed))
+        rows=[row(i,design=design) for i in range(8)]
+        for record in rows:
+            record['mean_horizontal_forward_speed_m_s']=(
+                record['command_aligned_distance_m']/record['moving_tracking_seconds'])
         write_new(folder/'summary.json',dict(task=task,teacher=plan['teachers'][task]['checkpoint_sha256'],
-            student=sha(actor),design_ids=[design],steps=1000,rows=[row(i,design=design) for i in range(8)],
+            student=sha(actor),design_ids=[design],steps=1000,rows=rows,
+            velocity_frame=pipeline.EVALUATION_VELOCITY_FRAME,
             collection_protocol=pipeline.protocol_metadata(profile,1. if profile=='robust' else 0.)))
     monkeypatch.setattr(pipeline,'child',evaluate)
     args=['--plan',str(plan_path),'--student',str(initial),'--output',str(output),

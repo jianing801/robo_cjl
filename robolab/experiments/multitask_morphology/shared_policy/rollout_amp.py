@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context
+from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 from scenario_sampling import last_design_copy, rollout_env_count, verify_collection_layout
 
@@ -36,6 +37,9 @@ def main():
     if len(ids)!=len(set(ids)) or not set(ids)<=set(spec['design_ids']):raise ValueError('Unknown or duplicate AMP design')
     from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
     bo_conditions = parse_conditions(a, ids)
+    velocity_frame=None
+    if a.mode=='evaluate' and not a.ppo_channel:
+        velocity_frame=FIXED_COURSE_VELOCITY_FRAME if bo_conditions else EVALUATION_VELOCITY_FRAME
     if bo_conditions:
         a.speed = bo_conditions['tasks']['run']['speed_mps']
     n=rollout_env_count(a,len(ids),bo_conditions['copies'] if bo_conditions else spec['copies'])
@@ -74,6 +78,8 @@ def main():
             seed=a.seed,reset_yaw_range=a.reset_yaw_range,speed=a.speed)
         if bo_conditions:
             configure_conditions(cfg, 'run', bo_conditions, a.seed, randomization_audit)
+        if velocity_frame:
+            randomization_audit['velocity_frame']=velocity_frame
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=a.reset_yaw_range,speed_command=a.speed))
         write_new(out/'randomization_audit.json',randomization_audit)
         expected_terms=['base_ang_vel','projected_gravity','velocity_commands','joint_pos','joint_vel','actions']
@@ -146,6 +152,7 @@ def main():
         random.seed(a.seed+999);np.random.seed((a.seed+999) % 2**32);torch.manual_seed(a.seed+999);torch.cuda.manual_seed_all(a.seed+999)
         with torch.inference_mode():
             from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
+            from student_observations import forward_velocity
             from scenario_sampling import scenario_table
             obs=env.get_observations();environments=torch.arange(n,device=raw.device)
             groups=environments%len(ids);validation=last_design_copy(environments,len(ids))
@@ -223,7 +230,7 @@ def main():
                     bo.capture(command, done)
                 if recorder:recorder.capture(step,done)
                 delta=raw.robot.data.root_pos_w-before;active=alive&~done.bool()
-                tracking.update(command[:,0],raw.robot.data.root_lin_vel_b[:,0],active,
+                tracking.update(command[:,0],forward_velocity(raw.robot.data,velocity_frame),active,
                     dt=raw.step_dt,command_valid=alive)
                 forward[active]+=delta[active,0];side[active]+=delta[active,1];elapsed[alive]+=raw.step_dt
                 fell|=alive&raw.reset_terminated.bool();alive&=~done.bool();reset=done.bool()
@@ -234,7 +241,7 @@ def main():
             if recorder:recorder.close()
             if any(not torch.equal(normalization_before[k],v) for k,v in teacher.actor_obs_normalizer.state_dict().items()):
                 raise ValueError('Frozen AMP actor normalizer changed')
-            tracking_rows=tracking.rows()
+            tracking_rows=tracking.rows(horizontal=velocity_frame is not None)
             rows=[dict(design=ids[i%len(ids)],environment=i,payload_kg=None,seconds=float(elapsed[i]),fell=bool(fell[i]),
                 forward_m=float(forward[i]),lateral_m=float(side[i]),mean_forward_speed=float(forward[i]/elapsed[i].clamp(min=.02)),
                 **tracking_rows[i]) for i in range(n)]
@@ -259,6 +266,7 @@ def main():
             write_new(out/'summary.json',dict(result='REAL_AMP_ROLLOUT_COMPLETE',task='run',rows=rows,design_ids=ids,
                 teacher=spec['checkpoint_sha256'],student=sha(a.student) if a.student else None,
                 steps=a.steps,seed=a.seed,**metadata,
+                **({'velocity_frame': velocity_frame} if velocity_frame else {}),
                 actor_normalizer_unchanged=True,native_clip_actions=native_clip,
                 teacher_updates=0,reference_routing_verified=True,history_adapter_live_verified=True))
             write_new(out/'reference_cache_stats.json',dict(hits=routing.hits,misses=routing.misses))

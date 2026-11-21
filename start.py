@@ -686,13 +686,13 @@ def main(argv=None):
     parser.add_argument('--samples-per-design-per-epoch', type=int, default=32, help='每结构每数据源每epoch的计算预算，不截断训练数据')
     parser.add_argument('--validation-rows-per-design-shard', type=int, default=128, help='每结构每数据源的监督验证行预算')
     parser.add_argument('--replay-cache-shards', type=int, default=12, help='内存中的回放分片缓存数量')
-    parser.add_argument('--tracking-abs-tolerance', type=float, default=None, help='已停用：运动跟踪不再使用绝对误差下限')
+    parser.add_argument('--tracking-abs-tolerance', type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--standing-speed-tolerance', type=float, default=None, help='已停用：共享策略已关闭站立指令并移除站立验收项')
-    parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help='仅运动阶段的跟踪RMSE相对运动指令速度RMS的容差')
+    parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help=argparse.SUPPRESS)
     parser.add_argument('--min-command-progress-ratio', type=float, default=.5, help='运动指令下实际进度与指令进度的最小比例')
     args = parser.parse_args(argv)
     if args.tracking_abs_tolerance is not None:
-        parser.error('--tracking-abs-tolerance已停用；运动跟踪仅使用--tracking-rel-tolerance')
+        parser.error('--tracking-abs-tolerance 已停用，选模按存活和前进行程判定')
     if args.standing_speed_tolerance is not None:
         parser.error('--standing-speed-tolerance已停用；共享策略已关闭站立指令并移除站立验收项')
     if args.gpu < 0:

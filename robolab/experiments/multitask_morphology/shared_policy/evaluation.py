@@ -1,48 +1,36 @@
-"""Declared engineering gates for closed-loop checkpoint selection.
-
-These tolerances are configurable engineering acceptance settings, not paper-
-derived optimal thresholds. Success means complete-episode survival and forward
-command tracking, not a full stair-climbing or deployment certification.
-"""
+"""Closed-loop checkpoint selection from first-episode survival and forward progress."""
 from copy import deepcopy
 import json
 import math
 
-GATE_VERSION = "continuous_locomotion_evaluation_v3"
-COMPARISON_VERSION = "paired_teacher_design_gap_v1"
+GATE_VERSION = "continuous_locomotion_progress_v4"
+EVALUATION_VELOCITY_FRAME = "horizontal_heading"
+FIXED_COURSE_VELOCITY_FRAME = "world_horizontal_x"
+COMPARISON_VERSION = "paired_teacher_design_gap_v2"
 RANK_DECIMAL_PLACES = 12  # Remove floating-point tail noise, not a performance tolerance.
 SELECTION_RULE = ("Apply the same student-minus-teacher comparison to every task and structure; "
     "first minimize the worst task's mean per-structure success shortfall, then the mean task shortfall. "
     "Structure gains cannot cancel another structure's shortfall. Then maximize equal-task/equal-structure "
-    "student success and survival fraction. "
-    "Prefer complete tracking measurements before lower equal-task/equal-structure mean episode vx RMSE; "
-    "ties retain the earlier checkpoint. These are observed estimates, not significance or mastery claims.")
+    "student success and survival fraction. Ties retain the earlier checkpoint.")
 
 
-def evaluation_criteria(*, duration_s=20., time_tolerance_s=.1, tracking_rel_tol=.25,
-                        min_command_progress_ratio=.5,
+def evaluation_criteria(*, duration_s=20., time_tolerance_s=.1, min_command_progress_ratio=.5,
                         max_missing_tracking_steps=1):
-    values = (duration_s, time_tolerance_s, tracking_rel_tol, min_command_progress_ratio)
+    values = (duration_s, time_tolerance_s, min_command_progress_ratio)
     if (any(isinstance(v, bool) or not math.isfinite(v) for v in values)
             or duration_s <= 0 or not 0 <= time_tolerance_s < duration_s
-            or tracking_rel_tol < 0
             or not 0 <= min_command_progress_ratio <= 1
             or type(max_missing_tracking_steps) is not int or max_missing_tracking_steps < 0):
-        raise ValueError('Invalid engineering command-tracking acceptance thresholds')
+        raise ValueError('Invalid engineering locomotion acceptance thresholds')
     return dict(version=GATE_VERSION, duration_s=float(duration_s), time_tolerance_s=float(time_tolerance_s),
-        tracking_rel_tol=float(tracking_rel_tol),
         min_command_progress_ratio=float(min_command_progress_ratio),
         max_missing_tracking_steps=max_missing_tracking_steps,
-        tolerance_source='configurable engineering acceptance settings; not paper-optimal thresholds',
-        success_scope='initial-episode survival and continuous forward-command tracking; not full stair traversal or stop-and-stand validation',
+        success_scope='initial-episode survival and continuous forward progress',
         command_scope='continuous locomotion; standing commands are disabled',
-        unexpected_standing='protocol error; never silently omit zero-command periods or count them as success',
-        progress_scope='integrated body vx along commanded direction, only while abs(commanded vx) > 0.05 m/s',
+        progress_scope='integrated forward speed along commanded direction, only while abs(commanded vx) > 0.05 m/s',
         active_command_threshold_m_s=.05,
-        tracking_gate='moving-phase vx RMSE <= relative tolerance * moving-phase commanded vx RMS; no absolute floor',
-        ranking_tracking_metric='overall vx tracking RMSE remains the diagnostic and ranking tie-breaker',
-        empty_tracking='null RMSE and unsuccessful episode',
-        profiles='same command-aware criteria for nominal and robust')
+        speed_summary='signed progress divided by measured time and commanded distance divided by command exposure time',
+        profiles='same survival and progress criteria for nominal and robust')
 
 
 def _number(row, key, *, nonnegative=False):
@@ -64,180 +52,106 @@ def _count(row, key):
     return value
 
 
-def _rms(row, key, count):
-    if key not in row:
-        raise ValueError(f'Missing closed-loop metric: {key}')
-    if count:
-        return _number(row, key, nonnegative=True)
-    if row[key] is not None:
-        raise ValueError(f'Zero samples requires null {key}, never fabricated zero')
-    return None
+def _check_duration(seconds, expected, label):
+    if not math.isclose(seconds, expected, rel_tol=1e-6, abs_tol=1e-8):
+        raise ValueError(f'Inconsistent {label}')
 
 
-def _close(actual, expected, label):
-    if not math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-8):
-        raise ValueError(f'Inconsistent segmented {label}')
-
-
-def _phases(row, count, error, requested, command_rms, dt, active):
-    """Check disjoint command/measurement phases and their second moments."""
-    if 'command_zero_tolerance_m_s' in row:
-        _close(_number(row, 'command_zero_tolerance_m_s', nonnegative=True), .05,
-            'standing-command classification threshold')
-    command_count = _count(row, 'command_samples')
-    _close(requested, command_count * dt, 'command duration/count')
-    phases = {}
-    for name in ('moving', 'standing'):
-        nc = _count(row, f'{name}_command_samples')
-        nv = _count(row, f'{name}_tracking_samples')
-        if nv > nc:
-            raise ValueError(f'{name} tracking samples exceed command samples')
-        tc = _number(row, f'{name}_command_seconds', nonnegative=True)
-        tv = _number(row, f'{name}_tracking_seconds', nonnegative=True)
-        _close(tc, nc * dt, f'{name} command duration/count')
-        _close(tv, nv * dt, f'{name} tracking duration/count')
-        rms = _rms(row, f'{name}_commanded_vx_rms_m_s', nc)
-        err = _rms(row, f'{name}_tracking_rmse', nv)
-        if rms is not None and ((name == 'moving' and rms < .05 - 1e-8)
-                or (name == 'standing' and rms > .05 + 1e-8)):
-            raise ValueError(f'{name} command RMS contradicts the standing-command band')
-        phases[name] = dict(command_samples=nc, tracking_samples=nv, command_seconds=tc,
-            tracking_seconds=tv, commanded_vx_rms_m_s=rms, tracking_rmse=err)
-    if sum(phase['command_samples'] for phase in phases.values()) != command_count:
+def _check_motion_samples(row, samples, seconds, requested, active, dt):
+    command_samples = _count(row, 'command_samples')
+    moving_command_samples = _count(row, 'moving_command_samples')
+    standing_command_samples = _count(row, 'standing_command_samples')
+    if moving_command_samples + standing_command_samples != command_samples:
         raise ValueError('Segmented command counts do not sum to total command_samples')
-    if sum(phase['tracking_samples'] for phase in phases.values()) != count:
-        raise ValueError('Segmented tracking counts do not sum to total tracking_samples')
-    _close(active, phases['moving']['command_seconds'], 'active command seconds')
-    _close((command_rms or 0.) ** 2 * requested,
-        sum((phase['commanded_vx_rms_m_s'] or 0.) ** 2 * phase['command_seconds'] for phase in phases.values()),
-        'command RMS second moments')
-    _close((error or 0.) ** 2 * count,
-        sum((phase['tracking_rmse'] or 0.) ** 2 * phase['tracking_samples'] for phase in phases.values()),
-        'tracking RMSE second moments')
-    standing = phases['standing']
-    standing['actual_vx_rms_m_s'] = _rms(row, 'standing_vx_rms_m_s', standing['tracking_samples'])
-    if standing['tracking_samples']:
-        # Only a subset of commanded samples may have measurements. Its command
-        # energy cannot exceed all command energy; this bounds the possible
-        # difference between residual-speed RMS and command-error RMS.
-        max_command_rms = (standing['commanded_vx_rms_m_s'] or 0.) * math.sqrt(
-            standing['command_samples'] / standing['tracking_samples'])
-        if abs(standing['actual_vx_rms_m_s'] - standing['tracking_rmse']) > max_command_rms + 1e-8:
-            raise ValueError('Standing residual speed and tracking error are inconsistent')
-    return phases
+    _check_duration(requested, command_samples * dt, 'command duration/count')
+    _check_duration(active, moving_command_samples * dt, 'active command duration/count')
+    if standing_command_samples:
+        raise ValueError('Continuous-locomotion evaluation does not accept standing commands')
+    if (samples > moving_command_samples or _count(row, 'moving_tracking_samples') != samples
+            or _count(row, 'standing_tracking_samples')):
+        raise ValueError('Segmented measurement counts do not match the moving episode')
+    _check_duration(_number(row, 'moving_tracking_seconds', nonnegative=True), seconds,
+                    'moving measurement duration/count')
+    _check_duration(_number(row, 'moving_command_seconds', nonnegative=True), active,
+                    'moving command duration/count')
+    _check_duration(_number(row, 'standing_command_seconds', nonnegative=True), 0., 'standing command duration')
+    _check_duration(_number(row, 'standing_tracking_seconds', nonnegative=True), 0., 'standing measurement duration')
 
 
-def _episode_statistics(task, rows, profile, *, duration_s=20., time_tolerance_s=.1,
-                          tracking_rel_tol=.25,
-                          min_command_progress_ratio=.5, max_missing_tracking_steps=1):
+def _mean_speed(distance, seconds):
+    return distance / seconds if seconds > 0 else None
+
+
+def _episode_statistics(task, rows, profile, criteria):
     if task not in ('stairs', 'backpack', 'run') or profile not in ('nominal', 'robust') or not rows:
         raise ValueError('A known task/profile and nonempty closed-loop evaluation are required')
-    criteria = evaluation_criteria(duration_s=duration_s, time_tolerance_s=time_tolerance_s,
-        tracking_rel_tol=tracking_rel_tol,
-        min_command_progress_ratio=min_command_progress_ratio,
-        max_missing_tracking_steps=max_missing_tracking_steps)
-    failed, details, errors = [], [], []
-    survived = fully_covered = legacy_successes = legacy_available = 0
-    survival_sum = squared_error_sum = command_seconds_sum = tracking_seconds_sum = 0.
-    sample_count = 0
+    duration = criteria['duration_s']
+    time_tolerance = criteria['time_tolerance_s']
+    progress_threshold = criteria['min_command_progress_ratio']
+    allowed_missing = criteria['max_missing_tracking_steps']
+    failed, details = [], []
+    survived = fully_covered = 0
+    survival_sum = commanded_distance = measured_distance = command_seconds = measured_seconds = 0.
     for row in rows:
         environment = row.get('environment')
         if type(environment) is not int or environment < 0 or type(row.get('fell')) is not bool:
             raise ValueError('Evaluation requires integer environment IDs and a boolean fell flag')
         seconds = _number(row, 'seconds', nonnegative=True)
-        count = row.get('tracking_samples')
-        if type(count) is not int or count < 0:
-            raise ValueError('tracking_samples must be a nonnegative integer')
-        if 'tracking_rmse' not in row:
-            raise ValueError('Missing closed-loop metric: tracking_rmse')
-        error = row['tracking_rmse']
-        if count:
-            error = _number(row, 'tracking_rmse', nonnegative=True)
-            errors.append(error)
-            squared_error_sum += error ** 2 * count
-        elif error is not None:
-            raise ValueError('Zero tracking_samples requires null tracking_rmse, never fabricated zero')
+        samples = _count(row, 'tracking_samples')
         measured = _number(row, 'tracking_seconds', nonnegative=True)
         requested = _number(row, 'command_seconds', nonnegative=True)
         active = _number(row, 'active_command_seconds', nonnegative=True)
         distance = _number(row, 'commanded_distance_m', nonnegative=True)
         aligned = _number(row, 'command_aligned_distance_m')
         dt = _number(row, 'step_dt_s', nonnegative=True)
-        if dt <= 0 or abs(measured - count * dt) > 1e-5:
-            raise ValueError('Tracking duration/sample/control-dt mismatch')
+        if dt <= 0:
+            raise ValueError('A positive control timestep is required')
+        _check_duration(measured, samples * dt, 'measurement duration/count')
         if (measured > requested + 1e-3 or active > requested + 1e-3
                 or abs(requested - seconds) > 1e-3):
-            raise ValueError('Tracking/command exposure must describe the same initial episode')
-        if requested:
-            command_rms = _number(row, 'commanded_vx_rms_m_s', nonnegative=True)
-        elif row.get('commanded_vx_rms_m_s') is not None:
-            raise ValueError('Zero command duration requires null commanded_vx_rms_m_s')
-        else:
-            command_rms = None
-        phases = _phases(row, count, error, requested, command_rms, dt, active)
-        if phases['standing']['command_samples']:
-            raise ValueError('Continuous-locomotion evaluation does not accept standing commands; use a new motion-only evaluation')
-        if active == 0 and (distance > 1e-8 or abs(aligned) > 1e-8):
-            raise ValueError('Standing commands cannot accumulate moving-command progress')
-        if active > 0 and distance <= 0:
-            raise ValueError('Moving command exposure requires positive commanded distance')
-        survival = not row['fell'] and seconds >= duration_s - time_tolerance_s
+            raise ValueError('Measurement and command exposure must describe the same initial episode')
+        _check_motion_samples(row, samples, measured, requested, active, dt)
+        if (active > 0) != (distance > 0) or (not samples and abs(aligned) > 1e-8):
+            raise ValueError('Distance is inconsistent with command or measurement exposure')
+
+        survival = not row['fell'] and seconds >= duration - time_tolerance
+        progress = aligned / distance if distance > 0 else None
+        coverage = samples > 0 and requested - measured <= allowed_missing * dt + 1e-6
         survived += int(survival)
-        # Preserve the exact former gate as a comparison column only. It is
-        # intentionally not reused for command-aware acceptance or selection.
-        legacy_fields = ('mean_forward_speed', 'ascent_m') if task == 'stairs' else ('mean_forward_speed',)
-        if all(field in row for field in legacy_fields):
-            speed = _number(row, 'mean_forward_speed')
-            ascent = _number(row, 'ascent_m') if task == 'stairs' else None
-            legacy_available += 1
-            legacy_successes += int(not row['fell'] and seconds >= 19.9 and speed >= .1
-                and (task != 'stairs' or ascent >= .1))
-        survival_sum += min(seconds / duration_s, 1.)
-        command_seconds_sum += requested
-        tracking_seconds_sum += measured
-        sample_count += count
-        moving = phases['moving']
-        tolerance = tracking_rel_tol * moving['commanded_vx_rms_m_s'] if moving['command_samples'] else None
-        progress = aligned / distance if active > 0 else None
-        coverage = (count > 0 and requested - measured <= max_missing_tracking_steps * dt + 1e-6
-            and all(phase['tracking_samples'] > 0 for phase in phases.values() if phase['command_samples']))
         fully_covered += int(coverage)
+        survival_sum += min(seconds / duration, 1.)
+        commanded_distance += distance
+        measured_distance += aligned
+        command_seconds += active
+        measured_seconds += measured
+
         reasons = []
         if not survival:
             reasons.append('fell_or_incomplete_horizon')
         if not coverage:
-            reasons.append('missing_tracking_coverage')
-        if moving['command_samples'] and (moving['tracking_rmse'] is None or moving['tracking_rmse'] > tolerance + 1e-8):
-            reasons.append('moving_forward_command_tracking')
-        if progress is not None and progress < min_command_progress_ratio - 1e-8:
+            reasons.append('missing_progress_measurement')
+        if progress is not None and progress < progress_threshold:
             reasons.append('insufficient_command_relative_progress')
         if reasons:
             failed.append(environment)
         details.append(dict(environment=environment, success=not reasons, survival=survival,
-            reasons=reasons, tracking_rmse=error, tracking_tolerance_m_s=tolerance,
-            moving_tracking_tolerance_m_s=tolerance,
-            phase_measurements={'moving': moving},
-            command_progress_ratio=progress,
-            tracking_coverage_verified=coverage))
+            reasons=reasons, command_progress_ratio=progress, progress_measurement_complete=coverage,
+            mean_command_aligned_speed_m_s=_mean_speed(aligned, measured),
+            mean_commanded_speed_m_s=_mean_speed(distance, active)))
+
     count = len(rows)
-    success_rate = 1 - len(failed) / count
-    return dict(environments=count, failed=failed, success_rate=success_rate,
-        command_tracking_success_rate=success_rate, survival_rate=survived / count,
-        legacy_basic_gait_success_rate=legacy_successes / count if legacy_available == count else None,
-        legacy_basic_gait_successes=legacy_successes, legacy_basic_gait_environments=legacy_available,
-        legacy_basic_gait_rule='comparison only: no fall, seconds>=19.9, mean_forward_speed>=0.1 m/s; stairs ascent>=0.1 m',
-        mean_survival_fraction=survival_sum / count, survival_fraction_sum=survival_sum,
-        tracking_rmse_mean=sum(errors) / len(errors) if errors else None,
-        tracking_rmse_sum=sum(errors), tracking_squared_error_sum=squared_error_sum,
-        tracking_rmse_pooled=math.sqrt(squared_error_sum / sample_count) if sample_count else None,
-        tracking_valid_environments=len(errors), tracking_valid_fraction=len(errors) / count,
-        tracking_fully_covered_environments=fully_covered, tracking_fully_covered_fraction=fully_covered / count,
-        tracking_samples=sample_count, tracking_seconds=tracking_seconds_sum,
-        command_seconds=command_seconds_sum, criteria=criteria, environment_results=details)
+    return dict(environments=count, failed=failed, success_rate=1 - len(failed) / count,
+        survival_rate=survived / count, mean_survival_fraction=survival_sum / count,
+        survival_fraction_sum=survival_sum, complete_measurement_environments=fully_covered,
+        measurement_coverage_fraction=fully_covered / count, commanded_distance_m=commanded_distance,
+        command_aligned_distance_m=measured_distance, command_seconds=command_seconds,
+        measured_seconds=measured_seconds,
+        mean_command_aligned_speed_m_s=_mean_speed(measured_distance, measured_seconds),
+        mean_commanded_speed_m_s=_mean_speed(commanded_distance, command_seconds),
+        criteria=criteria, environment_results=details)
 
 
 def evaluation_statistics(task, rows, profile, *, duration_s=20., time_tolerance_s=.1,
-                          tracking_rel_tol=.25,
                           min_command_progress_ratio=.5, max_missing_tracking_steps=1):
     """Retain every structure instead of hiding regressions in a job average."""
     groups = {}
@@ -246,13 +160,11 @@ def evaluation_statistics(task, rows, profile, *, duration_s=20., time_tolerance
         if not isinstance(design, str) or not design.strip():
             raise ValueError('Every evaluation row requires a nonempty design identity')
         groups.setdefault(design, []).append(row)
-    parameters = dict(duration_s=duration_s, time_tolerance_s=time_tolerance_s,
-        tracking_rel_tol=tracking_rel_tol,
-        min_command_progress_ratio=min_command_progress_ratio,
-        max_missing_tracking_steps=max_missing_tracking_steps)
-    result = _episode_statistics(task, rows, profile, **parameters)
+    criteria = evaluation_criteria(duration_s=duration_s, time_tolerance_s=time_tolerance_s,
+        min_command_progress_ratio=min_command_progress_ratio, max_missing_tracking_steps=max_missing_tracking_steps)
+    result = _episode_statistics(task, rows, profile, criteria)
     result['design_metrics'] = {design: dict(profile=profile,
-        **_episode_statistics(task, selected, profile, **parameters))
+        **_episode_statistics(task, selected, profile, criteria))
         for design, selected in sorted(groups.items())}
     return result
 
@@ -262,23 +174,18 @@ def _aggregate_statistics(current):
         raise ValueError('Cannot aggregate evaluations with different acceptance criteria')
     count = sum(row['environments'] for row in current)
     failed = sum(len(row['failed']) for row in current)
-    valid = sum(row['tracking_valid_environments'] for row in current)
-    samples = sum(row['tracking_samples'] for row in current)
-    squared = sum(row['tracking_squared_error_sum'] for row in current)
-    success = 1 - failed / count
-    legacy_count = sum(row['legacy_basic_gait_environments'] for row in current)
-    legacy_successes = sum(row['legacy_basic_gait_successes'] for row in current)
-    return dict(environments=count, success_rate=success,
-            command_tracking_success_rate=success,
-            legacy_basic_gait_success_rate=legacy_successes / count if legacy_count == count else None,
-            survival_rate=sum(row['survival_rate'] * row['environments'] for row in current) / count,
-            mean_survival_fraction=sum(row['survival_fraction_sum'] for row in current) / count,
-            tracking_rmse_mean=sum(row['tracking_rmse_sum'] for row in current) / valid if valid else None,
-            tracking_rmse_pooled=math.sqrt(squared / samples) if samples else None,
-            tracking_valid_environments=valid, tracking_valid_fraction=valid / count,
-            tracking_fully_covered_fraction=sum(row['tracking_fully_covered_environments'] for row in current) / count,
-            tracking_samples=samples, tracking_seconds=sum(row['tracking_seconds'] for row in current),
-            command_seconds=sum(row['command_seconds'] for row in current), criteria=current[0]['criteria'])
+    measured_seconds = sum(row['measured_seconds'] for row in current)
+    command_seconds = sum(row['command_seconds'] for row in current)
+    aligned = sum(row['command_aligned_distance_m'] for row in current)
+    commanded = sum(row['commanded_distance_m'] for row in current)
+    return dict(environments=count, success_rate=1 - failed / count,
+        survival_rate=sum(row['survival_rate'] * row['environments'] for row in current) / count,
+        mean_survival_fraction=sum(row['survival_fraction_sum'] for row in current) / count,
+        measurement_coverage_fraction=sum(row['complete_measurement_environments'] for row in current) / count,
+        command_aligned_distance_m=aligned, commanded_distance_m=commanded,
+        mean_command_aligned_speed_m_s=_mean_speed(aligned, measured_seconds),
+        mean_commanded_speed_m_s=_mean_speed(commanded, command_seconds),
+        measured_seconds=measured_seconds, command_seconds=command_seconds, criteria=current[0]['criteria'])
 
 
 def _protocol(value, profile):
@@ -349,15 +256,10 @@ def aggregate_evaluations(records, tasks):
 def _validate_metric(row):
     if type(row.get('environments')) is not int or row['environments'] <= 0:
         raise ValueError('Compared metrics require a positive environment count')
-    for key in ('success_rate', 'survival_rate', 'mean_survival_fraction', 'tracking_valid_fraction',
-            'tracking_fully_covered_fraction'):
+    for key in ('success_rate', 'survival_rate', 'mean_survival_fraction', 'measurement_coverage_fraction'):
         value = _number(row, key, nonnegative=True)
         if value > 1 + 1e-8:
             raise ValueError(f'Invalid evaluation fraction: {key}')
-    if row.get('tracking_rmse_mean') is not None:
-        _number(row, 'tracking_rmse_mean', nonnegative=True)
-    elif row['tracking_valid_fraction'] > 0:
-        raise ValueError('Valid tracking fraction requires measured RMSE')
 
 
 def _coverage(metric):
@@ -414,9 +316,7 @@ def teacher_comparison(student, teacher):
             gap = s['success_rate'] - t['success_rate']
             comparisons[design] = dict(student=deepcopy(s), teacher=deepcopy(t), success_rate_gap=gap,
                 success_rate_shortfall=max(-gap, 0.), success_rate_gain=max(gap, 0.),
-                survival_fraction_gap=s['mean_survival_fraction'] - t['mean_survival_fraction'],
-                tracking_rmse_gap=(s['tracking_rmse_mean'] - t['tracking_rmse_mean'])
-                    if s['tracking_rmse_mean'] is not None and t['tracking_rmse_mean'] is not None else None)
+                survival_fraction_gap=s['mean_survival_fraction'] - t['mean_survival_fraction'])
         n = len(comparisons)
         result['tasks'][task] = dict(design_count=n, designs=comparisons,
             mean_success_rate_shortfall=sum(row['success_rate_shortfall'] for row in comparisons.values()) / n,
@@ -437,22 +337,8 @@ def teacher_comparison(student, teacher):
 def candidate_rank(student, teacher):
     """Minimize per-structure shortfalls without a teacher pass/fail boundary."""
     comparison = teacher_comparison(student, teacher)
-    groups = [list(task['design_metrics'].values()) for task in student.values()]
-    all_measured = all(design['tracking_rmse_mean'] is not None for group in groups for design in group)
-    task_errors = []
-    for group in groups:
-        measured = [design['tracking_rmse_mean'] for design in group if design['tracking_rmse_mean'] is not None]
-        if measured:
-            task_errors.append(sum(measured) / len(measured))
-    # Missing observations are never imputed as zero error. The final finite
-    # sentinel applies only when every error is absent; completeness/coverage
-    # precede it, so the sentinel cannot reward a no-data checkpoint.
     rank = (-comparison['worst_task_mean_shortfall'], -comparison['mean_task_shortfall'],
-        comparison['mean_student_success_rate'], comparison['mean_student_survival_fraction'],
-        int(all_measured),
-        sum(sum(row['tracking_fully_covered_fraction'] for row in group) / len(group) for group in groups) / len(groups),
-        sum(sum(row['tracking_valid_fraction'] for row in group) / len(group) for group in groups) / len(groups),
-        -sum(task_errors) / len(task_errors) if task_errors else 0.)
+        comparison['mean_student_success_rate'], comparison['mean_student_survival_fraction'])
     # Reports retain the unrounded observed differences. Ranking alone removes
     # numerical tails so mathematically tied shortfalls reach later criteria.
     return tuple(round(value, RANK_DECIMAL_PLACES) if isinstance(value, float) else value for value in rank)

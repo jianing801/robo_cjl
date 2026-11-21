@@ -61,12 +61,10 @@ def row(index=0, **changes):
 def test_evaluation_requires_observed_tracking_and_records_falls():
     result = pipeline.evaluation_statistics('stairs', [row(), row(1, fell=True)], 'robust')
     assert result['failed'] == [1] and result['success_rate'] == .5
-    assert result['tracking_rmse_mean'] == .1
-    missing = row(); del missing['tracking_rmse']
-    with pytest.raises(ValueError, match='tracking_rmse'):
+    assert 'tracking_rmse_mean' not in result
+    missing = row(); del missing['command_aligned_distance_m']
+    with pytest.raises(ValueError, match='command_aligned_distance_m'):
         pipeline.evaluation_statistics('run', [missing], 'robust')
-    with pytest.raises(ValueError, match='tracking_rmse'):
-        pipeline.evaluation_statistics('run', [row(tracking_rmse=float('nan'))], 'robust')
 
 
 def comparison_protocol(profile='robust', strength=1.):
@@ -87,16 +85,18 @@ def test_selection_does_not_hide_one_task_regression_in_average():
     retained = metrics([.8, .8, .8], .1)
     better_average_but_regression = metrics([1., 1., .6], .01)
     assert pipeline.candidate_rank(retained, teacher) > pipeline.candidate_rank(better_average_but_regression, teacher)
-    assert pipeline.candidate_rank(metrics([.8, .8, .8], .08), teacher) > pipeline.candidate_rank(retained, teacher)
+    assert pipeline.candidate_rank(metrics([.8, .8, .8], .08), teacher) == pipeline.candidate_rank(retained, teacher)
 
 
 def report_for(command):
     profile = command[command.index('--profile')+1]
     strength = float(command[command.index('--randomization-strength')+1])
     actor = command[command.index('--student')+1] if '--student' in command else None
-    return dict(rows=[row(i) for i in range(6 if profile == 'robust' else 1)],
+    return dict(rows=[row(i, mean_horizontal_forward_speed_m_s=10./19.98)
+                      for i in range(6 if profile == 'robust' else 1)],
         collection_protocol=pipeline.protocol_metadata(profile, strength), task='stairs',
-        teacher='teacher', student=pipeline.sha(actor) if actor else None, design_ids=['d'], steps=1000)
+        teacher='teacher', student=pipeline.sha(actor) if actor else None, design_ids=['d'], steps=1000,
+        velocity_frame='horizontal_heading')
 
 
 @pytest.mark.parametrize('corruption', ['protocol', 'actor', 'missing_copy', 'duplicate_env', 'wrong_design'])
@@ -125,6 +125,21 @@ def test_legacy_stair_plan_evaluates_all_six_robust_strata_but_keeps_nominal_cop
         assert pipeline.validate_evaluation_report(report, 'stairs', ['a', 'b'], spec, None, protocol) == rows
 
 
+@pytest.mark.parametrize('task', ['stairs', 'backpack', 'run'])
+def test_selection_refuses_body_frame_and_requires_recorded_horizontal_speed(task):
+    command = ['--profile', 'robust', '--randomization-strength', '1.0']
+    report = report_for(command)
+    report['task']=task
+    spec = {'checkpoint_sha256': 'teacher', 'copies': 6}
+    args = (task, ['d'], spec, None, report['collection_protocol'])
+    with pytest.raises(ValueError, match='velocity frame'):
+        pipeline.validate_evaluation_report(dict(report, velocity_frame='body'), *args,
+            velocity_frame='horizontal_heading')
+    report['rows'][0].pop('mean_horizontal_forward_speed_m_s')
+    with pytest.raises(ValueError, match='horizontal speed'):
+        pipeline.validate_evaluation_report(report, *args, velocity_frame='horizontal_heading')
+
+
 def test_evaluation_resume_binds_policy_profile_seed_and_results(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, 'protocol_metadata', lambda p, s: {'version': 'test', 'profile': p, 'strength': s})
     calls = []
@@ -145,7 +160,7 @@ def test_evaluation_resume_binds_policy_profile_seed_and_results(tmp_path, monke
     with pytest.raises(ValueError, match='changed'):
         pipeline.run_evaluation(**dict(kwargs, seed=8))
     with pytest.raises(ValueError, match='changed'):
-        pipeline.run_evaluation(**dict(kwargs, criteria={'tracking_rel_tol': .3}))
+        pipeline.run_evaluation(**dict(kwargs, criteria={'min_command_progress_ratio': .3}))
     actor.write_bytes(b'actor-two')
     with pytest.raises(ValueError, match='changed'):
         pipeline.run_evaluation(**kwargs)
@@ -227,14 +242,14 @@ def test_start_uses_approved_distillation_protocol(tmp_path, monkeypatch):
 def test_retired_absolute_motion_tolerance_has_explicit_migration_errors(monkeypatch, capsys):
     monkeypatch.setattr(sys, 'argv', ['pipeline', '--plan', 'unused', '--output', 'unused',
         '--tracking-abs-tolerance', '.1'])
-    with pytest.raises(ValueError, match='retired.*tracking-rel-tolerance'):
+    with pytest.raises(ValueError, match='retired.*forward progress'):
         pipeline.main()
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4]))
     monkeypatch.delitem(sys.modules,'start',raising=False)  # rough_bo also provides a start.py.
     import start
     with pytest.raises(SystemExit):
         start.main(['蒸馏', '--tracking-abs-tolerance', '.1'])
-    assert '--tracking-rel-tolerance' in capsys.readouterr().err
+    assert '--tracking-abs-tolerance' in capsys.readouterr().err
 
 
 def test_removed_standing_tolerance_is_rejected_by_both_entrypoints(monkeypatch, capsys):

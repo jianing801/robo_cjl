@@ -7,9 +7,22 @@ import math
 import torch
 from amp_adapter import StreamingHistory
 from randomization import student_noise_spec
+from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
 
 STUDENT_ACTION_CLIP = 100.0
 STUDENT_OBSERVATION_CLIP = 100.0
+
+
+def forward_velocity(robot_data, frame):
+    """Use the commanded horizontal axis when measuring forward progress."""
+    if frame == EVALUATION_VELOCITY_FRAME:
+        from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+        return quat_apply_inverse(yaw_quat(robot_data.root_quat_w), robot_data.root_lin_vel_w)[:, 0]
+    if frame == FIXED_COURSE_VELOCITY_FRAME:
+        return robot_data.root_lin_vel_w[:, 0]
+    if frame is None:
+        return robot_data.root_lin_vel_b[:, 0]
+    raise ValueError(f'Unknown forward velocity frame: {frame}')
 
 
 def boundary_contract():
@@ -131,7 +144,7 @@ class TrackingError:
         return torch.where(self.count > 0, (self.squared / self.count.clamp(min=1)).sqrt(),
                            torch.full_like(self.squared, float('nan')))
 
-    def rows(self):
+    def rows(self, *, horizontal=False):
         """JSON-safe metrics. Use this, not float(values()[i]), in reports."""
         if self.step_dt is None:
             raise ValueError('Timed tracking updates are required for an evaluation report')
@@ -160,4 +173,11 @@ class TrackingError:
                     f'{name}_tracking_rmse': math.sqrt(values['squared_error'][i] / nv) if nv else None})
                 if name == 'standing':
                     row['standing_vx_rms_m_s'] = math.sqrt(values['actual_squared'][i] / nv) if nv else None
+        if horizontal:
+            for row in rows:
+                seconds = row['moving_tracking_seconds']
+                row['mean_horizontal_forward_speed_m_s'] = (
+                    row['command_aligned_distance_m'] / seconds if seconds else None)
+                for key in ('tracking_rmse', 'moving_tracking_rmse', 'standing_tracking_rmse', 'standing_vx_rms_m_s'):
+                    del row[key]
         return rows

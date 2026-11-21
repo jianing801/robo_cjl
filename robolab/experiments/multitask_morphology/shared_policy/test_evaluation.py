@@ -47,6 +47,19 @@ def metrics(rows):
     return aggregate_evaluations(records, ('stairs', 'backpack', 'run'))
 
 
+@pytest.mark.parametrize('task', ['stairs', 'backpack', 'run'])
+def test_acceptance_reports_progress_with_no_instantaneous_error_metric(task):
+    sample = row(command_aligned_distance_m=5., tracking_rmse=.9)
+    for name in ('tracking_rmse', 'moving_tracking_rmse', 'standing_tracking_rmse'):
+        del sample[name]
+    report = evaluation_statistics(task, [sample], 'robust')
+    assert report['success_rate'] == 1.
+    assert report['mean_command_aligned_speed_m_s'] == pytest.approx(5 / 19.98)
+    assert report['mean_commanded_speed_m_s'] == .5
+    assert 'tracking_rmse_mean' not in report
+    assert 'tracking_rel_tol' not in report['criteria']
+
+
 @pytest.mark.parametrize('profile', ['nominal', 'robust'])
 def test_standing_commands_are_outside_continuous_locomotion_protocol(profile):
     standing = row(tracking_samples=1000, tracking_seconds=20., tracking_rmse=.03,
@@ -67,18 +80,18 @@ def test_surviving_without_following_running_command_fails_and_loses_selection()
     assert candidate_rank(running, teacher) > candidate_rank(standing, teacher)
 
 
-def test_empty_measurements_are_null_and_cannot_win_on_error():
+def test_empty_measurements_are_null_and_cannot_pass():
     empty = row(seconds=.02, fell=True, tracking_samples=0, tracking_seconds=0., tracking_rmse=None,
         command_seconds=.02, active_command_seconds=.02, commanded_distance_m=.01,
         command_aligned_distance_m=0.)
     report = evaluation_statistics('run', [empty], 'robust')
-    assert report['success_rate'] == 0. and report['tracking_rmse_mean'] is None
-    assert report['tracking_valid_fraction'] == 0.
+    assert report['success_rate'] == 0. and report['mean_command_aligned_speed_m_s'] is None
+    assert report['measurement_coverage_fraction'] == 0.
     teacher = metrics([row()])
     assert candidate_rank(metrics([row(fell=True)]), teacher) > candidate_rank(metrics([empty]), teacher)
     json.dumps(dict(report=report, rank=candidate_rank(metrics([empty]), teacher)), allow_nan=False)
-    with pytest.raises(ValueError, match='null tracking_rmse'):
-        evaluation_statistics('run', [dict(empty, tracking_rmse=0.)], 'robust')
+    with pytest.raises(ValueError, match='inconsistent with command or measurement'):
+        evaluation_statistics('run', [dict(empty, command_aligned_distance_m=.1)], 'robust')
 
 
 def test_only_one_terminal_measurement_may_be_missing():
@@ -86,40 +99,28 @@ def test_only_one_terminal_measurement_may_be_missing():
     short = row(tracking_samples=998, tracking_seconds=19.96)
     report = evaluation_statistics('run', [short], 'robust')
     assert report['survival_rate'] == 1. and report['success_rate'] == 0.
-    assert 'missing_tracking_coverage' in report['environment_results'][0]['reasons']
+    assert 'missing_progress_measurement' in report['environment_results'][0]['reasons']
     assert evaluation_statistics('run', [short], 'robust', max_missing_tracking_steps=2)['success_rate'] == 1.
 
 
-def test_low_error_from_sparse_coverage_does_not_beat_real_tracking():
-    sparse = row(tracking_samples=1, tracking_seconds=.02, tracking_rmse=.0)
+def test_sparse_measurement_cannot_beat_complete_progress():
+    sparse = row(tracking_samples=1, tracking_seconds=.02, tracking_rmse=.0, command_aligned_distance_m=.01)
     complete = row(tracking_rmse=.5)
     teacher = metrics([row()])
     assert candidate_rank(metrics([complete]), teacher) > candidate_rank(metrics([sparse]), teacher)
 
 
-def test_legacy_progress_gate_is_retained_only_as_comparison():
-    old_success = row(ascent_m=.2)
-    report = evaluation_statistics('stairs', [old_success, row(1)], 'nominal')
-    assert report['success_rate'] == 1. and report['legacy_basic_gait_success_rate'] == .5
-    grouped = aggregate_evaluations([record('stairs', [old_success, row(1)], profile='nominal')], ['stairs'])
-    assert grouped['stairs']['legacy_basic_gait_success_rate'] == .5
+def test_stairs_progress_does_not_require_ascent_measurement_or_reaching_top():
+    result = evaluation_statistics('stairs', [row(ascent_m=.2), row(1)], 'nominal')
+    assert result['success_rate'] == 1.
 
 
-def test_moving_tolerance_is_strictly_relative_even_at_low_speed():
-    slow = row(tracking_rmse=.06, commanded_vx_rms_m_s=.2)
-    assert evaluation_statistics('stairs', [slow], 'robust')['success_rate'] == 0.
-    exact = evaluation_statistics('stairs', [row(tracking_rmse=.05, commanded_vx_rms_m_s=.2)], 'robust')
-    assert exact['success_rate'] == 1.
-    assert exact['environment_results'][0]['moving_tracking_tolerance_m_s'] == .05
-    assert evaluation_statistics('stairs', [slow], 'robust', tracking_rel_tol=.3)['success_rate'] == 1.
-    fast = row(tracking_rmse=.4, commanded_vx_rms_m_s=2.)
-    report = evaluation_statistics('run', [fast], 'robust')
-    assert report['success_rate'] == 1.
-    assert report['environment_results'][0]['tracking_tolerance_m_s'] == .5
-    assert 'engineering' in report['criteria']['tolerance_source']
-    assert 'tracking_abs_tol_m_s' not in report['criteria']
+def test_legacy_rmse_values_cannot_change_survival_or_progress_acceptance():
+    first = row(tracking_rmse=.06, commanded_vx_rms_m_s=.2)
+    second = row(tracking_rmse=.9, commanded_vx_rms_m_s=.2)
+    assert evaluation_statistics('stairs', [first], 'robust') == evaluation_statistics('stairs', [second], 'robust')
     with pytest.raises(TypeError):
-        evaluation_criteria(tracking_abs_tol_m_s=.1)
+        evaluation_criteria(tracking_rel_tol=.3)
 
 
 def test_motion_progress_gate_is_relative_and_standing_drift_cannot_substitute():
@@ -130,15 +131,15 @@ def test_motion_progress_gate_is_relative_and_standing_drift_cannot_substitute()
         min_command_progress_ratio=.4)['success_rate'] == 1.
 
 
-def test_aggregation_weights_actual_environments_and_keeps_invalid_counts():
-    empty = row(1, tracking_samples=0, tracking_seconds=0., tracking_rmse=None)
-    first = record('run', [row(tracking_rmse=.1), empty], seed=1)
-    second = record('run', [row(tracking_rmse=.2)], seed=2)
+def test_aggregation_pools_actual_distance_and_control_time():
+    empty = row(1, tracking_samples=0, tracking_seconds=0., tracking_rmse=None, command_aligned_distance_m=0.)
+    first = record('run', [row(command_aligned_distance_m=6.), empty], seed=1)
+    second = record('run', [row(command_aligned_distance_m=8., commanded_distance_m=12.)], seed=2)
     result = aggregate_evaluations([first, second], ['run'])['run']
-    assert result['success_rate'] == pytest.approx(1/3)
-    assert result['tracking_valid_environments'] == 2 and result['tracking_valid_fraction'] == pytest.approx(2/3)
-    assert result['tracking_rmse_mean'] == pytest.approx(.15)
-    assert result['tracking_rmse_pooled'] == pytest.approx((.025)**.5)
+    assert result['success_rate'] == pytest.approx(2/3)
+    assert result['measurement_coverage_fraction'] == pytest.approx(2/3)
+    assert result['mean_command_aligned_speed_m_s'] == pytest.approx(14 / 39.96)
+    assert result['mean_commanded_speed_m_s'] == pytest.approx(32 / 60)
 
 
 def test_inconsistent_exposure_and_missing_legacy_metrics_are_rejected():
@@ -149,13 +150,13 @@ def test_inconsistent_exposure_and_missing_legacy_metrics_are_rejected():
     with pytest.raises(ValueError, match='tracking_samples'):
         evaluation_statistics('run', [old], 'robust')
     with pytest.raises(ValueError, match='Invalid engineering'):
-        evaluation_criteria(tracking_rel_tol=float('nan'))
+        evaluation_criteria(min_command_progress_ratio=float('nan'))
 
 
 def test_acceptance_protocol_cannot_change_between_teacher_and_candidate():
     teacher = metrics([row()])
     student = metrics([row()])
-    student['run']['criteria'] = evaluation_criteria(tracking_rel_tol=.2)
+    student['run']['criteria'] = evaluation_criteria(min_command_progress_ratio=.6)
     with pytest.raises(ValueError, match='criteria differ'):
         candidate_rank(student, teacher)
 
@@ -187,13 +188,13 @@ def test_good_standing_cannot_dilute_bad_moving_tracking():
         evaluation_statistics('run', [mixed], 'robust', duration_s=.08, time_tolerance_s=0.)
 
 
-def test_standing_acceptance_setting_is_removed_and_motion_tolerance_is_unchanged():
+def test_standing_acceptance_setting_is_removed_and_progress_threshold_is_unchanged():
     with pytest.raises(TypeError):
         evaluation_criteria(standing_speed_tol_m_s=.1)
     criteria = evaluation_criteria()
     assert 'standing_gate' not in criteria and 'standing_speed_tol_m_s' not in criteria
-    assert criteria['tracking_rel_tol'] == .25 and criteria['min_command_progress_ratio'] == .5
-    assert 'stop-and-stand' in criteria['success_scope']
+    assert criteria['min_command_progress_ratio'] == .5
+    assert 'forward progress' in criteria['success_scope']
 
 
 def test_terminal_reset_velocity_is_excluded_but_last_command_is_counted():
@@ -210,11 +211,11 @@ def test_terminal_reset_velocity_is_excluded_but_last_command_is_counted():
 
 
 @pytest.mark.parametrize('field,value,match', [
-    ('moving_tracking_samples', 998, 'duration/count'),
-    ('moving_command_samples', 999, 'duration/count'),
-    ('moving_tracking_rmse', .2, 'second moments'),
-    ('moving_commanded_vx_rms_m_s', .7, 'second moments'),
-    ('standing_tracking_rmse', 0., 'null'),
+    ('moving_tracking_samples', 998, 'measurement counts'),
+    ('moving_command_samples', 999, 'command counts'),
+    ('moving_command_seconds', 19., 'duration/count'),
+    ('moving_tracking_seconds', 19., 'duration/count'),
+    ('standing_tracking_seconds', .02, 'standing measurement duration'),
 ])
 def test_segmented_metrics_must_be_consistent(field, value, match):
     value_row = row()
@@ -223,8 +224,9 @@ def test_segmented_metrics_must_be_consistent(field, value, match):
         evaluation_statistics('run', [value_row], 'robust')
 
 
+
 def outcome_rows(outcomes):
-    return [row(environment=i, design=design, tracking_rmse=.1 if success else .2)
+    return [row(environment=i, design=design, command_aligned_distance_m=9.5 if success else 4.)
         for i, (design, success) in enumerate((design, success)
             for design, successes in outcomes.items() for success in successes)]
 
@@ -325,12 +327,14 @@ def test_unmatched_teacher_student_exposure_is_rejected(kind):
         teacher_comparison(student, teacher)
 
 
-def test_missing_rmse_gap_remains_null_without_replacing_it_with_zero():
-    empty = row(tracking_samples=0, tracking_seconds=0., tracking_rmse=None)
+def test_missing_speed_remains_null_without_replacing_it_with_zero():
+    empty = row(tracking_samples=0, tracking_seconds=0., tracking_rmse=None, command_aligned_distance_m=0.)
     student = aggregate_evaluations([record('run', [empty])], ['run'])
-    teacher = one_task({'design_a': [False]})
+    teacher = one_task({'design_a': [True]})
     comparison = teacher_comparison(student, teacher)
-    assert comparison['tasks']['run']['designs']['design_a']['tracking_rmse_gap'] is None
+    compared = comparison['tasks']['run']['designs']['design_a']
+    assert compared['student']['mean_command_aligned_speed_m_s'] is None
+    assert 'tracking_rmse_gap' not in compared
     assert candidate_rank(student, teacher) < candidate_rank(teacher, teacher)
     json.dumps(comparison, allow_nan=False)
 
@@ -344,28 +348,27 @@ def test_duplicate_exposure_and_missing_protocol_are_rejected():
         aggregate_evaluations([first], ['run'])
 
 
-def test_tracking_tie_breaker_weights_structures_equally_not_environments():
+def test_speed_variations_do_not_break_ties_between_equal_progress_outcomes():
     def errors(first, second):
         rows = [row(0, design='a', tracking_rmse=first)]
         rows += [row(i + 1, design='b', tracking_rmse=second) for i in range(9)]
         return aggregate_evaluations([record('run', rows)], ['run'])
     teacher = errors(.2, .2)
     first, second = errors(.2, .4), errors(.5, .25)
-    # Environment weighting favors second; equal structure weighting favors first.
-    assert first['run']['tracking_rmse_mean'] > second['run']['tracking_rmse_mean']
-    assert candidate_rank(first, teacher)[-1] == pytest.approx(-.3)
-    assert candidate_rank(second, teacher)[-1] == pytest.approx(-.375)
-    assert candidate_rank(first, teacher) > candidate_rank(second, teacher)
+    assert candidate_rank(first, teacher) == candidate_rank(second, teacher)
 
 
 def test_complete_measurements_are_checked_per_design_not_only_per_task():
-    empty = row(0, design='a', tracking_samples=0, tracking_seconds=0., tracking_rmse=None)
+    empty = row(0, design='a', tracking_samples=0, tracking_seconds=0., tracking_rmse=None,
+        command_aligned_distance_m=0.)
     student = aggregate_evaluations([record('run', [empty,
-        *[row(i + 1, design='b', tracking_rmse=.2) for i in range(9)]])], ['run'])
+        *[row(i + 1, design='b') for i in range(9)]])], ['run'])
     teacher = one_task({'a': [False], 'b': [False] * 9})
     rank = candidate_rank(student, teacher)
-    assert student['run']['tracking_rmse_mean'] is not None
-    assert rank[4] == 0 and rank[5] == rank[6] == .5
+    assert student['run']['measurement_coverage_fraction'] == pytest.approx(.9)
+    assert student['run']['design_metrics']['a']['measurement_coverage_fraction'] == 0.
+    assert student['run']['design_metrics']['b']['measurement_coverage_fraction'] == 1.
+    assert rank[2] == .5
     json.dumps(rank, allow_nan=False)
 
 

@@ -148,8 +148,7 @@ def evaluate_candidate(a, plan, root, actor, candidate, environment):
     from evaluation import aggregate_evaluations, evaluation_criteria
     jobs = [(task, spec['design_ids']) for task, spec in plan['teachers'].items()]
     profiles = ('nominal', 'robust') if a.evaluation_profile == 'both' else (a.evaluation_profile,)
-    criteria = dict(tracking_rel_tol=a.tracking_rel_tolerance,
-                    min_command_progress_ratio=a.min_command_progress_ratio)
+    criteria = dict(min_command_progress_ratio=a.min_command_progress_ratio)
     results = {}
     for profile in profiles:
         records = []
@@ -185,7 +184,7 @@ def run(a):
         full_body_torque=a.full_body_torque, collection_protocol=protocol, seed=a.seed,
         evaluation_profile=a.evaluation_profile, evaluation_seeds=a.evaluation_seeds,
         robust_evaluation_strength=1.,
-        tracking_rel_tolerance=a.tracking_rel_tolerance, min_command_progress_ratio=a.min_command_progress_ratio,
+        min_command_progress_ratio=a.min_command_progress_ratio,
         sources={name: sha(HERE/name) for name in sources},
         steps_per_task=STEPS_PER_TASK, envs_per_task=ENVS_PER_TASK, std=ACTION_STD,
         actor_lr=3e-6, critic_lr=1e-3, teacher_actor_updates=0,
@@ -275,7 +274,8 @@ def main(argv=None):
     parser.add_argument('--resume-paused', action='store_true')
     parser.add_argument('--evaluation-profile', choices=['nominal', 'robust', 'both'], default='both')
     parser.add_argument('--evaluation-seeds', default='20261118')
-    parser.add_argument('--tracking-rel-tolerance', type=float, default=.25)
+    parser.add_argument('--tracking-rel-tolerance', type=float,
+                        help='Deprecated. Accepted for compatibility and ignored.')
     parser.add_argument('--min-command-progress-ratio', type=float, default=.5)
     parser.add_argument('--device')
     parser.add_argument('--timeout-seconds', type=int, default=900)
@@ -290,8 +290,7 @@ def main(argv=None):
             or a.timeout_seconds < 1):
         raise ValueError('Invalid PPO budget, randomization or independent evaluation seeds')
     from evaluation import evaluation_criteria
-    evaluation_criteria(tracking_rel_tol=a.tracking_rel_tolerance,
-                        min_command_progress_ratio=a.min_command_progress_ratio)
+    evaluation_criteria(min_command_progress_ratio=a.min_command_progress_ratio)
     if a.profile == 'nominal': a.randomization_strength = 0.
     torch.set_num_threads(2)
     with run_lock(a.output):
