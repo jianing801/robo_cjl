@@ -21,7 +21,7 @@ from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_
                                digest, objective, paired_trials, positive, read_conditions, score_trial,
                                validate_scoring)
 from contract import load_plan, sha, write_new
-from collection_grid import calibration_keys, select_collection_grid, selection_panel
+from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from persistence import resume_pause, run_lock
 
 
@@ -40,8 +40,10 @@ def freeze(path, data):
 def check_formal_selection(root, plan, manifest, complete, student):
     protocol = manifest.get('protocol', {})
     arguments = manifest.get('arguments', {})
-    if (protocol.get('selection_version') != 'last_epoch_dagger_paired_50'
-            or digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
+    version = protocol.get('selection_version')
+    if version != SELECTION_VERSION:
+        raise ValueError(f'Formal BO requires selection protocol {SELECTION_VERSION}, found {version!r}')
+    if (digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
             or complete.get('result') != 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
             or complete.get('full_bank_evaluated') is not False or protocol.get('dagger_rounds') != 3
             or arguments.get('epochs') != 10):
@@ -55,10 +57,13 @@ def check_formal_selection(root, plan, manifest, complete, student):
     training = select_collection_grid(plan['selected_structure_keys'])
     panel = selection_panel(plan['selected_structure_keys'], training, fixed)
     scope = protocol['collection_scope']
+    budget = protocol.get('selection_budget', {})
     expected = list(map(list,panel))
     reserved = list(map(list,fixed))
     seen = set(training)
-    if (scope.get('structure_keys') != list(map(list,training)) or scope.get('environments_per_task') != 4096
+    if (budget.get('selection_design_count') != len(panel) or selection.get('budget') != budget
+            or manifest.get('selection_budget') != budget
+            or scope.get('structure_keys') != list(map(list,training)) or scope.get('environments_per_task') != 4096
             or scope.get('steps_per_rollout') != 250 or selection.get('design_keys') != expected
             or protocol.get('selection_keys') != expected or protocol.get('calibration_keys') != reserved
             or selection.get('calibration_keys') != reserved

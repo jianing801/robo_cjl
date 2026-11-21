@@ -243,17 +243,19 @@ def official_panel(tmp_path, monkeypatch):
     actor = out/'selected.pt'
     actor.write_bytes(b'selected student')
     seeds = [20261117, 20261119, 20261120]
-    protocol = dict(selection_version='last_epoch_dagger_paired_50', selection_keys=selected,
+    budget = dict(selection_design_count=200)
+    protocol = dict(selection_version='last_epoch_dagger_paired_200', selection_keys=selected,
+                    selection_budget=budget,
                     selection=dict(profile='robust',strength=1.0),
                     calibration_keys=fixed, selection_seeds=seeds, dagger_rounds=3,
                     collection_scope=dict(structure_keys=training, design_count=400,
                                           steps_per_rollout=250, environments_per_task=4096))
-    (out/'manifest.json').write_text(json.dumps(dict(plan_sha256=bo.sha(source), protocol=protocol,
+    (out/'manifest.json').write_text(json.dumps(dict(plan_sha256=bo.sha(source), protocol=protocol, selection_budget=budget,
         protocol_sha256=digest(protocol),arguments=dict(epochs=10))))
     candidates = [dict(round_index=i, epoch=9, student=str(actor) if i==2 else str(out/f'dagger_{i}.pt'),
                        student_sha256=bo.sha(actor) if i==2 else str(i), rank=[2 if i==2 else 1])
                   for i in (1,2,3)]
-    selection = dict(candidates=candidates, profile='robust', selected_round=2, selected_student=str(actor),
+    selection = dict(candidates=candidates, profile='robust', selected_round=2, selected_student=str(actor), budget=budget,
                      design_keys=selected, calibration_keys=fixed, seeds=seeds,
                      training_design_keys=[k for k in selected if k in set(training)])
     selection_path=out/'selection.json'
@@ -338,7 +340,8 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     assert len(p.calls)==50
     assert not (p.root/'bo/search/manifest.json').exists()
 
-@pytest.mark.parametrize('change', ['winner','reserved','legacy','conditions','selection_hash','nominal'])
+@pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
+                                    'conditions','selection_hash','nominal'])
 def test_official_initialization_checks_selection_before_tuning(official_panel,change):
     p=official_panel
     args=['initialize','--root',str(p.root)]
@@ -350,25 +353,38 @@ def test_official_initialization_checks_selection_before_tuning(official_panel,c
         args+=['--conditions',str(path)]
     elif change=='selection_hash':
         with p.selection.open('a') as f: f.write(' ')
-    elif change=='nominal':
-        data=bo.read(p.selection)
-        data['profile']='nominal'
-        p.selection.write_text(json.dumps(data))
-        completed=p.selection.parent/'completed.json'
-        value=bo.read(completed)
-        value['selection_sha256']=bo.sha(p.selection)
-        completed.write_text(json.dumps(value))
-    elif change=='legacy':
-        manifest=p.selection.parent/'manifest.json'
-        value=bo.read(manifest)
-        value['protocol'].pop('selection_version')
-        manifest.write_text(json.dumps(value))
     else:
         data=bo.read(p.selection)
-        if change=='winner': data['selected_round']=1
-        else: data['design_keys'][0]=data['calibration_keys'][0]
+        manifest_path=p.selection.parent/'manifest.json'
+        completed_path=p.selection.parent/'completed.json'
+        manifest=bo.read(manifest_path)
+        completed=bo.read(completed_path)
+        protocol=manifest['protocol']
+        if change=='winner':
+            data['selected_round']=1
+        elif change=='nominal':
+            data['profile']='nominal'
+        elif change=='old_version':
+            protocol['selection_version']='last_epoch_dagger_paired_50'
+        elif change=='budget_50':
+            data['budget']['selection_design_count']=50
+            protocol['selection_budget']=manifest['selection_budget']=data['budget']
+        elif change=='relabelled_50':
+            # Keep one seen and one held-out design from each motor pair.
+            reduced=data['design_keys'][::4]
+            data['design_keys']=protocol['selection_keys']=reduced
+            data['training_design_keys']=[key for key in reduced if key in data['training_design_keys']]
+        else:
+            data['design_keys'][0]=data['calibration_keys'][0]
+            protocol['selection_keys']=data['design_keys']
         p.selection.write_text(json.dumps(data))
-    with pytest.raises(ValueError): bo.main(args)
+        manifest['protocol_sha256']=digest(protocol)
+        manifest_path.write_text(json.dumps(manifest))
+        completed.update(protocol=protocol,protocol_sha256=digest(protocol),selection_sha256=bo.sha(p.selection))
+        completed_path.write_text(json.dumps(completed))
+    version_error = 'last_epoch_dagger_paired_200.*last_epoch_dagger_paired_50' if change == 'old_version' else None
+    with pytest.raises(ValueError, match=version_error):
+        bo.main(args)
     assert not p.calls
 
 def test_migrated_root_and_explicit_root_are_mutually_exclusive(tmp_path):

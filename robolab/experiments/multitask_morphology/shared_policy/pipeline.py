@@ -12,7 +12,7 @@ import time
 HERE=Path(__file__).resolve().parent
 sys.path[:0]=[str(HERE.parents[2]),str(HERE)]
 from contract import load_plan,sha,write_new,design_ids_for_keys
-from collection_grid import calibration_keys, select_collection_grid, selection_panel
+from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from randomization import protocol_metadata
 from persistence import run_lock,resume_pause
 from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_rank,
@@ -248,11 +248,13 @@ def execute_pipeline(a,seeds):
     collection_jobs=jobs_for(plan,400,collection_ids)
     reserved=calibration_keys()
     selected_keys=selection_panel(plan['selected_structure_keys'],collection_keys,reserved)
-    selected_jobs=jobs_for(plan,50,design_ids_for_keys(plan,selected_keys))
+    selected_jobs=jobs_for(plan,len(selected_keys),design_ids_for_keys(plan,selected_keys))
     collection_scope=dict(design_count=len(collection_keys),structure_keys=collection_keys,
         design_ids_by_task=collection_ids,steps_per_rollout=a.collect_steps,environments_per_task=4096,
         batches_per_round=len(collection_jobs),selector_sha256=sha(HERE/'collection_grid.py'))
     budget=dict(selection_design_count=len(selected_keys),teacher_rollout_processes=len(selected_jobs)*len(seeds),
+        environments_per_task_batch={task:len(ids)*evaluation_copies(task,plan['teachers'][task],a.selection_profile)
+                                     for task,ids in selected_jobs},
         candidate_rollout_processes_per_round=len(selected_jobs)*len(seeds),
         total_selection_rollout_processes=(1+a.dagger_rounds)*len(selected_jobs)*len(seeds),final_test_rollout_processes=0)
     protocol=dict(collection=protocol_metadata(a.collection_profile,a.randomization_strength if a.collection_profile=='robust' else 0.),
@@ -260,7 +262,7 @@ def execute_pipeline(a,seeds):
         initial_strength=a.initial_randomization_strength,dagger_rounds=a.dagger_rounds,
         selection=protocol_metadata(a.selection_profile,a.randomization_strength if a.selection_profile=='robust' else 0.),
         selection_seeds=seeds,selection_keys=selected_keys,calibration_keys=reserved,
-        selection_version='last_epoch_dagger_paired_50',selection_budget=budget,
+        selection_version=SELECTION_VERSION,selection_budget=budget,
         comparison_version=COMPARISON_VERSION,
         evaluation_criteria=criteria,evaluation_version=GATE_VERSION,
         implementation_sha256=sha(__file__),fit_implementation_sha256=sha(HERE/'fit.py'),

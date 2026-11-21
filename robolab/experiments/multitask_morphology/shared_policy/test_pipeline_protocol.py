@@ -28,12 +28,18 @@ def test_balanced_selection_excludes_calibration_and_spans_seen_and_unseen():
     grid=select_collection_grid(keys)
     reserved=[(t,c,k,a) for k in 'ABCDE' for a in 'abcde' for t,c in [(20,25),(21,26)]]
     panel=selection_panel(keys, grid, reserved)
-    assert len(set(panel)) == 50 and set(panel).isdisjoint(reserved)
+    assert len(panel) == len(set(panel)) == 200 and set(panel).isdisjoint(reserved)
     assert Counter((row[2:], row in grid) for row in panel) == {
-        ((k,a),seen):1 for k,a,seen in product('ABCDE','abcde',(True,False))}
+        ((k,a),seen):4 for k,a,seen in product('ABCDE','abcde',(True,False))}
+    for pair in product('ABCDE','abcde'):
+        seen_lengths = [row[:2] for row in panel if row[2:] == pair and row in grid]
+        assert all(len(set(axis)) == 4 for axis in zip(*seen_lengths))
     assert selection_panel(keys[::-1],grid[::-1],reserved[::-1]) == panel
     with pytest.raises(ValueError):
         selection_panel(keys, grid, reserved[:-1])
+    limited = [row for row in grid if row[2:] != ('A','a') or row[0] == 20]
+    with pytest.raises(ValueError, match='motor pair'):
+        selection_panel(keys, limited, reserved)
 
 
 def row(index=0, **changes):
@@ -249,7 +255,7 @@ def test_pipeline_resumes_and_selects_only_last_epoch_of_three_dagger_rounds(tmp
     from itertools import product
     from types import ModuleType
     tasks = ['stairs', 'backpack', 'run']
-    keys=list(product([.2,.25,.3,.35,.4],[.25,.32,.38,.45],[f'K{i}' for i in range(5)],[f'A{i}' for i in range(5)]))
+    keys=list(product([.2,.25,.3,.35,.4],[.25,.30,.32,.38,.45],[f'K{i}' for i in range(5)],[f'A{i}' for i in range(5)]))
     reserved=[(t,c,k,a) for k,a in product([f'K{i}' for i in range(5)],[f'A{i}' for i in range(5)]) for t,c in [(.2,.25),(.25,.32)]]
     monkeypatch.setattr(pipeline, 'calibration_keys',lambda:reserved)
     plan = {'selected_structure_keys': keys, 'teachers': {}, 'schema': {'tasks': tasks}, 'scope': 'all'}
@@ -289,6 +295,7 @@ def test_pipeline_resumes_and_selects_only_last_epoch_of_three_dagger_rounds(tmp
     monkeypatch.setattr(pipeline, 'child', child)
     suites = []
     def suite(plan, plan_path, root, jobs, actor, profile, strength, seeds, name, *args):
+        assert [(task, len(ids)) for task, ids in jobs] == [(task, 200) for task in tasks]
         suites.append((actor, tuple(seeds), name))
         if actor is None:
             rate = 1.
@@ -327,7 +334,11 @@ def test_pipeline_resumes_and_selects_only_last_epoch_of_three_dagger_rounds(tmp
         commands=[c for c in children if any(f'/data/round_{r}/' in str(v).replace(chr(92),'/') for v in c)]
         assert len(commands)==3 and all(c[c.index('--student')+1]==prior for c in commands)
         assert Path(prior).name=='epoch_9.pt'
-    assert len(selection['design_keys'])==50 and not completed['full_bank_evaluated']
+    assert len(selection['design_keys'])==200 and len(selection['training_design_keys'])==100
+    assert not completed['full_bank_evaluated']
+    assert selection['budget']['environments_per_task_batch'] == dict.fromkeys(tasks,1600)
+    assert selection['budget']['total_selection_rollout_processes'] == 36
+    assert completed['protocol']['selection_version'] == 'last_epoch_dagger_paired_200'
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
     import bo
     monkeypatch.setattr(bo,'calibration_keys',lambda:reserved)

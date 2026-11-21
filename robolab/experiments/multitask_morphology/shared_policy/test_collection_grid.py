@@ -28,6 +28,14 @@ def test_current_grid_uses_endpoints_and_exact_thirds():
     assert select_collection_grid(keys) == selected
 
 
+def test_default_selection_covers_all_100_leg_geometries_across_the_panel():
+    from collection_grid import calibration_keys, select_collection_grid, selection_panel
+
+    keys = grid()
+    panel = selection_panel(keys, select_collection_grid(keys), calibration_keys())
+    assert {row[:2] for row in panel} == set(product(THIGHS, CALVES))
+
+
 def test_nonuniform_axes_use_nearest_existing_levels_with_stable_ties():
     from collection_grid import select_collection_grid
 

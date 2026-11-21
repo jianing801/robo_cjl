@@ -4,8 +4,12 @@ from collections import Counter
 import json
 from pathlib import Path
 
-from itertools import combinations, product
+from itertools import combinations, permutations, product
 from math import isfinite, prod
+
+
+SELECTION_VERSION = 'last_epoch_dagger_paired_200'
+DESIGNS_PER_PAIR_PER_SPLIT = 4
 
 
 def _four_levels(levels):
@@ -54,7 +58,7 @@ def calibration_keys():
 
 
 def selection_panel(keys, collection, reserved):
-    """One training and one held-out morphology per pair, disjoint from BO calibration."""
+    """Select four training and four held-out leg geometries per knee/ankle pair."""
     available = set(map(tuple, keys))
     training = set(map(tuple, collection))
     excluded = set(map(tuple, reserved))
@@ -68,19 +72,48 @@ def selection_panel(keys, collection, reserved):
         return sum(((a[i] - b[i]) / spans[i]) ** 2 for i in (0, 1))
 
     panel = []
-    lengths = [Counter(), Counter()]
+    eligible = available - excluded
+    held_out_levels = (Counter(), Counter())
+    geometry_counts = Counter()
     for pair in pairs:
-        for seen in (True, False):
-            choices = sorted(k for k in available - excluded if k[2:] == pair and (k in training) == seen)
-            if not choices:
-                raise ValueError(f'Missing selection morphology for motor pair {pair}, seen={seen}')
-            def priority(key):
-                repeat = sum(lengths[i][key[i]] for i in (0, 1))
-                separation = min((distance(key, other) for other in panel), default=0.)
-                same_pair_distance = 0. if seen else distance(key, panel[-1])
-                return -repeat, same_pair_distance, separation
-            chosen = max(choices, key=priority)
-            panel.append(chosen)
+        pair_keys = {k for k in eligible if k[2:] == pair}
+        seen = pair_keys & training
+        thighs = sorted({k[0] for k in seen})
+        calves = sorted({k[1] for k in seen})
+        if len(thighs) != DESIGNS_PER_PAIR_PER_SPLIT or len(calves) != DESIGNS_PER_PAIR_PER_SPLIT:
+            raise ValueError(f'Need four distinct training lengths on each axis for motor pair {pair}')
+        # Only 4! assignments. Check all of them so that reserved BO points
+        # cannot force a repeated length on the fourth draw.
+        assignments = [[(t, c, *pair) for t, c in zip(thighs, order)] for order in permutations(calves)]
+        valid = [rows for rows in assignments if all(row in seen for row in rows)]
+        if not valid:
+            raise ValueError(f'No four-way training length match for motor pair {pair}')
+
+        def training_priority(rows):
+            repeat = sum(geometry_counts[row[:2]] for row in rows)
+            separation = min(distance(a, b) for a, b in combinations(rows, 2))
+            return -repeat, separation
+
+        pair_panel = max(valid, key=training_priority)
+        geometry_counts.update(row[:2] for row in pair_panel)
+        choices = sorted(pair_keys - training)
+        if len(choices) < DESIGNS_PER_PAIR_PER_SPLIT:
+            raise ValueError(f'Need four held-out morphologies for motor pair {pair}')
+        local_levels = (set(), set())
+
+        def held_out_priority(key):
+            new_levels = sum(key[i] not in local_levels[i] for i in (0, 1))
+            repeat = sum(held_out_levels[i][key[i]] for i in (0, 1))
+            separation = min(distance(key, other) for other in pair_panel)
+            return new_levels, -geometry_counts[key[:2]], -repeat, separation
+
+        for _ in range(DESIGNS_PER_PAIR_PER_SPLIT):
+            chosen = max(choices, key=held_out_priority)
+            choices.remove(chosen)
+            pair_panel.append(chosen)
+            geometry_counts[chosen[:2]] += 1
             for i in (0, 1):
-                lengths[i][chosen[i]] += 1
+                local_levels[i].add(chosen[i])
+                held_out_levels[i][chosen[i]] += 1
+        panel.extend(pair_panel)
     return panel
