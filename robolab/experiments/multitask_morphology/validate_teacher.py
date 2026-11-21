@@ -1,5 +1,6 @@
 """Read-only validation in an isolated interpreter; prints a teacher manifest."""
 import argparse
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
 import sys
@@ -13,6 +14,14 @@ def main():
     p.add_argument('--task', choices=['stairs','backpack','run'], required=True)
     p.add_argument('--root', required=True)
     a = p.parse_args()
+    # prepare_shared reads stdout as one JSON document. Native asset validators
+    # also report progress, which belongs on the parent's progress stream.
+    with redirect_stdout(sys.stderr):
+        report = validate_teacher(a)
+    print(json.dumps(report, ensure_ascii=False))
+
+
+def validate_teacher(a):
     engine = HERE/('amp_engine' if a.task == 'run' else 'engine')
     sys.path[:0] = [str(engine), str(ROOT), str(ROOT.parent/'rsl_rl')]
     if a.task == 'run':
@@ -46,7 +55,7 @@ def main():
         library = plan['reference_library']
         validate_library(bank, bank_path, library)
         report.update(reference_library=library, reference_library_sha256=sha(library))
-    print(json.dumps(report, ensure_ascii=False))
+    return report
 
 
 if __name__ == '__main__':

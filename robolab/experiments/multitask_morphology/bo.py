@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 from statistics import fmean, stdev
+from math import isfinite
 import os
 import sys
 from uuid import uuid4
@@ -11,12 +12,16 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 SHARED = HERE/'shared_policy'
 DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
+MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
+FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
+PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
 from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
                                digest, objective, paired_trials, positive, read_conditions, score_trial,
                                validate_scoring)
 from contract import load_plan, sha, write_new
+from collection_grid import calibration_keys, select_collection_grid, selection_panel
 from persistence import resume_pause, run_lock
 
 
@@ -32,7 +37,48 @@ def freeze(path, data):
         write_new(path, data)
 
 
-def shared_input(root):
+def check_formal_selection(root, plan, manifest, complete, student):
+    protocol = manifest.get('protocol', {})
+    arguments = manifest.get('arguments', {})
+    if (protocol.get('selection_version') != 'last_epoch_dagger_paired_50'
+            or digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
+            or complete.get('result') != 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
+            or complete.get('full_bank_evaluated') is not False or protocol.get('dagger_rounds') != 3
+            or arguments.get('epochs') != 10):
+        raise ValueError('Formal BO requires the completed three-round DAgger final-epoch selection')
+    selection_path = root/'shared_policy/selection.json'
+    if (Path(complete['selection']).resolve() != selection_path.resolve()
+            or not selection_path.is_file() or complete.get('selection_sha256') != sha(selection_path)):
+        raise ValueError('Selected student refers to a different selection record')
+    selection = read(selection_path)
+    fixed = calibration_keys()
+    training = select_collection_grid(plan['selected_structure_keys'])
+    panel = selection_panel(plan['selected_structure_keys'], training, fixed)
+    scope = protocol['collection_scope']
+    expected = list(map(list,panel))
+    reserved = list(map(list,fixed))
+    seen = set(training)
+    if (scope.get('structure_keys') != list(map(list,training)) or scope.get('environments_per_task') != 4096
+            or scope.get('steps_per_rollout') != 250 or selection.get('design_keys') != expected
+            or protocol.get('selection_keys') != expected or protocol.get('calibration_keys') != reserved
+            or selection.get('calibration_keys') != reserved
+            or selection.get('training_design_keys') != [list(k) for k in panel if k in seen]
+            or selection.get('profile') != 'robust' or protocol['selection'].get('profile') != 'robust'
+            or protocol['selection'].get('strength') != 1.
+            or selection.get('seeds') != [20261117,20261119,20261120]
+            or protocol.get('selection_seeds') != selection['seeds']):
+        raise ValueError('Selection panel, reserved calibration panel or collection protocol differs')
+    candidates = selection.get('candidates', [])
+    if ([r['round_index'] for r in candidates] != [1,2,3] or any(r['epoch'] != 9 for r in candidates)):
+        raise ValueError('Expected the three final DAgger checkpoints')
+    winner = max(candidates,key=lambda row: tuple(row['rank']))
+    if (winner['round_index'] != selection['selected_round'] or winner['round_index'] != complete['selected_round']
+            or Path(selection['selected_student']).resolve() != student or Path(winner['student']).resolve() != student
+            or winner['student_sha256'] != complete['student_sha256']):
+        raise ValueError('Selected DAgger checkpoint differs from the reported winner')
+
+
+def shared_input(root, *, formal=False):
     path = root/'shared_plan/plan.json'
     plan = load_plan(path)
     manifest = read(root/'shared_policy/manifest.json')
@@ -42,6 +88,8 @@ def shared_input(root):
             or complete.get('protocol_sha256') != manifest.get('protocol_sha256')
             or sha(student) != complete['student_sha256']):
         raise ValueError('Shared three-task plan or selected student identity does not match')
+    if formal:
+        check_formal_selection(root, plan, manifest, complete, student)
     return path, plan, student
 
 
@@ -233,6 +281,74 @@ def calibrate(report, reference):
                 task_weights={task: 1/3 for task in TASKS}, metrics=metrics)
 
 
+def panel_scoring(reports, keys, benchmark):
+    """Fit each scale once to equal-weight structure means from three successful seeds."""
+    import numpy as np
+    if len(keys) != 50 or len(set(keys)) != 50 or [tuple(r['candidate']['structure_key']) for r in reports] != list(keys):
+        raise ValueError('Calibration requires the fixed 50 distinct structures in group-21 order')
+    first = reports[0]
+    conditions = first['conditions']
+    expected = {(seed, 0) for seed in conditions['seeds']}
+    if len(expected) != 3 or conditions['copies'] != 1:
+        raise ValueError('Calibration needs three distinct seeds with one trial each')
+    samples = {task: {metric: [] for metric in METRICS[task]} for task in TASKS}
+    for report in reports:
+        pairs = report['pairs']
+        if (report['kind'] != REPORT_VERSION or report['domain'] != 'simulation'
+                or report['ppo_updates'] != benchmark['updates'] or report['conditions'] != conditions
+                or report['conditions_sha256'] != first['conditions_sha256']
+                or len(pairs) != 3 or {(r['seed'],r['replica']) for r in pairs} != expected):
+            raise ValueError('Inconsistent calibration conditions, candidate budget or seed coverage')
+        for task in TASKS:
+            runs = [pair['tasks'][task] for pair in pairs]
+            if any(run['status'] == 'invalid' for run in runs):
+                raise ValueError('Invalid trial must be resolved before calibration')
+            if not all(run['status'] == 'success' and (task != 'stairs' or run.get('reached_top') is True) for run in runs):
+                continue
+            for metric in METRICS[task]:
+                values = [run['metrics'][metric] for run in runs]
+                if any(value is None or not isfinite(value) or value < 0 for value in values):
+                    raise ValueError(f'Missing or invalid successful trial measurement: {task}/{metric}')
+                samples[task][metric].append(fmean(values))
+    metrics = {}
+    for task, columns in samples.items():
+        metrics[task] = {}
+        weights = (1/3, 1/3, 1/3) if task == 'stairs' else (.4, .4, .2)
+        for (name, values), weight in zip(columns.items(), weights, strict=True):
+            if len(values) < 2:
+                raise ValueError(f'Too few eligible structures for {task}/{name}: {len(values)}')
+            low, high = map(float, np.percentile(values, [10, 90], method='linear'))
+            if not high > low:
+                raise ValueError(f'Zero P90-P10 range for {task}/{name}')
+            metrics[task][name] = dict(p10=low,p90=high,baseline=high-low,scale=None,weight=weight,
+                                        eligible_designs=len(values))
+    return dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=first['conditions_sha256'],
+        method='post_finetune_panel50',benchmark=benchmark,metrics=metrics,task_weights={t:1/3 for t in TASKS})
+
+
+def initialize(a, work, source, plan, actor, conditions):
+    keys = calibration_keys()
+    lookup = {tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
+    if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
+        raise ValueError('Missing fixed calibration structures in shared plan')
+    benchmark = dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates)
+    freeze(work/'manifest.json',dict(**benchmark,conditions_sha256=digest(conditions),structure_keys=list(map(list,keys))))
+    resume_pause(work,a.resume_paused)
+    reports, evidence = [], []
+    for index, key in enumerate(keys,1):
+        folder = work/f'design_{index:02d}'
+        report = evaluate(a,folder,source,plan,actor,lookup[key]['design_ids']['stairs'],conditions)
+        path = folder/'bo_evaluation.json'
+        reports.append(report)
+        evidence.append(dict(report=str(path.relative_to(work)),sha256=sha(path)))
+        print('CALIBRATION_PROGRESS',index,'/ 50',flush=True)
+    scoring = panel_scoring(reports,keys,dict(benchmark,reports=evidence))
+    freeze(work/'scoring.json',scoring)
+    freeze(work/'completed.json',dict(scoring_sha256=sha(work/'scoring.json'),
+                                      manifest_sha256=sha(work/'manifest.json')))
+    print('BO_CALIBRATION_READY',work/'scoring.json',flush=True)
+
+
 def parameters(row):
     return dict(zip(('thigh_m', 'calf_m', 'knee_motor', 'ankle_motor'), row['key'], strict=True))
 
@@ -279,13 +395,49 @@ def search(a, work, source, plan, actor, conditions):
     pool = read(plan['shared_bank'])['structures']
     keys = {tuple(k) for k in plan['selected_structure_keys']}
     pool = [r for r in pool if tuple(r['key']) in keys]
+    observations, evaluated, results = [], set(), []
+    if scoring.get('method') == 'post_finetune_panel50':
+        receipt = read(a.scoring.parent/'completed.json')
+        if (receipt['scoring_sha256'] != sha(a.scoring)
+                or receipt['manifest_sha256'] != sha(a.scoring.parent/'manifest.json')):
+            raise ValueError('Frozen calibration scoring or manifest changed')
+        benchmark = scoring['benchmark']
+        keys = calibration_keys()
+        if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
+                or benchmark['updates'] != a.updates or len(benchmark['reports']) != len(keys)):
+            raise ValueError('Initial observations must share the selected actor, source plan and PPO budget')
+        if a.trials < len(keys):
+            raise ValueError('The total BO budget must include the 50 initial observations')
+        lookup = {tuple(row['key']): row for row in pool}
+        for key, evidence in zip(keys,benchmark['reports'],strict=True):
+            path = a.scoring.parent/evidence['report']
+            if sha(path) != evidence['sha256']:
+                raise ValueError('Frozen initial BO report changed')
+            report = checked_report(path)
+            manifest_path = path.parent/'manifest.json'
+            if report.get('evaluation_manifest_sha256') != sha(manifest_path):
+                raise ValueError('Initial BO observation candidate manifest changed')
+            identity = read(manifest_path)
+            if (identity.get('source_plan_sha256') != benchmark['source_plan_sha256']
+                    or identity.get('initial_actor_sha256') != benchmark['initial_actor_sha256']
+                    or identity.get('updates') != a.updates or identity.get('candidate') != report['candidate']
+                    or identity.get('conditions_sha256') != report['conditions_sha256']):
+                raise ValueError('Initial BO observation has different tuning inputs')
+            row = lookup[key]
+            design_id = row['design_ids']['stairs']
+            if (report['candidate']['design_ids'] != row['design_ids'] or tuple(report['candidate']['structure_key']) != key
+                    or report['ppo_updates'] != a.updates):
+                raise ValueError('Initial BO observation is attached to another candidate or budget')
+            scored = objective(report,scoring)
+            observations.extend(dict(obs,params=parameters(row)) for obs in scored['observations'])
+            evaluated.add(design_id)
+            results.append(dict(design_id=design_id,structure_key=row['key'],evaluation=str(path),**scored))
     freeze(work/'manifest.json', dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=sha(source),
         initial_actor_sha256=sha(actor), conditions_sha256=digest(conditions), scoring_sha256=sha(a.scoring),
         coordinator_sha256=sha(__file__), surrogate_sha256=sha(REPO/'rough_bo/constrained_gp.py'),
         updates=a.updates, seed=a.seed))
     resume_pause(work, a.resume_paused)
-    observations, evaluated, results = [], set(), []
-    for i in range(a.trials):
+    for i in range(len(evaluated), a.trials):
         trial = work/f'trial_{i:04d}'
         trial.mkdir(exist_ok=True)
         request = trial/'proposal.json'
@@ -307,7 +459,8 @@ def search(a, work, source, plan, actor, conditions):
         observations.extend(dict(row, params=parameters(matched[0])) for row in scored['observations'])
         evaluated.add(design_id)
         results.append(result)
-    complete = [row for row in results if row['mean_objective'] is not None]
+    complete = [row for row in results if row['mean_objective'] is not None
+                and (scoring.get('method') != 'post_finetune_panel50' or row['complete_objectives'] == 3)]
     best_observed = min(complete, key=lambda r: r['mean_objective']) if complete else None
     freeze(work/f'budget_{a.trials:04d}.json', dict(trials=len(results), best_observed=best_observed,
         candidates=[{k: r[k] for k in ('design_id', 'structure_key', 'evaluation',
@@ -317,11 +470,13 @@ def search(a, work, source, plan, actor, conditions):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('evaluate', 'search'):
+    for command in ('evaluate', 'initialize', 'search'):
         p = sub.add_parser(command)
-        p.add_argument('--root', type=Path, default=DEFAULT_ROOT)
+        roots = p.add_mutually_exclusive_group()
+        roots.add_argument('--root', type=Path)
+        roots.add_argument('--migrated', action='store_true', help='Use the completed migrated common bank')
         p.add_argument('--output', type=Path)
-        p.add_argument('--conditions', type=Path, default=HERE/'configs/bo_pilot_conditions.json')
+        p.add_argument('--conditions', type=Path)
         p.add_argument('--gpu', type=int, default=0)
         p.add_argument('--updates', type=int, default=100)
         p.add_argument('--timeout', type=int, default=1800)
@@ -329,8 +484,8 @@ def main(argv=None):
         if command == 'evaluate':
             p.add_argument('--candidate', required=True, help='Exact Rough (stairs) ID in the shared bank')
             p.add_argument('--finetuned', type=Path, help='Reuse a completed candidate run with the same plan and budget')
-        else:
-            p.add_argument('--scoring', type=Path, required=True)
+        elif command == 'search':
+            p.add_argument('--scoring', type=Path)
             p.add_argument('--seed', type=int, default=42)
             p.add_argument('--trials', type=int, required=True, help='Total candidate evaluations including previous commits')
     p = sub.add_parser('calibrate')
@@ -342,7 +497,7 @@ def main(argv=None):
     p.add_argument('--scoring', required=True, type=Path)
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
-    p.add_argument('--conditions', type=Path, default=HERE/'configs/bo_pilot_conditions.json')
+    p.add_argument('--conditions', type=Path, default=HERE/'configs/bo_conditions.json')
     p.add_argument('--output', type=Path, required=True)
     a = parser.parse_args(argv)
     if a.command == 'ingest':
@@ -358,19 +513,38 @@ def main(argv=None):
         return
     if min(a.updates,a.timeout) < 1 or a.gpu < 0 or (a.command == 'search' and a.trials < 1):
         parser.error('Expected a positive PPO and BO budget, timeout, and valid GPU index')
-    a.conditions = a.conditions.resolve()
+    a.root = (a.root or (MIGRATED_ROOT if a.migrated else DEFAULT_ROOT)).resolve()
+    if (a.migrated or (a.root/'migration_in_progress.json').is_file()) and not (a.root/'migration_completed.json').is_file():
+        parser.error('Complete migration of the selected experiment root before BO')
+    formal = a.command == 'initialize'
+    default_conditions = FORMAL_CONDITIONS
+    if a.command == 'search':
+        default_scoring = a.root/'bo/calibration50/scoring.json'
+        a.scoring = (a.scoring or default_scoring).resolve()
+        scoring = read(a.scoring)
+        formal = scoring.get('method') == 'post_finetune_panel50'
+        if not formal and (a.scoring == default_scoring or 'reports' in scoring.get('benchmark', {})):
+            raise ValueError('Official initial observations require the frozen panel scoring method')
+        if not formal and scoring.get('conditions_sha256') == digest(read_conditions(PILOT_CONDITIONS)):
+            default_conditions = PILOT_CONDITIONS
+    a.conditions = (a.conditions or default_conditions).resolve()
     conditions = read_conditions(a.conditions)
-    source, plan, actor = shared_input(a.root)
+    if formal and conditions != read_conditions(FORMAL_CONDITIONS):
+        raise ValueError('Official BO calibration and search require the fixed three-task conditions')
+    source, plan, actor = shared_input(a.root, formal=formal)
     if a.command == 'evaluate' and a.candidate not in plan['teachers']['stairs']['design_ids']:
         parser.error('Candidate must be an exact shared Rough structure ID')
     if getattr(a, 'finetuned', None) and not (a.finetuned/'completed.json').is_file():
         parser.error('--finetuned needs the completed candidate run directory')
-    work = (a.output or a.root/'bo'/('search' if a.command == 'search' else a.candidate)).resolve()
+    label = {'search':'search','initialize':'calibration50'}.get(a.command,getattr(a,'candidate',None))
+    work = (a.output or a.root/'bo'/label).resolve()
     with run_lock(work):
         work.mkdir(parents=True, exist_ok=True)
         try:
             if a.command == 'search':
                 search(a, work, source, plan, actor, conditions)
+            elif a.command == 'initialize':
+                initialize(a, work, source, plan, actor, conditions)
             else:
                 evaluate(a, work, source, plan, actor, a.candidate, conditions)
         except KeyboardInterrupt:

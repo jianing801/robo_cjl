@@ -11,12 +11,14 @@ from types import SimpleNamespace
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
+from scenario_sampling import last_design_copy, rollout_env_count, verify_collection_layout
 
 def main():
     from isaaclab.app import AppLauncher
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('plan','design-ids','output'):p.add_argument('--'+name,required=True)
     p.add_argument('--student');p.add_argument('--mode',choices=['collect','evaluate'],default='collect')
+    p.add_argument('--num-envs',type=int,help='Exact physical environment count for collection')
     p.add_argument('--profile',choices=['nominal','robust'],default='nominal')
     p.add_argument('--randomization-strength',type=float,default=1.)
     p.add_argument('--steps',type=int,default=1000);p.add_argument('--stride',type=int,default=2)
@@ -30,6 +32,13 @@ def main():
     if a.video:a.enable_cameras=True
     if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
     plan=load_plan(a.plan);spec=plan['teachers']['run'];code=Path(spec['code_root'])
+    ids=a.design_ids.split(',')
+    if len(ids)!=len(set(ids)) or not set(ids)<=set(spec['design_ids']):raise ValueError('Unknown or duplicate AMP design')
+    from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
+    bo_conditions = parse_conditions(a, ids)
+    if bo_conditions:
+        a.speed = bo_conditions['tasks']['run']['speed_mps']
+    n=rollout_env_count(a,len(ids),bo_conditions['copies'] if bo_conditions else spec['copies'])
     sys.path[:0]=[str(Path(spec['runtime_dir'])),str(code),str(code.parent/'rsl_rl')]
     out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=False)
     if a.video:
@@ -48,18 +57,14 @@ def main():
         from amp_runtime import SpatialAmpEnv,configure_amp
         from amp_policy import SpatialActorCritic
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
-        from rollout import reuse_assets,canonical_input
+        from rollout import reuse_assets,canonical_input,load_rollout_bank,indexed_rollout_cache
         from amp_adapter import decode_amp_frames
         from student import load_student
         write_new(out/'importer_audit.json',rough_module('hybrid_importer').install_local_importer_adapter())
-        bank=load_configurable_bank(spec['bank']);ids=a.design_ids.split(',')
-        if len(ids)!=len(set(ids)) or not set(ids)<=set(spec['design_ids']):raise ValueError('Unknown or duplicate AMP design')
-        from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
-        bo_conditions = parse_conditions(a, ids)
-        if bo_conditions:
-            a.speed = bo_conditions['tasks']['run']['speed_mps']
-        copies_count = bo_conditions['copies'] if bo_conditions else spec['copies']
-        by_id={d['id']:d for d in bank['designs']};designs=[by_id[i] for i in ids];n=len(ids)*copies_count
+        state=torch.load(spec['checkpoint'],map_location='cpu',weights_only=False)
+        identity=None if bo_conditions or a.ppo_channel else state.get('hybrid_identity')
+        bank=load_rollout_bank(spec,'run',ids,identity,load_configurable_bank)
+        by_id={d['id']:d for d in bank['designs']};designs=[by_id[i] for i in ids]
         if sha(spec['reference_library'])!=spec['reference_library_sha256']:raise ValueError('Reference manifest changed')
         library=validate_library(bank,spec['bank'],spec['reference_library'],ids)
         options=SimpleNamespace(num_envs=n,device=a.device,asset_cache=None,allow_cache_misses=True,
@@ -80,7 +85,9 @@ def main():
         cfg.sim.render_interval=1000000
         if a.full_body_torque and not spec['full_body_torque']:
             raise ValueError('Cannot override frozen teacher physics')
-        cache=reuse_assets(cfg,spec['asset_cache'],out,'run',designs);write_new(out/'asset_cache_audit.json',cache)
+        indexed=indexed_rollout_cache(spec,'run',designs) if identity else None
+        cache=reuse_assets(cfg,indexed if indexed is not None else spec['asset_cache'],out,'run',designs)
+        write_new(out/'asset_cache_audit.json',cache)
         if a.video:cfg.viewer.resolution=(960,540)
         class CaptureAmp(CaptureReset, SpatialAmpEnv):
             pass
@@ -101,6 +108,8 @@ def main():
         stage=omni.usd.get_context().get_stage()
         routed=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
         if routed!=[ids[i%len(ids)] for i in range(n)]:raise ValueError('AMP physical/context routing differs')
+        if a.num_envs is not None:
+            verify_collection_layout(raw,designs,n)
         motion=raw.motion_data_manager.get_term('motion_dataset')
         actual_libraries=[motion.terms[i].cfg.motion_data_dir for i in motion.env_library.cpu().tolist()]
         if actual_libraries!=[library['designs'][i]['directory'] for i in routed]:raise ValueError('AMP reference routing differs')
@@ -125,7 +134,7 @@ def main():
                 geometry.append(dict(design=d['id'],joint=name,error_m=error))
         write_new(out/'geometry_audit.json',dict(verified=True,joints=geometry))
         write_new(out/'reference_routing_audit.json',dict(verified=True,design_ids=routed,per_env_libraries=actual_libraries))
-        obs=env.get_observations();state=torch.load(spec['checkpoint'],map_location='cpu',weights_only=False)
+        obs=env.get_observations()
         config=dict(agent['policy']);config.pop('class_name',None)
         config['native_config']=state['model_state_dict']['_extra_state']['config']
         teacher=SpatialActorCritic(obs,{'policy':['policy'],'critic':['critic']},env.num_actions,**config).to(raw.device)
@@ -138,8 +147,8 @@ def main():
         with torch.inference_mode():
             from student_observations import StudentHistory, boundary_contract, STUDENT_ACTION_CLIP, EpisodeTracker, TrackingError, speed_bins
             from scenario_sampling import scenario_table
-            obs=env.get_observations();groups=torch.arange(n,device=raw.device)%len(ids)
-            copies=torch.arange(n,device=raw.device)//len(ids);validation=copies==copies_count-1
+            obs=env.get_observations();environments=torch.arange(n,device=raw.device)
+            groups=environments%len(ids);validation=last_design_copy(environments,len(ids))
             bo = TrialCapture(raw, 'run', bo_conditions, a.seed, motor_records(raw, bank, designs[0])) if bo_conditions else None
             static=torch.tensor([[v for row in graph_features(d['urdf'],names,q0) for v in row]+
                 unified_context(bank,d,plan['schema']) for d in designs],device=raw.device)
@@ -203,7 +212,7 @@ def main():
                 label=label.clamp(-STUDENT_ACTION_CLIP,STUDENT_ACTION_CLIP)
                 if a.mode=='collect' and step%a.stride==0:
                     for k,v in dict(base_obs=base,teacher_actions=label,design_index=groups,
-                        environment_ids=torch.arange(n,device=raw.device),validation=validation,
+                        environment_ids=environments,validation=validation,
                         scenario_bin=speed_bins(command,'run'),episode_id=episodes.episode,
                         actual_command=command).items():data[k].append(v.cpu().clone())
                 action=student(canonical_input(base,plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))) if student else label

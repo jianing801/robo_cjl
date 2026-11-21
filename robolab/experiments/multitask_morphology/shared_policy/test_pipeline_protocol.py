@@ -20,19 +20,20 @@ def test_curriculum_reaches_target_and_nominal_never_randomizes():
             pipeline.round_strength(0, 3, initial, target, 'robust')
 
 
-def test_selection_pairs_physical_structures_with_different_task_ids(tmp_path):
-    keys = [(round(.2+i*.01, 10), .3, 'K', 'A') for i in range(7)]
-    plan = {'selected_structure_keys': keys, 'teachers': {}}
-    for task in ('stairs', 'backpack', 'run'):
-        designs = [dict(id=f'{task}_{i}', thigh_m=key[0], calf_m=key[1], knee_motor=key[2], ankle_motor=key[3])
-                   for i, key in enumerate(keys)]
-        bank = tmp_path/f'{task}.json'
-        bank.write_text(json.dumps({'designs': list(reversed(designs))}))
-        plan['teachers'][task] = {'bank': str(bank), 'design_ids': [d['id'] for d in reversed(designs)]}
-    jobs, selected = pipeline.selection_jobs(plan, 3, 2)
-    assert selected == [keys[0], keys[6], keys[3]]
-    assert jobs == [(task, [f'{task}_0', f'{task}_6']) if i % 2 == 0 else (task, [f'{task}_3'])
-                    for i, task in enumerate(['stairs', 'stairs', 'backpack', 'backpack', 'run', 'run'])]
+def test_balanced_selection_excludes_calibration_and_spans_seen_and_unseen():
+    from itertools import product
+    from collections import Counter
+    from collection_grid import select_collection_grid, selection_panel
+    keys=list(product(range(20,30), range(25,35), 'ABCDE', 'abcde'))
+    grid=select_collection_grid(keys)
+    reserved=[(t,c,k,a) for k in 'ABCDE' for a in 'abcde' for t,c in [(20,25),(21,26)]]
+    panel=selection_panel(keys, grid, reserved)
+    assert len(set(panel)) == 50 and set(panel).isdisjoint(reserved)
+    assert Counter((row[2:], row in grid) for row in panel) == {
+        ((k,a),seen):1 for k,a,seen in product('ABCDE','abcde',(True,False))}
+    assert selection_panel(keys[::-1],grid[::-1],reserved[::-1]) == panel
+    with pytest.raises(ValueError):
+        selection_panel(keys, grid, reserved[:-1])
 
 
 def row(index=0, **changes):
@@ -160,53 +161,19 @@ def test_final_test_suite_does_not_reuse_selection_cache(tmp_path, monkeypatch):
     assert len(seen) == 2 and seen[0][0] != seen[1][0] and seen[0][1] != seen[1][1]
 
 
-def test_diverse_subsets_cover_leg_extremes_and_motor_categories_and_are_nested():
-    keys = [(thigh, calf, knee, ankle) for thigh in (.2, .25, .3)
-            for calf in (.2, .3, .4) for knee in ('K0', 'K1', 'K2') for ankle in ('A0', 'A1')]
-    screen = pipeline.diverse_structure_keys(keys, 6)
-    expanded = pipeline.diverse_structure_keys(list(reversed(keys)), 12)
-    assert expanded[:6] == screen
-    assert {key[2] for key in screen} == {'K0', 'K1', 'K2'}
-    assert {key[3] for key in screen} == {'A0', 'A1'}
-    assert {min(key[i] for key in screen) for i in (0, 1)} == {.2}
-    assert max(key[0] for key in screen) == .3 and max(key[1] for key in screen) == .4
-    assert len(pipeline.diverse_structure_keys(keys, len(keys)+1)) == len(keys)
-
-
-def test_epoch_nomination_uses_schedule_and_keeps_final_epoch_without_mse_filter(tmp_path):
-    checkpoints = []
-    for epoch in range(12):
-        actor = tmp_path/f'epoch_{epoch}.pt'; actor.write_text(str(epoch))
-        checkpoints.append(dict(epoch=epoch, student=str(actor), student_sha256=pipeline.sha(actor),
-                                balanced_validation_MSE=0. if epoch == 0 else 100.))
-    report = {'checkpoints': checkpoints, 'student': checkpoints[0]['student']}
-    assert [row['epoch'] for row in pipeline.checkpoint_candidates(report, 5, 12)] == [4, 9, 11]
-    Path(checkpoints[9]['student']).write_text('changed')
-    with pytest.raises(ValueError, match='changed'):
-        pipeline.checkpoint_candidates(report, 5, 12)
-    with pytest.raises(ValueError, match='every epoch'):
-        pipeline.checkpoint_candidates({'checkpoints': checkpoints[:-1]}, 5, 12)
-
-
-def test_two_stage_selection_uses_closed_loop_metrics_not_supervised_mse():
-    candidates = [dict(epoch=e, student=f'actor_{e}', student_sha256=str(e), balanced_validation_MSE=mse)
-                  for e, mse in [(4, .001), (9, 20.), (14, 30.), (19, .0001)]]
-    screen_rates = {4: .4, 9: .9, 14: .8, 19: .7}
-    expanded_rates = {9: .5, 14: .9}
-    calls = []
-    def evaluate(candidate, tier):
-        epoch = candidate['epoch']; calls.append((epoch, tier))
-        rate = (screen_rates if tier == 'screen' else expanded_rates)[epoch]
-        return {'task_metrics': metrics([rate]*3), 'evaluations': [dict(epoch=epoch, tier=tier)]}
-    result = pipeline.select_round_candidates(candidates, metrics([1.]*3), metrics([1.]*3), evaluate, 2)
-    assert calls == [(4, 'screen'), (9, 'screen'), (14, 'screen'), (19, 'screen'), (9, 'selection'), (14, 'selection')]
-    assert result['promoted_epochs'] == [9, 14] and result['selected_epoch'] == 14
-    assert result['selected_student'] == 'actor_14'
-    assert result['comparison_version'] == pipeline.COMPARISON_VERSION
-    assert result['teacher_comparison']['version'] == pipeline.COMPARISON_VERSION
-    assert all('teacher_comparison' in candidate['screen'] for candidate in result['candidates'])
-    assert all('teacher_comparison' in candidate['selection'] for candidate in result['candidates']
-               if 'selection' in candidate)
+def test_last_epoch_ignores_supervised_best_and_checks_identity(tmp_path):
+    reports=[]
+    for i in range(10):
+        path=tmp_path/f'{i}.pt'
+        path.write_text(str(i))
+        reports.append(dict(epoch=i,student=str(path),student_sha256=pipeline.sha(path)))
+    report=dict(checkpoints=list(reversed(reports)),student=reports[0]['student'])
+    assert pipeline.last_checkpoint(report,10) == reports[-1]
+    path.write_text('changed')
+    with pytest.raises(ValueError):
+        pipeline.last_checkpoint(report,10)
+    with pytest.raises(ValueError):
+        pipeline.last_checkpoint(dict(checkpoints=reports[:-1]),10)
 
 
 def test_multiseed_suite_uses_all_common_seeds_and_separate_cache_names(tmp_path, monkeypatch):
@@ -226,25 +193,9 @@ def test_multiseed_suite_uses_all_common_seeds_and_separate_cache_names(tmp_path
     assert set(result['by_seed']) == {'11', '12', '13'}
 
 
-def test_selection_budget_accounts_for_both_tiers_seeds_rounds_and_final_tests():
-    tasks = ('stairs', 'backpack', 'run')
-    plan = {'teachers': {task: {'copies': 8} for task in tasks}}
-    screen = [(task, list(range(6))) for task in tasks]
-    expanded = [(task, list(range(offset, min(offset+10, 12)))) for task in tasks for offset in (0, 10)]
-    full = [(task, list(range(10))) for task in tasks for _ in range(300)]
-    budget = pipeline.selection_budget(plan, screen, expanded, full, epochs=20, every_epochs=5,
-        rounds=4, promotion_count=2, seeds=[1, 2, 3], selection_profile='robust',
-        evaluation_profile='both', preflight_profile='robust')
-    assert budget['epoch_candidate_count'] == 4 and budget['promoted_candidates'] == 2
-    assert budget['screen_design_count'] == 6 and budget['expanded_design_count'] == 12
-    assert budget['teacher_rollout_processes'] == 21
-    assert budget['candidate_rollout_processes_per_round'] == 48
-    assert budget['total_selection_rollout_processes'] == 213
-    assert budget['final_test_rollout_processes'] == 3600
-
-
-def test_start_passes_training_and_multistage_selection_budgets(tmp_path, monkeypatch):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+def test_start_uses_approved_distillation_protocol(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4]))
+    monkeypatch.delitem(sys.modules,'start',raising=False)  # rough_bo also provides a start.py.
     import start
     folders = {}
     teachers = {}
@@ -259,23 +210,12 @@ def test_start_passes_training_and_multistage_selection_budgets(tmp_path, monkey
     monkeypatch.setattr(start, 'select_run', lambda root, task: (folders[task], True))
     monkeypatch.setattr(start, 'ensure_banks', lambda *args: None)
     monkeypatch.setattr(start, 'run', lambda command, **kwargs: calls.append([str(value) for value in command]))
-    start.main(['蒸馏', '--root', str(tmp_path), '--dry-run', '--candidate-every-epochs', '2',
-        '--screen-designs', '4', '--selection-designs', '8', '--promotion-count', '3',
-        '--selection-seeds', '101,102', '--samples-per-design-per-epoch', '64',
-        '--validation-rows-per-design-shard', '256', '--replay-cache-shards', '3',
-        '--tracking-rel-tolerance', '.2', '--resume-paused'])
-    assert len(calls) == 1
-    command = calls[0]
-    for flag, expected in {'--candidate-every-epochs': '2', '--screen-designs': '4',
-        '--selection-designs': '8', '--promotion-count': '3', '--selection-seeds': '101,102',
-        '--samples-per-design-per-epoch': '64', '--validation-rows-per-design-shard': '256',
-        '--replay-cache-shards': '3',
-        '--tracking-rel-tolerance': '0.2'}.items():
-        assert command[command.index(flag)+1] == expected
-    assert '--max-rows-per-design-shard' not in command
-    assert '--tracking-abs-tolerance' not in command
-    assert '--standing-speed-tolerance' not in command
-    assert '--resume-paused' in command
+    start.main(['蒸馏','--root',str(tmp_path),'--dry-run','--resume-paused'])
+    command, = calls
+    for flag,value in {'--epochs':'10','--dagger-rounds':'3','--collect-steps':'250',
+                       '--replay-cache-shards':'12','--output':str(tmp_path/'shared_policy')}.items():
+        assert command[command.index(flag)+1] == value
+    assert '--screen-designs' not in command and '--resume-paused' in command
 
 
 def test_retired_absolute_motion_tolerance_has_explicit_migration_errors(monkeypatch, capsys):
@@ -283,7 +223,8 @@ def test_retired_absolute_motion_tolerance_has_explicit_migration_errors(monkeyp
         '--tracking-abs-tolerance', '.1'])
     with pytest.raises(ValueError, match='retired.*tracking-rel-tolerance'):
         pipeline.main()
-    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4]))
+    monkeypatch.delitem(sys.modules,'start',raising=False)  # rough_bo also provides a start.py.
     import start
     with pytest.raises(SystemExit):
         start.main(['蒸馏', '--tracking-abs-tolerance', '.1'])
@@ -295,26 +236,30 @@ def test_removed_standing_tolerance_is_rejected_by_both_entrypoints(monkeypatch,
         '--standing-speed-tolerance', '.1'])
     with pytest.raises(ValueError, match='standing-speed-tolerance.*retired'):
         pipeline.main()
-    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[4]))
+    monkeypatch.delitem(sys.modules,'start',raising=False)  # rough_bo also provides a start.py.
     import start
     with pytest.raises(SystemExit):
         start.main(['蒸馏', '--standing-speed-tolerance', '.1'])
     assert '关闭站立指令' in capsys.readouterr().err
 
 
-@pytest.mark.parametrize('teacher_rate,teacher_final_pass,student_final_pass', [
-    (1., True, True), (0., False, False), (1., True, False), (0., False, True)])
-def test_pipeline_dagger_uses_round_closed_loop_winner_and_final_test_cannot_select(
-        tmp_path, monkeypatch, teacher_rate, teacher_final_pass, student_final_pass):
+def test_pipeline_resumes_and_selects_only_last_epoch_of_three_dagger_rounds(tmp_path,monkeypatch):
     from contextlib import nullcontext
+    from itertools import product
     from types import ModuleType
     tasks = ['stairs', 'backpack', 'run']
-    key = (.2, .3, 'K', 'A')
-    plan = {'selected_structure_keys': [key], 'teachers': {}, 'schema': {'tasks': tasks}, 'scope': 'all'}
+    keys=list(product([.2,.25,.3,.35,.4],[.25,.32,.38,.45],[f'K{i}' for i in range(5)],[f'A{i}' for i in range(5)]))
+    reserved=[(t,c,k,a) for k,a in product([f'K{i}' for i in range(5)],[f'A{i}' for i in range(5)]) for t,c in [(.2,.25),(.25,.32)]]
+    monkeypatch.setattr(pipeline, 'calibration_keys',lambda:reserved)
+    plan = {'selected_structure_keys': keys, 'teachers': {}, 'schema': {'tasks': tasks}, 'scope': 'all'}
     for task in tasks:
         bank = tmp_path/f'{task}.json'
-        bank.write_text(json.dumps({'designs': [dict(id=task, thigh_m=.2, calf_m=.3, knee_motor='K', ankle_motor='A')]}))
-        plan['teachers'][task] = {'bank': str(bank), 'design_ids': [task], 'copies': 8, 'checkpoint_sha256': task}
+        entries = [dict(id=f'{task}_{i}', thigh_m=k[0], calf_m=k[1], knee_motor=k[2], ankle_motor=k[3])
+                   for i,k in enumerate(keys)]
+        bank.write_text(json.dumps({'designs': entries}))
+        plan['teachers'][task] = {'bank': str(bank), 'design_ids': [row['id'] for row in entries],
+                                  'copies': 8, 'checkpoint_sha256': task}
     plan_path = tmp_path/'plan.json'; plan_path.write_text(json.dumps(plan))
     monkeypatch.setattr(pipeline, 'load_plan', lambda path: plan)
     monkeypatch.setattr(pipeline, 'protocol_metadata', lambda profile, strength: {'profile': profile, 'strength': strength})
@@ -333,7 +278,7 @@ def test_pipeline_dagger_uses_round_closed_loop_winner_and_final_test_cannot_sel
         folder = Path(command[command.index('--output')+1]); folder.mkdir(parents=True)
         if any(str(part).endswith('fit.py') for part in command):
             checkpoints = []
-            for epoch in range(6):
+            for epoch in range(10):
                 actor = folder/f'epoch_{epoch}.pt'; actor.write_text(f'{folder.parent.name}:{epoch}')
                 checkpoints.append(dict(epoch=epoch, student=str(actor), student_sha256=pipeline.sha(actor),
                     balanced_validation_MSE=0. if epoch == 0 else 100.))
@@ -346,26 +291,17 @@ def test_pipeline_dagger_uses_round_closed_loop_winner_and_final_test_cannot_sel
     def suite(plan, plan_path, root, jobs, actor, profile, strength, seeds, name, *args):
         suites.append((actor, tuple(seeds), name))
         if actor is None:
-            rate = teacher_rate
+            rate = 1.
         else:
             epoch = int(Path(actor).stem.split('_')[-1])
             round_index = int(Path(actor).parents[1].name.split('_')[-1])
-            rate = ({2: .8, 5: .9}[epoch] if name.startswith('screen/') else
-                    {2: 1. if round_index == 0 else .9, 5: .8}[epoch])
+            assert epoch == 9
+            rate = {1:.5, 2:.9, 3:.6}[round_index]
         return {'task_metrics': metrics([rate]*3,profile=profile,seeds=seeds), 'evaluations': [{'suite': name}]}
     monkeypatch.setattr(pipeline, 'run_selection_suite', suite)
-    final_calls = []
-    def final_evaluation(plan, plan_path, root, jobs, actor, profile, strength, seed, suite, *args):
-        final_calls.append((actor, profile, seed))
-        passed = student_final_pass if actor else teacher_final_pass
-        return [dict(task=task, profile=profile, seed=seed, policy='student' if actor else 'teacher',
-            evaluation_protocol=comparison_protocol(profile,strength),
-            **pipeline.evaluation_statistics(task, [row(fell=not passed)], profile)) for task in tasks]
-    monkeypatch.setattr(pipeline, 'run_evaluation', final_evaluation)
-    output = tmp_path/'output'
-    monkeypatch.setattr(sys, 'argv', ['pipeline', '--plan', str(plan_path), '--output', str(output),
-        '--epochs', '6', '--dagger-rounds', '1', '--candidate-every-epochs', '3',
-        '--screen-designs', '1', '--selection-designs', '1', '--selection-seeds', '101,102'])
+    output=tmp_path/'shared_policy'
+    argv=['pipeline','--plan',str(plan_path),'--output',str(output)]
+    monkeypatch.setattr(sys, 'argv', argv)
     with pytest.raises(KeyboardInterrupt): pipeline.main()
     assert (output/'USER_PAUSED').exists()
     original_argv = sys.argv.copy()
@@ -379,52 +315,24 @@ def test_pipeline_dagger_uses_round_closed_loop_winner_and_final_test_cannot_sel
     assert not (output/'USER_PAUSED').exists()
     first_collect = [cmd for cmd in children if any('/data/round_0/' in str(v).replace('\\','/') for v in cmd)]
     assert len(first_collect)==3
-    preflight = json.loads((output/'teacher_preflight.json').read_text())
-    assert preflight['result'] == 'TEACHER_REFERENCE_EVALUATED'
-    assert preflight['ability_threshold_applied'] is False and 'gate' not in preflight
-    assert preflight['task_metrics']['stairs']['success_rate'] == teacher_rate
-    round0 = json.loads((output/'selection_round_0.json').read_text())
-    winner = round0['selected_student']
-    assert round0['selected_epoch'] == 2 and 'epoch_0.pt' not in winner
-    round1_collect = [command for command in children if any('/data/round_1/' in str(value).replace('\\','/') for value in command)]
-    assert len(round1_collect) == 3
-    assert all(command[command.index('--student')+1] == winner for command in round1_collect)
-    second_fit = [command for command in children if any('/bc_round_1/' in str(value).replace('\\','/') for value in command)][0]
-    assert second_fit[second_fit.index('--init-student')+1] == winner
-    completed = json.loads((output/'completed.json').read_text())
-    criteria = completed['evaluation_criteria']
-    assert criteria['tracking_rel_tol'] == .25
-    assert 'standing_speed_tol_m_s' not in criteria and 'standing_gate' not in criteria
-    assert 'standing commands are disabled' in criteria['command_scope']
-    assert 'tracking_abs_tol_m_s' not in criteria
-    manifest = json.loads((output/'manifest.json').read_text())
-    assert manifest['protocol']['evaluation_criteria'] == criteria
-    assert manifest['protocol']['evaluation_version'] == pipeline.GATE_VERSION
-    assert manifest['protocol']['comparison_version'] == pipeline.COMPARISON_VERSION
-    assert completed['selected_round'] == 0 and completed['student'] == winner
-    assert {actor for actor, _, _ in final_calls if actor} == {winner}
-    assert {seed for _, _, seed in final_calls}.isdisjoint({101, 102})
-    assert completed['result'] == 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
-    assert completed['requires_candidate_finetuning'] and completed['requires_post_finetuning_evaluation']
-    for retired in ('robust_basic_gait_passed', 'command_tracking_passed',
-                    'nominal_command_tracking_passed', 'robust_command_tracking_passed',
-                    'profile_command_tracking_passed'):
-        assert retired not in completed
-    expected_pass = {'teacher': teacher_final_pass, 'student': student_final_pass}
-    assert completed['policy_all_episodes_command_tracking_passed'] == {
-        'nominal': expected_pass, 'robust': expected_pass}
-    for profile in ('nominal', 'robust'):
-        comparison = completed['profile_results'][profile]['teacher_comparison']
-        assert comparison['version'] == pipeline.COMPARISON_VERSION
-        design = comparison['tasks']['stairs']['designs']['d']
-        assert design['success_rate_gap'] == int(student_final_pass)-int(teacher_final_pass)
-        assert design['success_rate_shortfall'] == max(int(teacher_final_pass)-int(student_final_pass), 0)
-    selection = json.loads((output/'selection.json').read_text())
-    assert 'matches_teacher_on_each_selection_task' not in selection
-    assert selection['comparison_version'] == pipeline.COMPARISON_VERSION
-    assert selection['teacher_comparison'] == round0['teacher_comparison']
-    assert all(entry['comparison_version'] == pipeline.COMPARISON_VERSION for entry in completed['rounds'])
-    assert all(seeds == (101, 102) for _, seeds, name in suites if name.startswith('selection/'))
+    assert all(c[c.index('--num-envs')+1]=='4096' and len(c[c.index('--design-ids')+1].split(','))==400 for c in first_collect)
+    completed=json.loads((output/'completed.json').read_text())
+    selection=json.loads((output/'selection.json').read_text())
+    assert len(suites)==4 and sum(actor is None for actor,_,_ in suites)==1
+    assert [x['round_index'] for x in selection['candidates']]==[1,2,3]
+    assert completed['selected_round']==2
+    assert pipeline.sha(completed['student'])==completed['student_sha256']
+    for r in range(1,4):
+        prior=completed['rounds'][r-1]['student']
+        commands=[c for c in children if any(f'/data/round_{r}/' in str(v).replace(chr(92),'/') for v in c)]
+        assert len(commands)==3 and all(c[c.index('--student')+1]==prior for c in commands)
+        assert Path(prior).name=='epoch_9.pt'
+    assert len(selection['design_keys'])==50 and not completed['full_bank_evaluated']
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+    import bo
+    monkeypatch.setattr(bo,'calibration_keys',lambda:reserved)
+    manifest=json.loads((output/'manifest.json').read_text())
+    bo.check_formal_selection(tmp_path,plan,manifest,completed,Path(completed['student']).resolve())
 
 
 def test_final_comparison_rejects_missing_policies_and_empty_records():

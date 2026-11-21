@@ -562,10 +562,9 @@ def migrate_assets(root, source, gpu, preview=False, resume_paused=False):
 
 
 def distill(root, gpu, preview=False, collection_profile='robust', randomization_strength=1.,
-            initial_randomization_strength=.25, evaluation_profile='both', selection_designs=12,
-            candidate_every_epochs=5, screen_designs=6, promotion_count=2,
+            initial_randomization_strength=.25,
             selection_seeds='20261117,20261119,20261120', samples_per_design_per_epoch=32,
-            validation_rows_per_design_shard=128, replay_cache_shards=2,
+            validation_rows_per_design_shard=128, replay_cache_shards=12,
             tracking_rel_tolerance=.25, min_command_progress_ratio=.5, resume_paused=False):
     teachers = {t: select_run(root, t)[0] for t in ('rough', 'backpack', 'amp')}
     if not all((p/'completed.json').is_file() for p in teachers.values()):
@@ -584,14 +583,12 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
                 raise ValueError('共享计划绑定的教师与当前教师不一致；保留旧计划，不自动替换。')
     output = root/'shared_policy'
     command = [sys.executable, '-u', ENTRY/'distill.py', '--plan', plan, '--output', output,
-               '--device', f'cuda:{gpu}', '--batch-designs', '10', '--collect-steps', '1000',
-               '--stride', '5', '--epochs', '20', '--dagger-rounds', '3',
+               '--device', f'cuda:{gpu}', '--collect-steps', '250',
+               '--stride', '5', '--epochs', '10', '--dagger-rounds', '3',
                '--collection-profile', collection_profile,
                '--randomization-strength', str(randomization_strength),
                '--initial-randomization-strength', str(initial_randomization_strength),
-               '--evaluation-profile', evaluation_profile, '--selection-designs', str(selection_designs),
-               '--candidate-every-epochs', str(candidate_every_epochs), '--screen-designs', str(screen_designs),
-               '--promotion-count', str(promotion_count), '--selection-seeds', selection_seeds,
+               '--selection-seeds', selection_seeds,
                '--samples-per-design-per-epoch', str(samples_per_design_per_epoch),
                '--validation-rows-per-design-shard', str(validation_rows_per_design_shard),
                '--replay-cache-shards', str(replay_cache_shards),
@@ -684,15 +681,11 @@ def main(argv=None):
     parser.add_argument('--collection-profile', choices=['nominal','robust'], default='robust', help='共享蒸馏采集配置，默认按任务随机化')
     parser.add_argument('--randomization-strength', type=float, default=1., help='共享蒸馏目标随机化强度，0到1')
     parser.add_argument('--initial-randomization-strength', type=float, default=.25, help='共享BC首轮随机化强度，逐轮增加至目标')
-    parser.add_argument('--evaluation-profile', choices=['nominal','robust','both'], default='both', help='共享最终评估，默认名义与随机化分别运行')
-    parser.add_argument('--candidate-every-epochs', type=int, default=5, help='每隔多少epoch参加闭环筛选，末epoch始终参加')
-    parser.add_argument('--screen-designs', type=int, default=6, help='所有候选初筛的共同结构数')
-    parser.add_argument('--promotion-count', type=int, default=2, help='进入扩大验证的初筛候选数')
-    parser.add_argument('--selection-designs', type=int, default=12, help='扩大验证及跨轮闭环选模的共同结构数')
-    parser.add_argument('--selection-seeds', default='20261117,20261119,20261120', help='扩大验证随机种子，逗号分隔；首个同时用于初筛')
+    parser.add_argument('--evaluation-profile', choices=['nominal','robust','both'], default='both', help='候选微调后的步态检查配置')
+    parser.add_argument('--selection-seeds', default='20261117,20261119,20261120', help='三轮共用的三个选模种子，逗号分隔')
     parser.add_argument('--samples-per-design-per-epoch', type=int, default=32, help='每结构每数据源每epoch的计算预算，不截断训练数据')
     parser.add_argument('--validation-rows-per-design-shard', type=int, default=128, help='每结构每数据源的监督验证行预算')
-    parser.add_argument('--replay-cache-shards', type=int, default=2, help='内存中的回放分片缓存数量')
+    parser.add_argument('--replay-cache-shards', type=int, default=12, help='内存中的回放分片缓存数量')
     parser.add_argument('--tracking-abs-tolerance', type=float, default=None, help='已停用：运动跟踪不再使用绝对误差下限')
     parser.add_argument('--standing-speed-tolerance', type=float, default=None, help='已停用：共享策略已关闭站立指令并移除站立验收项')
     parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help='仅运动阶段的跟踪RMSE相对运动指令速度RMS的容差')
@@ -756,8 +749,7 @@ def main(argv=None):
         prepare_assets(root, args.任务 or '全部', args.gpu, args.dry_run, args.resume_paused)
     elif action == 'distill':
         distill(root, args.gpu, args.dry_run, args.collection_profile, args.randomization_strength,
-                args.initial_randomization_strength, args.evaluation_profile, args.selection_designs,
-                args.candidate_every_epochs,args.screen_designs,args.promotion_count,args.selection_seeds,
+                args.initial_randomization_strength,args.selection_seeds,
                 args.samples_per_design_per_epoch,args.validation_rows_per_design_shard,args.replay_cache_shards,
                 args.tracking_rel_tolerance,args.min_command_progress_ratio,args.resume_paused)
     else:

@@ -154,13 +154,15 @@ def objective(report, scoring):
         feasible = pair['feasible']
         if feasible is None:
             continue
+        if scoring.get('method') == 'post_finetune_panel50' and pair['tasks']['stairs'].get('reached_top') is not True:
+            feasible = False
         result = dict(seed=pair['seed'], replica=pair['replica'], feasible=feasible, objective=None)
         if feasible:
             normalized = {}
             for task, specs in scoring['metrics'].items():
                 raw = pair['tasks'][task]['metrics']
                 if raw is None or any(raw.get(k) is None for k in specs):
-                    break
+                    continue
                 normalized[task] = {}
                 for key, spec in specs.items():
                     x, b = raw[key], spec['baseline']

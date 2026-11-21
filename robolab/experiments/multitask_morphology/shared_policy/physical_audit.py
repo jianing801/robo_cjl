@@ -175,7 +175,7 @@ def audit_physics(raw, cfg, designs, *, profile):
         raise ValueError(f"Actual masses must have shape (environments, bodies), got {tuple(mass.shape)}")
     n, bodies = mass.shape
     names = list(robot.body_names)
-    if len(names) != bodies or n < len(designs) or n % len(designs):
+    if len(names) != bodies or n < len(designs):
         raise ValueError("Physics environment/body/design routing dimensions differ")
     if not hasattr(data, "default_mass"):
         raise ValueError("Missing robot.data.default_mass: cannot verify nominal bank/URDF identity")

@@ -164,7 +164,8 @@ def test_every_epoch_is_saved_even_when_mse_gets_worse(dataset,tmp_path,monkeypa
     fit.main()
     summary=json.loads((output/'summary.json').read_text())
     assert [row['epoch'] for row in summary['checkpoints']]==[0,1,2]
-    assert summary['student']==summary['checkpoints'][0]['student']
+    assert summary['student']==summary['checkpoints'][-1]['student']
+    assert summary['balanced_validation_MSE']==1.0
     assert summary['closed_loop_required'] and summary['full_replay_rows']==8
     for row in summary['checkpoints']:
         assert Path(row['student']).is_file() and fit.sha(row['student'])==row['student_sha256']
@@ -246,3 +247,48 @@ def test_real_three_task_fit_subprocess_mmap_to_all_epoch_checkpoints(tmp_path):
         assert row['eligible_rows']==256 and row['sampled_draws']==256
         assert 32<row['unique_sampled_rows']<=256
         assert row['unique_coverage']==row['unique_sampled_rows']/256
+
+
+def test_collection_grid_replay_requires_exact_native_ids_for_every_teacher(dataset):
+    from itertools import product
+
+    plan, data, save = dataset
+    original = plan["teachers"]["stairs"]
+    sample = json.loads(Path(original["bank"]).read_text())["designs"][0]
+    tasks = ("stairs", "backpack", "run")
+    keys = list(product((.20, .25, .30, .35, .40), (.25, .30, .35, .40, .45),
+                        (f"k{i}" for i in range(5)), (f"a{i}" for i in range(5))))
+    expected = [i for i, key in enumerate(keys) if key[0] != .30 and key[1] != .35]
+    outside = next(i for i in range(len(keys)) if i not in expected)
+    assert len(expected) == 400
+    plan["selected_structure_keys"] = [list(key) for key in keys]
+    plan["schema"].update(tasks=list(tasks), shared_structure_keys=plan["selected_structure_keys"])
+    plan["task_ids"] = {task: i for i, task in enumerate(tasks)}
+    parent = Path(original["bank"]).parent
+    for task in tasks:
+        designs = [dict(sample, id=f"{task}_{i}", thigh_m=key[0], calf_m=key[1],
+                        knee_motor=key[2], ankle_motor=key[3]) for i, key in enumerate(keys)]
+        bank = parent / f"{task}_grid_bank.json"
+        bank.write_text(json.dumps({"designs": designs}))
+        plan["teachers"][task] = dict(original, bank=str(bank), bank_sha256=fit.sha(bank),
+                                      design_ids=[design["id"] for design in designs])
+
+    def replay(task, indices, name):
+        count = len(indices)
+        return save(dict(data, task=task, bank_sha256=plan["teachers"][task]["bank_sha256"],
+                         design_ids=[f"{task}_{i}" for i in indices],
+                         base_obs=torch.zeros(count * 2, 780), teacher_actions=torch.zeros(count * 2, 23),
+                         static_context=torch.zeros(count, 379), design_index=torch.arange(count).repeat_interleave(2),
+                         validation=torch.tensor([False, True]).repeat(count),
+                         environment_ids=torch.tensor([0, 1]).repeat(count),
+                         scenario_bin=torch.zeros(count * 2, dtype=torch.int64),
+                         episode_id=torch.zeros(count * 2, dtype=torch.int64),
+                         actual_command=torch.tensor([[.5, 0., 0.]]).repeat(count * 2, 1)), name)
+
+    paths = [replay(task, expected, f"{task}_grid.pt") for task in tasks]
+    groups, _, _ = load_groups(paths, plan, "plan", collection_grid=True, validation_rows=1)
+    assert set(groups) == {(task, f"{task}_{i}") for task in tasks for i in expected}
+    assert all(len(group["train"]) == len(group["validation"]) == 1 for group in groups.values())
+    with pytest.raises(ValueError, match="(?i)design|coverage|grid"):
+        mixed = replay("stairs", [outside, *expected[1:]], "stairs_mixed.pt")
+        load_groups([mixed, *paths[1:]], plan, "plan", collection_grid=True, validation_rows=1)

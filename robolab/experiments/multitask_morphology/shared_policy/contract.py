@@ -135,6 +135,19 @@ def paired_structures(banks):
     return [(key,{task:rows[key] for task,rows in indexed.items()}) for key in keys]
 
 
+def design_ids_for_keys(plan, keys, banks=None):
+    """Resolve the same physical keys to the approved native IDs of each teacher."""
+    result = {}
+    for task, spec in plan['teachers'].items():
+        bank = banks[task] if banks is not None else json.loads(Path(spec['bank']).read_text(encoding='utf8'))
+        allowed = set(spec['design_ids'])
+        by_key = {structure_key(design): design['id'] for design in bank['designs'] if design['id'] in allowed}
+        if any(key not in by_key for key in keys):
+            raise ValueError(f'Requested structures are not paired in {task}')
+        result[task] = [by_key[key] for key in keys]
+    return result
+
+
 def load_plan(path):
     plan=json.loads(Path(path).read_text(encoding='utf8'))
     if plan.get('kind') not in ('rough_backpack_distillation_plan_v2','rough_backpack_amp_distillation_plan_v3') or plan.get('structure_scope')!='teacher_intersection_only':

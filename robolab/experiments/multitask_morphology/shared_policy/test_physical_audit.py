@@ -64,6 +64,21 @@ def test_nominal_rejects_changed_mass_even_with_same_total(tmp_path):
         audit_physics(raw, cfg, designs, profile="nominal")
 
 
+def test_physical_audit_checks_last_partial_design_copy(tmp_path):
+    raw, cfg, designs = fixture(tmp_path)
+    raw.num_envs = 3
+    for owner in (raw.robot.data, raw.robot.root_physx_view):
+        for key, tensor in vars(owner).items():
+            if torch.is_tensor(tensor):
+                setattr(owner, key, tensor[:3])
+    result = audit_physics(raw, cfg, designs, profile="nominal")
+    assert [row['environment_ids'] for row in result['designs']] == [[0, 2], [1]]
+    raw.robot.data.default_mass[2] = raw.robot.data.default_mass[1]
+    raw.robot.root_physx_view.mass[2] = raw.robot.data.default_mass[1]
+    with pytest.raises(ValueError, match='env=2'):
+        audit_physics(raw, cfg, designs, profile="nominal")
+
+
 def test_robust_legal_body_ranges_and_default_identity(tmp_path):
     raw, cfg, designs = fixture(tmp_path, robust=True)
     raw.robot.root_physx_view.mass[:, 0] += torch.tensor([-.5, .5, .2, -.2])

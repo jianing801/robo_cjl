@@ -1,4 +1,4 @@
-"""Balanced real-data BC/DAgger for ONE rough+backpack actor; no expert/PPO updates."""
+"""Balanced real-data BC/DAgger for one morphology- and task-conditioned actor; no expert/PPO updates."""
 import argparse
 from collections import defaultdict,OrderedDict
 import hashlib
@@ -7,7 +7,8 @@ import math
 from pathlib import Path
 import time
 import torch
-from contract import load_plan,sha,write_new,input_width,graph_features,unified_context
+from contract import load_plan,sha,write_new,input_width,graph_features,unified_context,design_ids_for_keys
+from collection_grid import select_collection_grid
 from student import SharedActor,SharedMLPActor,load_student,save_student
 from randomization import PROTOCOL_SOURCE_FILES,PROFILE_VERSION
 
@@ -212,7 +213,8 @@ def stratified_rows(indices,environment_ids,scenario_bin=None,episode_id=None,*,
         all_episodes_retained=all(r['available_episodes']==r['retained_episodes'] for r in coverage))
 
 
-def load_groups(paths,plan,plan_sha,*,sampling_seed=0,validation_rows=128,replay_cache_shards=2):
+def load_groups(paths,plan,plan_sha,*,sampling_seed=0,validation_rows=128,replay_cache_shards=2,
+                collection_grid=False):
     if validation_rows<1:raise ValueError('A positive fixed validation row budget is required')
     if len(paths)!=len({str(Path(path).resolve()) for path in paths}):
         raise ValueError('Duplicate replay archives would duplicate original-row coverage')
@@ -221,6 +223,11 @@ def load_groups(paths,plan,plan_sha,*,sampling_seed=0,validation_rows=128,replay
     protocol_identity=None
     banks={t:json.loads(Path(s['bank']).read_text()) for t,s in plan['teachers'].items()}
     designs={t:{d['id']:d for d in b['designs']} for t,b in banks.items()}
+    required_ids = {task: spec['design_ids'] for task,spec in plan['teachers'].items()}
+    if collection_grid:
+        selected = select_collection_grid(plan['selected_structure_keys'])
+        required_ids = design_ids_for_keys(plan,selected,banks)
+    required = {(task,design) for task,ids in required_ids.items() for design in ids}
     static_checked={}
     for path in paths:
         data=store.load(path)
@@ -274,7 +281,7 @@ def load_groups(paths,plan,plan_sha,*,sampling_seed=0,validation_rows=128,replay
         if set(env[validation].tolist())&set(env[~validation].tolist()):raise ValueError('Environment validation leakage')
         sampling=[];source_sha=sha(path)
         for i,design in enumerate(data['design_ids']):
-            if design not in spec['design_ids']:raise ValueError('Unknown design')
+            if (task,design) not in required:raise ValueError(f'Design outside expected collection scope: {task}/{design}')
             indices=data['design_index']==i
             static=data['static_context'][i].float().clone()
             key=(task,design)
@@ -306,7 +313,6 @@ def load_groups(paths,plan,plan_sha,*,sampling_seed=0,validation_rows=128,replay
                                collection_protocol=protocol,native_boundaries=data.get('native_boundaries'),
                                full_observation_action_bytes=x.numel()*x.element_size()+y.numel()*y.element_size(),
                                replay_storage='torch.load mmap=True; bounded archive cache; no eager fallback'))
-    required={(t,d) for t,s in plan['teachers'].items() for d in s['design_ids']}
     if set(groups)!=required:raise ValueError(f'Incomplete teacher/task/design coverage: {len(required-set(groups))} missing')
     return dict(groups),provenance,io
 
@@ -369,6 +375,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',required=True);p.add_argument('--data-list',required=True)
     p.add_argument('--output',required=True);p.add_argument('--init-student')
+    p.add_argument('--collection-grid',action='store_true',help='Require complete replay for the common 400-structure grid')
     p.add_argument('--architecture',choices=['mxt','mlp'],default='mxt')
     p.add_argument('--max-rows-per-design-shard',type=int,default=None,
         help='Retired: training now samples full mmap replay. Use --samples-per-design-per-epoch for compute.')
@@ -398,7 +405,8 @@ def main():
     torch.set_num_threads(2);torch.manual_seed(a.seed)
     plan=load_plan(a.plan);paths=json.loads(Path(a.data_list).read_text())
     groups,sources,io=load_groups(paths,plan,sha(a.plan),sampling_seed=a.seed,
-        validation_rows=a.validation_rows_per_design_shard,replay_cache_shards=a.replay_cache_shards)
+        validation_rows=a.validation_rows_per_design_shard,replay_cache_shards=a.replay_cache_shards,
+        collection_grid=a.collection_grid)
     resolved_steps,training_rows=training_budget(groups,a.steps_per_epoch,
         samples_per_design_shard=a.samples_per_design_per_epoch)
     output=Path(a.output).resolve();output.mkdir(parents=True,exist_ok=False)
@@ -452,7 +460,7 @@ def main():
         expected_sampled_passes_by_task={t:a.epochs*resolved_steps*128/n for t,n in training_rows.items()},
         observation_normalization=a.observation_normalization,normalization_reparameterization_max_error=normalization_parity,yaw_loss_weight=a.yaw_loss_weight,stairs_loss_weight=a.stairs_loss_weight,
         teacher_updates=0,critic_trained=False,ppo_updates=0,init_student=a.init_student))
-    best=float('inf');best_path=None;checkpoints=[];started=time.monotonic()
+    checkpoints=[];started=time.monotonic()
     for epoch in range(a.epochs):
         model.train();losses=[]
         for _ in range(resolved_steps):
@@ -478,11 +486,10 @@ def main():
                      validation_MSE=means,epoch=epoch,closed_loop_required=True)
         checkpoints.append(dict(epoch=epoch,student=str(checkpoint),student_sha256=sha(checkpoint),
             validation_MSE=means,balanced_validation_MSE=score))
-        if score<best:best=score;best_path=checkpoint
-    write_new(output/'summary.json',dict(result='BC_COMPLETE_NOT_GAIT_VALIDATED',student=str(best_path),
-        student_sha256=sha(best_path),balanced_validation_MSE=best,optimizer_steps=a.epochs*resolved_steps,
+    write_new(output/'summary.json',dict(result='BC_COMPLETE_NOT_GAIT_VALIDATED',student=checkpoints[-1]['student'],
+        student_sha256=checkpoints[-1]['student_sha256'],balanced_validation_MSE=checkpoints[-1]['balanced_validation_MSE'],optimizer_steps=a.epochs*resolved_steps,
         tasks=plan['schema']['tasks'],covered_task_designs=len(groups),checkpoints=checkpoints,
-        student_selection='MSE-best compatibility field only; all epochs retained for external closed-loop selection',
+        student_selection='Final supervised epoch; DAgger rounds compared by independent closed-loop trials',
         closed_loop_required=True,cumulative_training_exposure=replay_exposure(groups),
         exposure_scope='This fit run only; accessible rows are not a claim that every row was sampled',**replay_memory(groups)))
 

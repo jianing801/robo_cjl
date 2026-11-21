@@ -187,3 +187,191 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(tmp_path, m
     assert all(pair['feasible'] for pair in first['pairs'])
     assert bo.evaluate(args, out, source, plan, initial, 'stairsid', conditions) == first
     assert calls == ['finetune', *bo.TASKS]
+
+
+def test_post_finetune_panel_uses_structure_means_and_frozen_weights():
+    import copy
+    from collection_grid import calibration_keys
+    keys=calibration_keys()
+    reports=[]
+    for i,key in enumerate(keys):
+        pairs=[]
+        for seed in (11,22,33):
+            tasks={task:dict(status='success',reached_top=True,metrics={m:i+1. for m in bo.METRICS[task]})
+                   for task in bo.TASKS}
+            pairs.append(dict(tasks=tasks,seed=seed,replica=0,feasible=True))
+        reports.append(dict(candidate=dict(structure_key=list(key)), pairs=pairs,
+            kind=bo.REPORT_VERSION, domain='simulation', conditions=dict(seeds=[11,22,33],copies=1),
+            conditions_sha256='conditions',ppo_updates=100))
+    scoring=bo.panel_scoring(reports,keys,{'initial_actor_sha256':'actor','updates':100})
+    for task in bo.TASKS:
+        metric=scoring['metrics'][task]['cot']
+        assert metric['p10']==pytest.approx(5.9)
+        assert metric['p90']==pytest.approx(45.1)
+        assert metric['baseline']==pytest.approx(39.2)
+        assert metric['weight']==pytest.approx(1/3 if task=='stairs' else .4)
+    assert objective(reports[0],scoring)['mean_objective']==pytest.approx(1/39.2)
+    incomplete=copy.deepcopy(reports)
+    incomplete[0]['pairs'][0]['tasks']['stairs']['status']='failure'
+    revised=bo.panel_scoring(incomplete,keys,{'initial_actor_sha256':'actor','updates':100})
+    assert revised['metrics']['stairs']['cot']['eligible_designs']==49
+    assert revised['metrics']['run']['cot']['eligible_designs']==50
+    with pytest.raises(ValueError):
+        bo.panel_scoring(reports[:-1]+reports[:1],keys,{'updates':100})
+
+@pytest.fixture
+def official_panel(tmp_path, monkeypatch):
+    from itertools import product
+    from collection_grid import calibration_keys, select_collection_grid, selection_panel
+
+    fixed = calibration_keys()
+    axes = [sorted(set(axis)) for axis in zip(*fixed)]
+    keys = list(product(*axes))
+    training = select_collection_grid(keys)
+    selected = selection_panel(keys, training, fixed)
+    ids = {key: {task: f'{task}_{i}' for task in bo.TASKS} for i, key in enumerate(keys)}
+    rows = [dict(key=list(key), design_ids=ids[key]) for key in keys]
+    bank = tmp_path/'bank.json'
+    bank.write_text(json.dumps(dict(structures=rows)))
+    source = tmp_path/'shared_plan/plan.json'
+    source.parent.mkdir()
+    source.write_text(json.dumps(dict(schema=dict(tasks=list(bo.TASKS)), shared_bank=str(bank),
+                                     selected_structure_keys=keys)))
+    monkeypatch.setattr(bo, 'load_plan', bo.read)
+    out = tmp_path/'shared_policy'
+    out.mkdir()
+    actor = out/'selected.pt'
+    actor.write_bytes(b'selected student')
+    seeds = [20261117, 20261119, 20261120]
+    protocol = dict(selection_version='last_epoch_dagger_paired_50', selection_keys=selected,
+                    selection=dict(profile='robust',strength=1.0),
+                    calibration_keys=fixed, selection_seeds=seeds, dagger_rounds=3,
+                    collection_scope=dict(structure_keys=training, design_count=400,
+                                          steps_per_rollout=250, environments_per_task=4096))
+    (out/'manifest.json').write_text(json.dumps(dict(plan_sha256=bo.sha(source), protocol=protocol,
+        protocol_sha256=digest(protocol),arguments=dict(epochs=10))))
+    candidates = [dict(round_index=i, epoch=9, student=str(actor) if i==2 else str(out/f'dagger_{i}.pt'),
+                       student_sha256=bo.sha(actor) if i==2 else str(i), rank=[2 if i==2 else 1])
+                  for i in (1,2,3)]
+    selection = dict(candidates=candidates, profile='robust', selected_round=2, selected_student=str(actor),
+                     design_keys=selected, calibration_keys=fixed, seeds=seeds,
+                     training_design_keys=[k for k in selected if k in set(training)])
+    selection_path=out/'selection.json'
+    selection_path.write_text(json.dumps(selection))
+    (out/'completed.json').write_text(json.dumps(dict(
+        result='DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING', full_bank_evaluated=False,
+        protocol=protocol, protocol_sha256=digest(protocol), selection=str(selection_path),
+        selected_round=2, rounds=candidates, selection_sha256=bo.sha(selection_path), student=str(actor), student_sha256=bo.sha(actor))))
+    (tmp_path/'migration_completed.json').write_text('{}')
+    monkeypatch.setattr(bo,'MIGRATED_ROOT',tmp_path,raising=False)
+    calls = []
+    next_key = next(k for k in keys if k not in fixed)
+    by_id = {ids[k]['stairs']:k for k in keys}
+    def synthetic(a, folder, source, plan, initial, candidate_id, conditions):
+        calls.append((candidate_id,bo.sha(initial),a.updates))
+        key = by_id[candidate_id]
+        n = fixed.index(key) if key in fixed else -1
+        candidate = dict(structure_key=list(key),design_ids=ids[key])
+        manifest = dict(kind='rpo_bo_candidate_v1',candidate=candidate,updates=a.updates,
+                        source_plan_sha256=bo.sha(source),initial_actor_sha256=bo.sha(initial),
+                        conditions_sha256=digest(conditions))
+        folder.mkdir(parents=True,exist_ok=True)
+        bo.freeze(folder/'manifest.json',manifest)
+        pairs = []
+        for j, seed in enumerate(conditions['seeds']):
+            tasks = {t: dict(status='success',metrics={m:n+2 for m in bo.METRICS[t]}) for t in bo.TASKS}
+            tasks['stairs']['reached_top'] = n not in (-1,0) or j != 2
+            pairs.append(dict(tasks=tasks,seed=seed,replica=0,feasible=True))
+        report = dict(candidate=candidate,conditions=conditions,conditions_sha256=digest(conditions),
+                      ppo_updates=a.updates,kind=bo.REPORT_VERSION,domain='simulation',pairs=pairs,
+                      evaluation_manifest_sha256=bo.sha(folder/'manifest.json'))
+        bo.freeze(folder/'bo_evaluation.json',report)
+        return report
+    monkeypatch.setattr(bo,'evaluate',synthetic)
+
+    def choose(pool, observations, evaluated, _schema, _seed):
+        assert evaluated == {ids[k]['stairs'] for k in fixed}
+        assert len(observations) == 150 and sum(o['feasible'] for o in observations) == 149
+        return next(r for r in pool if r['key'] == list(next_key)), dict(method='fixture')
+    monkeypatch.setattr(bo,'propose',choose)
+    return SimpleNamespace(root=tmp_path,calls=calls,selection=selection_path,student=actor,
+                           fixed_ids=[ids[k]['stairs'] for k in fixed],next_id=ids[next_key]['stairs'])
+
+def test_official_panel_initializes_once_and_proposes_candidate_51(official_panel):
+    p=official_panel
+    bo.main(['initialize','--migrated'])
+    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
+    bo.main(['search','--migrated','--trials','50'])
+    bo.main(['search','--migrated','--trials','51'])
+    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
+    saved=bo.read(p.root/'bo/search/budget_0051.json')
+    assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
+    assert saved['best_observed']['design_id'] == p.fixed_ids[1]
+    assert saved['candidates'][-1]['complete_objectives'] == 2
+    assert not (p.root/'bo/search/trial_0000').exists()
+
+@pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
+def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
+    p=official_panel
+    bo.main(['initialize','--root',str(p.root)])
+    calib=p.root/'bo/calibration50'
+    args=['search','--root',str(p.root),'--trials','51']
+    if change=='actor':
+        p.student.write_bytes(b'changed')
+    elif change=='budget':
+        args+=['--updates','99']
+    elif change=='report':
+        with (calib/'design_01/bo_evaluation.json').open('a') as f: f.write(' ')
+    elif change=='substituted_manifest':
+        manifest=calib/'design_01/manifest.json'
+        value=bo.read(manifest)
+        value['initial_actor_sha256']='different student'
+        manifest.write_text(json.dumps(value))
+    else:
+        scoring=calib/'scoring.json'
+        value=bo.read(scoring)
+        if change=='scale': value['metrics']['run']['cot']['baseline']*=2
+        else: value.pop('method')
+        scoring.write_text(json.dumps(value))
+    with pytest.raises(ValueError):
+        bo.main(args)
+    assert len(p.calls)==50
+    assert not (p.root/'bo/search/manifest.json').exists()
+
+@pytest.mark.parametrize('change', ['winner','reserved','legacy','conditions','selection_hash','nominal'])
+def test_official_initialization_checks_selection_before_tuning(official_panel,change):
+    p=official_panel
+    args=['initialize','--root',str(p.root)]
+    if change=='conditions':
+        custom=bo.read(bo.HERE/'configs/bo_conditions.json')
+        custom['tasks']['run']['speed_mps']=2.
+        path=p.root/'conditions.json'
+        path.write_text(json.dumps(custom))
+        args+=['--conditions',str(path)]
+    elif change=='selection_hash':
+        with p.selection.open('a') as f: f.write(' ')
+    elif change=='nominal':
+        data=bo.read(p.selection)
+        data['profile']='nominal'
+        p.selection.write_text(json.dumps(data))
+        completed=p.selection.parent/'completed.json'
+        value=bo.read(completed)
+        value['selection_sha256']=bo.sha(p.selection)
+        completed.write_text(json.dumps(value))
+    elif change=='legacy':
+        manifest=p.selection.parent/'manifest.json'
+        value=bo.read(manifest)
+        value['protocol'].pop('selection_version')
+        manifest.write_text(json.dumps(value))
+    else:
+        data=bo.read(p.selection)
+        if change=='winner': data['selected_round']=1
+        else: data['design_keys'][0]=data['calibration_keys'][0]
+        p.selection.write_text(json.dumps(data))
+    with pytest.raises(ValueError): bo.main(args)
+    assert not p.calls
+
+def test_migrated_root_and_explicit_root_are_mutually_exclusive(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        bo.main(['search','--migrated','--root',str(tmp_path),'--trials','51'])
+    assert error.value.code==2

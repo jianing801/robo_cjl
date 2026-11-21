@@ -233,6 +233,7 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
 
 def test_launcher_selects_candidate_and_keeps_robust_finetuning(tmp_path,monkeypatch):
     monkeypatch.syspath_prepend(str(joint.HERE.parents[3]))
+    monkeypatch.delitem(sys.modules,'start',raising=False)  # rough_bo also provides a start.py.
     import start
     plan_path,plan=fixture_plan(tmp_path)
     (tmp_path/'shared_plan').mkdir(); (tmp_path/'shared_policy').mkdir()

@@ -65,6 +65,26 @@ def test_real_command_help_without_simulation(entry):
     assert 'usage:' in result.stdout
 
 
+def test_teacher_manifest_remains_json_when_native_validator_logs(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    validator = module(HERE/'validate_teacher.py')
+    bank = tmp_path/'bank.json'
+    (tmp_path/'completed.json').write_text(json.dumps(dict(checkpoint=str(tmp_path/'c.pt'), completed_updates=1)))
+    (tmp_path/'plan.json').write_text(json.dumps(dict(bank=str(bank))))
+    def validate(*_):
+        print('CACHE_URDF_PROGRESS 0 / 2500')
+        return dict(configuration=dict(rotation=dict(total_updates=1), full_body_torque=True), experiment={})
+    monkeypatch.setitem(sys.modules, 'hybrid_contract', SimpleNamespace(load_plan=validate,
+        validate_checkpoint=lambda *_:{'iter':0}, sha=lambda _:'digest'))
+    monkeypatch.setitem(sys.modules, 'hybrid_bank', SimpleNamespace(load_configurable_bank=lambda _:
+        dict(task_key='stairs', context_width=28, designs=[{}])))
+    monkeypatch.setattr(sys, 'argv', ['validate_teacher.py','--task','stairs','--root',str(tmp_path)])
+    validator.main()
+    output = capsys.readouterr()
+    assert json.loads(output.out)['bank'] == str(bank)
+    assert 'CACHE_URDF_PROGRESS' in output.err
+
+
 def test_no_legacy_runtime_paths_or_historical_258_width():
     for folder in ('engine','amp_engine','shared_policy'):
         for path in (HERE/folder).glob('*.py'):
@@ -83,5 +103,5 @@ def test_three_task_shared_routing_and_mlp():
     source = (HERE/'shared_policy/pipeline.py').read_text()
     assert "'rollout_amp.py' if task=='run'" in source
     assert "'--architecture','mlp'" in source
-    assert "for index,(task,ids) in enumerate(jobs):" in source
+    assert "for index,(task,ids) in enumerate(collection_jobs):" in source
     assert "'--max-rows-per-design-shard'" in source

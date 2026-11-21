@@ -1,6 +1,7 @@
 """Real native teacher/DAgger sampling or closed-loop evaluation, one scene per process."""
 import argparse
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 import os
@@ -12,6 +13,108 @@ import traceback
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context,input_width
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
+from scenario_sampling import rollout_env_count, verify_collection_layout, verify_stair_origins
+
+
+def load_rollout_bank(spec, task, selected_ids, identity, native_loader):
+    """Use the frozen expert's full-bank identity to verify just the live assets."""
+    path = Path(spec['bank'])
+    if (not identity or not spec.get('full_body_torque') or spec.get('original_bank') != spec['bank']
+            or identity.get('bank_sha256') != spec['bank_sha256']
+            or identity.get('full_bank_context_is_stable') is not True or not identity.get('mesh_sources')):
+        return native_loader(spec['bank'])
+    content = path.read_bytes()
+    if hashlib.sha256(content).hexdigest() != spec['bank_sha256']:
+        raise ValueError('Rollout bank differs from the frozen checkpoint')
+    bank = json.loads(content)
+    if bank['schema_version'] != 3:
+        return native_loader(spec['bank'])
+    from robolab.morphology_context import FIELDS, SCHEMA, verified_raw_context
+    from robolab.physical_snapshot import generator, validate_physical_model
+    from robolab.gp_extrapolation import design_extrapolation, validate_authorization
+    validate_authorization(bank['configuration'], bank['training'])
+    gp = generator(bank['snapshot_root']) if bank['configuration'].get('gp_extrapolation') else None
+    if task == 'run':
+        from amp_support import source_identity
+        from amp_rough_alignment import rough_module, validate_bound_bank
+        validate_bound_bank(bank)
+        mesh_sources = rough_module('hybrid_assets').mesh_sources
+    else:
+        from hybrid_support import source_identity
+        from hybrid_assets import mesh_sources
+    if (task != bank['task_key'] or task != identity['task']
+            or source_identity(task) != bank['training']['source_hashes']
+            or identity['native_sources'] != bank['training']['source_hashes']):
+        raise ValueError('Native source or task differs from the checkpoint-bound bank')
+    for field, digest_field in (('original_template', 'original_template_sha256'),
+            ('reference_contract_source', 'reference_contract_sha256')):
+        if sha(bank[field]) != bank[digest_field]:
+            raise ValueError('Changed bank dependency: ' + field)
+    if task == 'backpack':
+        binding = bank['base_morphology_binding']
+        if sha(binding['bank']) != binding['sha256']:
+            raise ValueError('Bound Rough bank changed')
+    selected = set(selected_ids)
+    active = [row for row in bank['designs'] if row['id'] in selected]
+    if not active or len(active) != len(selected) or len(selected) != len(selected_ids):
+        raise ValueError('Unknown or duplicate rollout design')
+    norm = bank['context_normalization']
+    if (bank['context_schema'] != SCHEMA or bank['context_fields'] != list(FIELDS)
+            or bank['context_width'] != len(FIELDS) or norm['kind'] != 'training_bank_minmax_v1'):
+        raise ValueError('Unexpected checkpoint-bound morphology context')
+    for pair in {row['pair_id'] for row in active}:
+        validate_physical_model(bank['motor_pairs'][pair])
+    for row in active:
+        if sha(row['report']) != row['report_sha256']:
+            raise ValueError('Active design report changed: ' + row['id'])
+        if task == 'backpack' and sha(row['base_urdf']) != row['base_urdf_sha256']:
+            raise ValueError('Active backpack base URDF changed: ' + row['id'])
+        physical = bank['motor_pairs'][row['pair_id']]
+        if gp is not None and design_extrapolation(gp, physical, row) != row.get('gp_extrapolation'):
+            raise ValueError('Active design GP extrapolation markers changed: ' + row['id'])
+        values = verified_raw_context(row, physical)
+        normalized = [0. if hi-lo <= 1e-12 else 2.*(value-lo)/(hi-lo)-1.
+            for value, lo, hi in zip(values, norm['minimum'], norm['maximum'], strict=True)]
+        if normalized != row['context']:
+            raise ValueError('Active physical context differs from frozen full-bank normalization: ' + row['id'])
+    for name, digest in mesh_sources({'designs':active}, report=False).items():
+        if identity['mesh_sources'].get(name) != digest:
+            raise ValueError('Active source mesh differs from the checkpoint: ' + name)
+    return bank
+
+
+def indexed_rollout_cache(spec, task, designs):
+    """Resolve the standard launcher's bank-bound cache proof without scanning run history."""
+    bank = Path(spec['bank']).resolve()
+    task_dir = {'stairs':'rough', 'backpack':'backpack', 'run':'amp'}[task]
+    if bank.parent.name != task_dir or bank.parent.parent.name != 'banks':
+        return None
+    index = bank.parents[2]/'启动记录'/f'{task_dir}_asset_cache.json'
+    if not index.is_file():
+        return None
+    record = json.loads(index.read_text(encoding='utf8'))
+    cache = Path(record['cache']).resolve()
+    content = (cache/'completed.json').read_bytes()
+    if (record['bank_sha256'] != spec['bank_sha256']
+            or record['completed_sha256'] != hashlib.sha256(content).hexdigest()):
+        raise ValueError('Native USD cache index or completion proof changed')
+    proof = json.loads(content)
+    if (proof['result'] != 'NATIVE_ASSET_CACHE_COMPLETE' or proof.get('cache_schema_version') != 2
+            or proof['bank_sha256'] != spec['bank_sha256']):
+        raise ValueError('Native USD cache proof belongs to another bank or schema')
+    rows = {row['design']:row for row in proof['assets']}
+    if len(rows) != len(proof['assets']):
+        raise ValueError('Duplicate design in native USD cache proof')
+    directories = []
+    for design in designs:
+        row = rows[design['id']]
+        usd = Path(row['usd']).resolve()
+        if (not usd.is_relative_to(cache) or usd.parent.name != design['id'] or not usd.is_file()
+                or row['urdf_sha256'] != design['urdf_sha256'] or not (usd.parent/'config.yaml').is_file()
+                or (usd.parent/'.asset_hash').read_text().strip() != row['converter_hash']):
+            raise ValueError('Invalid indexed native USD for ' + design['id'])
+        directories.append(usd.parent)
+    return directories
 
 
 def reuse_assets(cfg,roots,output,task,designs):
@@ -20,7 +123,8 @@ def reuse_assets(cfg,roots,output,task,designs):
     available={}
     for root in roots:
         if not Path(root).exists():continue
-        for entry in Path(root).rglob('.asset_hash'):
+        direct=Path(root)/'.asset_hash'
+        for entry in ((direct,) if direct.is_file() else Path(root).rglob('.asset_hash')):
             if (entry.parent/'config.yaml').is_file() and any(entry.parent.glob('*.usd')):
                 available.setdefault(entry.read_text().strip(),entry.parent)
     audit=[]
@@ -51,6 +155,7 @@ def main():
     p.add_argument('--design-ids',required=True);p.add_argument('--output',required=True)
     p.add_argument('--asset-cache-root');p.add_argument('--student')
     p.add_argument('--mode',choices=['collect','evaluate'],default='collect')
+    p.add_argument('--num-envs',type=int,help='Exact physical environment count for collection')
     p.add_argument('--profile',choices=['nominal','robust'],default='nominal')
     p.add_argument('--randomization-strength',type=float,default=1.)
     p.add_argument('--steps',type=int,default=1000);p.add_argument('--stride',type=int,default=5)
@@ -69,6 +174,17 @@ def main():
     if args.video:args.enable_cameras=True
     if min(args.steps,args.stride)<1 or not 0<=args.reset_yaw_range<=.5:raise ValueError('Positive finite sampling budget and bounded reset distribution required')
     plan=load_plan(args.plan);spec=plan['teachers'][args.task]
+    selected=args.design_ids.split(',')
+    if len(set(selected))!=len(selected) or not set(selected)<=set(spec['design_ids']):raise ValueError('Unknown/duplicate selected design')
+    from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
+    bo_conditions=parse_conditions(args, selected)
+    count=len(selected)
+    copies=bo_conditions['copies'] if bo_conditions else spec['copies']
+    if bo_conditions and args.task=='backpack':
+        args.payload_kg=bo_conditions['tasks']['backpack']['payload_kg']
+    paired_stairs=args.task=='stairs' and args.profile=='robust' and args.mode=='collect' and not args.ppo_channel
+    if args.task=='stairs' and args.profile=='robust':copies=max(copies,12 if paired_stairs else 6)
+    n=rollout_env_count(args,count,copies,training_strata=6 if paired_stairs else 1)
     code=Path(spec['code_root'])
     sys.path[:0]=[str(HERE),str(code/'scripts/tools'),str(Path(spec['runtime_dir'])),
                   str(code),str(code.parent/'rsl_rl')]
@@ -108,20 +224,11 @@ def main():
             from hybrid_backpack import configure_backpack,SpatialBackpackEnv as Env
             from hybrid_policy import SpatialActorCritic
             configurator=configure_backpack
-        bank=load_configurable_bank(spec['bank'])
+        state=torch.load(spec['checkpoint'],map_location='cpu',weights_only=False)
+        identity=None if bo_conditions or args.ppo_channel else state.get('hybrid_identity')
+        bank=load_rollout_bank(spec,args.task,selected,identity,load_configurable_bank)
         by_id={d['id']:d for d in bank['designs']}
-        selected=args.design_ids.split(',')
-        if len(set(selected))!=len(selected) or not set(selected)<=set(spec['design_ids']):raise ValueError('Unknown/duplicate selected design')
-        designs=[by_id[k] for k in selected];count=len(designs);copies=spec['copies']
-        from bo_capture import CaptureReset, TrialCapture, configure_conditions, motor_records, parse_conditions
-        bo_conditions=parse_conditions(args, selected)
-        if bo_conditions:
-            copies=bo_conditions['copies']
-            if args.task=='backpack':
-                args.payload_kg=bo_conditions['tasks']['backpack']['payload_kg']
-        paired_stairs=args.task=='stairs' and args.profile=='robust' and args.mode=='collect' and not args.ppo_channel
-        if args.task=='stairs' and args.profile=='robust':copies=max(copies,12 if paired_stairs else 6)
-        n=count*copies
+        designs=[by_id[k] for k in selected]
         for design in designs:
             if sha(design['urdf'])!=design['urdf_sha256']:raise ValueError('Physical URDF changed')
         options=SimpleNamespace(num_envs=n,device=args.device,asset_cache=None,allow_cache_misses=True,
@@ -140,6 +247,9 @@ def main():
         cfg.sim.render_interval=1000000
         cache_roots=[*spec['asset_cache']]
         if args.asset_cache_root:cache_roots.insert(0,args.asset_cache_root)
+        if identity:
+            indexed=indexed_rollout_cache(spec,args.task,designs)
+            if indexed is not None:cache_roots=indexed
         if args.full_body_torque and not spec['full_body_torque']:
             raise ValueError('Cannot override frozen teacher physics')
         cache=reuse_assets(cfg,cache_roots,output,args.task,designs)
@@ -168,6 +278,8 @@ def main():
         stage=omni.usd.get_context().get_stage()
         actual_ids=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
         if actual_ids!=[designs[i%count]['id'] for i in range(n)]:raise ValueError('Physical design/context routing mismatch')
+        if args.num_envs is not None:
+            verify_collection_layout(raw,designs,n)
         geometry=[]
         write_new(output/'physics_audit.json',audit_physics(raw,cfg,designs,profile=args.profile))
         for i,design in enumerate(designs):
@@ -183,7 +295,6 @@ def main():
         write_new(output/'geometry_audit.json',dict(verified=True,design_routing_verified=True,
             template_mass_verified=True,joints=geometry))
         obs=env.get_observations()
-        state=torch.load(spec['checkpoint'],map_location='cpu',weights_only=False)
         policy_cfg=dict(agent['policy']);policy_cfg.pop('class_name',None)
         policy_cfg['native_config']=state['model_state_dict']['_extra_state']['config']
         teacher=SpatialActorCritic(obs,{'policy':['policy'],'critic':['critic']},raw.num_actions,**policy_cfg).to(raw.device)
@@ -201,9 +312,14 @@ def main():
         random.seed(args.seed+999);np.random.seed((args.seed+999) % 2**32)
         torch.manual_seed(args.seed+999);torch.cuda.manual_seed_all(args.seed+999)
         with torch.inference_mode():
+            collection_columns=None
             if args.task=='stairs':
                 validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs)
+                if args.num_envs is not None:
+                    collection_columns=raw.scene.terrain.terrain_types.clone()
                 raw.reset()
+                if collection_columns is not None:
+                    verify_stair_origins(raw.scene,collection_columns)
             elif args.task=='backpack':
                 from robolab.tasks.direct.backpack_walk import backpack_urdf as module
                 properties=payload_properties(module,n,count,seed=args.seed,profile=args.profile,
@@ -211,8 +327,6 @@ def main():
                 raw.reset();audit=module.apply_backpack_properties(raw.robot,properties);raw.reset()
                 write_new(output/'payload_audit.json',dict(properties=properties,audit=audit))
                 validation=(copy_index%2)==1
-            else:
-                validation=copy_index==copies-1
             terrain_indices=raw.scene.terrain.terrain_types if args.task=='stairs' else None
             scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
                 profile=args.profile,properties=properties)
@@ -285,6 +399,8 @@ def main():
                 # do not discard precisely the off-policy states needing labels.
                 label=label.clamp(-action_clip,action_clip)
                 if args.mode=='collect' and step%args.stride==0:
+                    if collection_columns is not None:
+                        verify_stair_origins(raw.scene,collection_columns)
                     for k,v in dict(base_obs=base,teacher_actions=label,design_index=groups,
                                     environment_ids=torch.arange(n,device=raw.device),validation=validation,
                                     scenario_bin=condition_bins*3+speed_bins(command,args.task),

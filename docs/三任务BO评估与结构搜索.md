@@ -1,60 +1,34 @@
-# 三任务 BO 评估与结构搜索
+# 微调后的三任务评估与结构搜索
 
-流程为共享策略 → 每个候选的三任务联合 PPO 微调 → 固定工况独立测量 → BO 选下一个结构。按 [专家训练与运行操作](专家训练与运行操作.md) 和 [共享策略蒸馏详细说明](共享策略蒸馏详细说明.md) 完成前置步骤。入口自动读取默认实验目录中的共同结构表和选定的共享模型。
+先完成[共享策略蒸馏](共享策略蒸馏详细说明.md)。下列命令在仓库根目录执行，使用迁移的 2500 结构库。使用从头生成的结构库时省去 `--migrated`。
 
-使用一次性迁移的结构库时，在 `evaluate` 和 `search` 命令末尾加 `--root robolab/logs/multitask_full2500_physical_migrated`。
-
-已完成的 Rough、AMP 专家参考数据和固定 P10–P90 尺度见 [Rough 与 AMP 专家评估及评分记录](Rough与AMP专家评估及评分记录.md)。参考评估使用 30 cm 楼梯踏面和 1.5 m/s 跑步指令，采用下文的三任务预试验配置时需重新校准。
-
-## 1. 测一个候选
-
-进入服务器上的仓库根目录。把 `真实结构ID` 换成共同库中的 Rough ID。命令会完成候选的专属微调，再做 BO 测量。
+## 第一步　运行固定的 50 个结构并冻结尺度
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py evaluate --candidate 真实结构ID --gpu 0
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0
 ```
 
-候选默认微调 100 次。已有同一共享模型、同一候选和同一预算的完整微调目录时，附加 `--finetuned 该目录`，直接开展测量。普通故障后用原命令继续。人工暂停后加 `--resume-paused`。默认输出位于实验根的 `bo/<结构ID>/`。
+程序在原第 21 组按既定序号逐个取结构。每个结构从同一胜出共享模型独立开始，默认做 100 次三任务联合 PPO 更新，然后记录固定工况下的实际表现。后续 BO 新候选使用相同微调预算。每项任务跑 20 秒，关闭随机扰动，使用 20261118、20261119、20261120 三个种子，各一个环境试次。50 个结构共取得 450 条任务试次。原始模型、成功与失败、测量条件和检查点身份均可追溯；完全确定的试次可能重复相同结果。
 
-### 预试验工况
+| 任务 | 工况 | 三项代价及对应权重 |
+|---|---|---|
+| Rough 上楼 | 直行 0.5 m/s；进场 1 m、12 级、级高 7.5 cm、踏面 30 cm，记录登顶 | 整机正机械功 CoT、前向速度 RMSE、横滚与俯仰角速度合成 RMS，各 1/3 |
+| 负重 | 平地直行 0.5 m/s，实装 10 kg | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
+| AMP 跑步 | 平地直线 1.5 m/s，使用本结构参考 | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
 
-工况来自 `configs/bo_pilot_conditions.json`。可用 `--conditions` 指定另一个冻结工况文件。
+**三项任务都是代价，越低越好。** 每个结构先在同一任务上取三次成功试验的指标均值，楼梯还要求登顶。在该任务的合格结构均值中，线性插值计算 P10、P90。原始均值乘以 `1/(P90-P10)`，再按表中权重求和，超出参照范围照常计分。缺少有效测量应排查；任务失败保留为可行性记录，不能填零。某任务有效结构不足两种或尺度为零时中止定标。产物 `bo/calibration50/scoring.json` 记录每项采用的结构数和尺度。归一化依据与历史专家数值见[专家参考报告](Rough与AMP专家评估及评分记录.md#归一化方法与文献)。
 
-| 任务 | 指令 | 固定场地与负载 |
-|---|---:|---|
-| 跑步 | 2.0 m/s | 水平面，30 m 路线 |
-| 负重 | 0.5 m/s | 水平面，8 m 路线，背包实装 10 kg，沿用原有安装位置 |
-| 上楼 | 0.5 m/s | 1 m 进场，12 级，级高 0.075 m、踏面深 0.25 m，标记到达上平台 |
-
-预试验每个任务 20 秒、2 个种子、每种子 2 个副本。每个种子与副本序号对应一组三任务重复。仿真在原有环境的摔倒触发条件下运行。固定工况禁用命令重采样、站立和转向指令。正式实验前需确认这些工况、测量窗口和权重。
-
-### 指标与成败
-
-| 任务 | 三项代价，均为越小越好 |
-|---|---|
-| 跑步、负重 | 整机机械 CoT，前向速度 RMSE，六个膝踝电机中最大的持续额定扭矩占比 |
-| 楼梯 | 整机机械 CoT，前向速度 RMSE，机身横滚与俯仰角速度的合成 RMS |
-
-- **CoT** 为 `正机械功 / (有效整机质量 × 9.81 × 实际前向位移)`。以 50 Hz 控制步末采样，累加全身各关节的 `max(施加扭矩 × 关节角速度, 0) × 0.02 s`。负重质量读取实际仿真整机质量，已包含背包。楼梯位移取水平路径方向，功继续按全身关节积分。不可用位移对应空 CoT。
-- **速度 RMSE** 以共同路径方向的速度和固定指令比较。机身晃动按 `sqrt(mean(ωx² + ωy²))`，角速度用机身坐标系，单位 rad/s。
-- **持续负荷** 用实际关节输出扭矩的 RMS 除以该型号持续额定输出扭矩，取双膝、双踝俯仰和双踝横滚六者最大值。全身 23 台逐关节保存额定占比、扭矩 RMS 和实测绝对峰值。额定分母缺失时对应占比留空。
-- **试次失败** 由摔倒或平均有符号前向速度严格低于指令的 10% 触发。0.5 m/s 工况的速度边界为 0.05 m/s，恰好达到边界时只检查摔倒。路线完成、是否上到平台和保护中止独立记录。采集故障记为无效，重跑同一命令可复用已验收的其他任务测量。
-
-`bo_samples.npz` 保留世界路径速度、根位置、机身角速度、实际扭矩、关节速度和有效段掩码。终止步使用重置前的状态。`bo_trials.json` 包含单次成败、实际载荷和安装位置、原始指标及逐关节数据。`bo_evaluation.json` 汇总三个任务的配对结果。原有 `candidate_result.json` 仍提供微调前后流程所用的命令跟踪评价。
-
-## 2. 从基准得到归一化配置
-
-先在同一工况作重复基准测量，再由基准报告生成配置。下面文件名是示例，可把基准结果保存为 `baseline.json` 后直接运行。
+## 第二步　在冻结尺度下运行 BO
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py calibrate baseline.json --benchmark-name RPO仿真基准 --output bo_scoring.json
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 60 --gpu 0
 ```
 
-至少需要两个三个任务同时成功且指标齐全的重复。每项用这些重复的均值作为基准，记录标准差。生成的是**等权预试验**配置。可靠正基准使用 `x / baseline`。近零基准可在相应项填写正的物理 `scale`，改用 `1 + (x - baseline) / scale`。三个任务的权重和、各任务内三项权重和分别为 1。确认后冻结工况、基准和权重，再开始正式搜索。仿真和实机分别校准。
+示例总预算 60 个结构，包含已经测过的 50 个，只新增 10 个候选。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构；默认三任务之间等权。最终报告在全部三个重复均取得完整综合代价的结构中给出最低代价候选，可用独立种子复核。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
 
-基准可以来自同工况的原始 RPO 独立测量，也可以是命名明确的工程参照。若使用 `evaluate` 跑出的库内候选作参照，应按该候选命名。原始 RPO 各任务的同工况基准需实测采集。
+用于蒸馏选模的 50 个结构与定标结构互不重合。历史教师参考成绩保留在独立归档中；新的尺度来自本次学生微调后的测量。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
 
-### 导入原始 RPO 或实机测量
+## 附录　导入原始 RPO 或实机测量
 
 ```bash
 conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py ingest --spec baseline_measurements.json --output baseline.json
@@ -63,17 +37,3 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 测量清单采用 JSON。顶层需要 `domain`（`simulation` 或 `hardware`）、`measurement_convention`（`rpo_three_task_mechanical_positive_v1`）、`dt_s`（0.02）、`candidate` 和 `trials`。每条试次填写 `task`（`stairs`、`backpack` 或 `run`）、`seed`、从 0 开始的 `replica`、`trace`、实测 `total_mass_kg`、`fell` 及 `motors`。可同时标记 `reached_top`、`route_completed` 和 `protection_stop`。负重加 `payload.mass_kg` 和 `payload.mount_position_torso_m`。
 
 每条 `trace` 是与清单同目录或相对路径的 NPZ，包含 `initial_position[3]`、`position[N,3]`、`vx[N]`、`omega[N,2]`、`torque[N,23]`、`joint_vel[N,23]`。23 列按 `motors` 顺序填写，每台记录 `joint`、`motor_id`、`torque_side: "joint_output"`、`rated_torque_nm` 和 `source`。请先把位置、速度和 IMU 轴统一到上面的约定，把驱动器输出校核为关节侧 N·m，并对齐到 50 Hz 采样。程序验证完整的种子、副本和任务覆盖。实机采集由测量系统执行。
-
-## 3. 启动 BO
-
-搜索使用训练环境中的 NumPy、SciPy 和 scikit-learn。缺少 scikit-learn 时可单独安装仓库已有的 BO 依赖范围 `scikit-learn>=1.4,<2`。
-
-```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --scoring bo_scoring.json --trials 5 --gpu 0
-```
-
-前四个结构按腿长距离和电机差异做分散初始化。随后用联合可行概率加权期望改进，搜索范围为冻结的 5＋5 共同结构库。可行性模型读取全部有效配对标签。性能模型只读取三任务同时成功且九项指标齐全的配对。失败仍参与可行性，综合分为空。没有可行性能数据时继续探索联合可行性。
-
-`--trials` 是本次搜索的总候选预算。增大该值并重跑可延长同一搜索。工况、归一化、共享模型或每候选预算变更时，显式用 `--output` 开新目录。候选记录含每组可行性及综合分，预算报告同时给出联合成功次数和有效次数。最小的已观测均分用于筛选后续复测对象，最终可靠性门槛由正式实验确定。
-
-本地验证覆盖公式、配对、导入、约束 GP 和搜索恢复，并运行了真实负重采样以及固定楼梯网格生成。完整三任务 BO 搜索需本轮正式专家和共享模型。
