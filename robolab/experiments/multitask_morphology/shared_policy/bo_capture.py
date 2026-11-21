@@ -53,7 +53,7 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
         if task == 'stairs' and spec.get('course') == COURSE:
             flight = evaluation_flight(conditions['duration_s'], spec['speed_mps'], spec['step_depth_m'],
                                        spec['travel_margin_factor'])
-            tile = flight_tile(spec['step_height_m'], spec['step_depth_m'], 1.)
+            tile = flight_tile(spec['step_height_m'], spec['step_depth_m'], 1., flight['rear_steps'])
             size = (flight['length_m'], WIDTH_M)
             base = cfg.events.reset_base.params
             for key in ('pose_range', 'velocity_range'):

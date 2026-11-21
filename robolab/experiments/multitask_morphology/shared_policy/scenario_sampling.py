@@ -55,7 +55,8 @@ def configure_stairs(cfg, *, profile, seed, evaluation_seconds=None):
         speed = max(cfg.commands.ranges.lin_vel_x)
         flights = [evaluation_flight(evaluation_seconds, speed, row['step_width_m']) for row in strata]
         size, border = (max(f['length_m'] for f in flights), WIDTH_M), 0.
-        tiles = {f'stairs_{i}': flight_tile(row['step_height_m'], row['step_width_m'], 1. / len(strata))
+        tiles = {f'stairs_{i}': flight_tile(row['step_height_m'], row['step_width_m'], 1. / len(strata),
+                                             flights[i]['rear_steps'])
                  for i, row in enumerate(strata)}
         # A longitudinal reset on another tread would need a different spawn height.
         cfg.events.reset_base.params['pose_range']['x'] = (0., 0.)

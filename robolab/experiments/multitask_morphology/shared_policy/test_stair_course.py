@@ -13,13 +13,16 @@ def test_entire_evaluation_is_on_rising_treads(duration, speed, expected):
     flight = evaluation_flight(duration, speed, depth)
     assert flight['forward_steps'] == expected
     cfg = SimpleNamespace(size=(flight['length_m'], 40.), step_width=depth,
-                          step_height_range=(height, height))
+                          step_height_range=(height, height), rear_steps=expected)
     meshes, origin = flight_mesh(0., cfg)
     bounds = np.asarray([mesh.bounds for mesh in meshes])
     def surface(x):
         cells = bounds[(bounds[:, 0, 0] < x) & (x < bounds[:, 1, 0])]
         return cells[:, 1, 2].max()
     assert surface(origin[0]) == pytest.approx(origin[2])
+    assert origin[2] == pytest.approx(0.)
+    assert origin[0] >= duration * speed * 2
+    assert surface(origin[0] - expected * depth) == pytest.approx(origin[2] - expected * height)
     for i in range(1, expected + 1):
         assert surface(origin[0] + i * depth) == pytest.approx(origin[2] + i * height)
     assert flight['length_m'] - origin[0] > duration * speed
@@ -28,10 +31,10 @@ def test_entire_evaluation_is_on_rising_treads(duration, speed, expected):
 
 def test_boundary_checks_each_sample_including_lateral_and_return_to_flight():
     flight = evaluation_flight(20., .5, .3)
-    x = np.array([0., 10., 21., 1., 0., -3.])
-    y = np.array([0., 0., 0., 20., 0., 0.])
+    x = np.array([0., 10., 21., 1., 0., -21., -3.])
+    y = np.array([0., 0., 0., 20., 0., 0., 0.])
     assert outside_flight(x, y, flight['origin_x_m'], flight['length_m']).tolist() == [
-        False, False, True, True, False, True]
+        False, False, True, True, False, True, False]
 
 
 def test_upgrade_only_changes_evaluation_preserves_original_and_refuses_budget_change(tmp_path):

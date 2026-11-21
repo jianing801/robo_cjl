@@ -339,6 +339,7 @@ def main():
             if evaluation_stairs:
                 spawn_x=torch.tensor(evaluation_stairs['origin_x_by_stratum_m'],device=raw.device)[terrain_indices]
                 outside_course=torch.zeros(n,dtype=torch.bool,device=raw.device)
+                first_exit=torch.zeros((n,4),device=raw.device)
             scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
                 profile=args.profile,properties=properties)
             if bo_conditions:
@@ -443,8 +444,12 @@ def main():
                     if terminal is not None:
                         measured[terminal['env_ids']]=terminal['root_pos_w']
                     relative=measured-raw.scene.env_origins
-                    outside_course |= alive & outside_flight(relative[:,0],relative[:,1],spawn_x,
-                                                             evaluation_stairs['tile_length_m'])
+                    outside=alive & outside_flight(relative[:,0],relative[:,1],spawn_x,
+                                                   evaluation_stairs['tile_length_m'])
+                    first=outside & ~outside_course
+                    first_exit[:,0]=torch.where(first,step+1,first_exit[:,0])
+                    first_exit[:,1:]=torch.where(first[:,None],relative,first_exit[:,1:])
+                    outside_course |= outside
                 if recorder:recorder.capture(step,dones)
                 # Terminal resets may move roots; exclude that step's displacement.
                 active=alive&~dones.bool()
@@ -463,6 +468,9 @@ def main():
             if recorder:recorder.close()
             if evaluation_stairs and outside_course.any():
                 ids=outside_course.nonzero().flatten().tolist()
+                write_new(output/'stair_boundary.json',dict(course=evaluation_stairs,
+                    fields=['step','relative_x_m','relative_y_m','relative_z_m'],
+                    environments={str(i):v for i,v in zip(ids,first_exit[ids].cpu().tolist(),strict=True)}))
                 raise ValueError(f'Stair flight boundary reached in environments {ids}; extend the course before scoring')
             tracking_rows=tracking.rows()
             for i in range(n):
