@@ -378,3 +378,30 @@ def test_explicit_initial_restart_preserves_uncommitted_model(tmp_path,monkeypat
     selected,_,_=launcher.prepare_initial_restart(tmp_path,'rough',output)
     assert selected!=output and model.read_bytes()==b'original partial checkpoint'
     assert (output/'USER_PAUSED').exists()
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_distillation_timer_only_starts_for_execution(tmp_path, monkeypatch, preview):
+    tasks = {"rough": "stairs", "backpack": "backpack", "amp": "run"}
+    teachers = {}
+    for public, native in tasks.items():
+        folder = tmp_path / "experts" / public
+        folder.mkdir(parents=True)
+        checkpoint = str(folder / "final.pt")
+        (folder / "completed.json").write_text(json.dumps({"checkpoint": checkpoint}))
+        teachers[native] = {"checkpoint": checkpoint}
+    plan = tmp_path / "shared_plan"
+    plan.mkdir()
+    (plan / "plan.json").write_text(json.dumps({"teachers": teachers}))
+    monkeypatch.setattr(launcher, "select_run", lambda root, task: (root / "experts" / task, True))
+    events = []
+    monkeypatch.setattr(launcher, "start_task_timer", lambda *args: events.append(("timer", args)))
+    monkeypatch.setattr(launcher, "run", lambda command, *, preview: events.append(("run", preview)))
+
+    launcher.distill(tmp_path, 0, preview)
+
+    if preview:
+        assert events == [("run", True)]
+    else:
+        assert events == [("timer", (tmp_path, "distill", tmp_path / "shared_policy", None)),
+                          ("run", False)]

@@ -118,3 +118,31 @@ def test_hourly_display_carries_over_previous_launch(tmp_path, monkeypatch, caps
     lines = capsys.readouterr().out.splitlines()
     assert lines == ['TASK_TIMER rough 累计训练用时 01:00:00',
                      'TASK_TIMER_FINISHED rough stopped_or_failed 累计训练用时 01:00:01']
+
+
+def test_distillation_timing_finishes_at_validated_student(tmp_path):
+    output = tmp_path / "shared_policy"
+    p = child(.25)
+    try:
+        launch = record(tmp_path, p, task="distill", target=None, output=output)
+        assert not output.exists()
+        output.mkdir()
+        marker = output / "completed.json"
+        student = output / "student.pt"
+        state = json.loads(launch.read_text(encoding="utf-8"))
+        marker.write_text(json.dumps({"result": "FIT_COMPLETE", "student": str(student)}))
+        student.write_bytes(b"student weights")
+        assert timer.completed_marker(state) is None
+        marker.write_text(json.dumps({
+            "result": "DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING",
+            "student": str(student),
+        }))
+        student.write_bytes(b"")
+        assert timer.completed_marker(state) is None
+        student.write_bytes(b"student weights")
+        timer.monitor(launch, poll_seconds=.01, write_interval=.01)
+        result = json.loads((output / "timing.json").read_text(encoding="utf-8"))
+        assert result["status"] == "completed"
+        assert result["task"] == "distill"
+    finally:
+        p.wait()

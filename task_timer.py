@@ -1,4 +1,4 @@
-"""Independent expert wall-clock accounting; never imports or controls simulation."""
+"""Independent training wall-clock accounting; never imports or controls simulation."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime,timezone,timedelta
@@ -44,7 +44,8 @@ def start_task_timer(root,task,output,target,started_wall=None,started_monotonic
     folder=timer_folder(root,task,output);folder.mkdir(parents=True,exist_ok=True)
     record=folder/f'launch_{pid}_{int(created*1000000)}.json'
     if not record.exists():
-        historical=(any((output/'commits').glob('stage_*.json')) or (output/'completed.json').exists()) and not any(folder.glob('launch_*.json'))
+        progress=any((output/'processes').glob('*/launch.json')) if task=='distill' else any((output/'commits').glob('stage_*.json'))
+        historical=(progress or (output/'completed.json').exists()) and not any(folder.glob('launch_*.json'))
         atomic_json(record,dict(task=task,root=str(root),output=str(output),target_updates=target,pid=pid,pid_create_time=created,
             started_epoch=start,started_at=timestamp(start),started_monotonic=mono,elapsed_seconds=max(0,time.monotonic()-mono),
             updated_epoch=now,status='running',completed_at_start=(output/'completed.json').exists(),
@@ -64,8 +65,16 @@ def start_task_timer(root,task,output,target,started_wall=None,started_monotonic
 def completed_marker(record):
     path=Path(record['output'])/'completed.json'
     try:
-        value=json.loads(path.read_text(encoding='utf8'));checkpoint=Path(value['checkpoint'])
-        if value.get('completed_updates')==record['target_updates'] and checkpoint.is_file() and checkpoint.stat().st_size>0:
+        value=json.loads(path.read_text(encoding='utf8'))
+        if record['task']=='distill':
+            if value.get('result')!='DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING':
+                return None
+            checkpoint=Path(value['student'])
+        else:
+            if value.get('completed_updates')!=record['target_updates']:
+                return None
+            checkpoint=Path(value['checkpoint'])
+        if checkpoint.is_file() and checkpoint.stat().st_size>0:
             return path.stat().st_mtime
     except (OSError,ValueError,KeyError,TypeError):pass
     return None

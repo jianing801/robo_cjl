@@ -601,6 +601,8 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
     if (output/'manifest.json').is_file():
         command.append('--resume')
     if resume_paused:command.append('--resume-paused')
+    if not preview and not (output/'completed.json').is_file() and (resume_paused or not (output/'USER_PAUSED').is_file()):
+        start_task_timer(root,'distill',output,None)
     run(command, preview=preview)
 
 
