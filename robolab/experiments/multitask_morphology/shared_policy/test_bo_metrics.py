@@ -37,6 +37,11 @@ def test_fixed_three_task_metrics_and_only_six_motors_in_objective():
 
 
 def test_fall_strict_10_percent_boundary_and_invalid_data():
+    assert trial('stairs', actual=.05, reached_top=None)['status'] == 'success'
+    assert trial('stairs', actual=np.nextafter(.05, 0))['reason'] == 'below_minimum_forward_speed'
+    assert trial('stairs', fell=True)['status'] == 'failure'
+    edge = trial('stairs', actual=.6, outside_stairs=True)
+    assert edge['status'] == 'invalid' and edge['metrics'] is None
     assert trial('run', actual=.05)['status'] == 'success'
     assert trial('run', actual=np.nextafter(.05, 0))['reason'] == 'below_minimum_forward_speed'
     assert trial('run', actual=-1)['status'] == 'failure'
@@ -211,6 +216,10 @@ def test_post_finetune_panel_uses_structure_means_and_frozen_weights():
         assert metric['baseline']==pytest.approx(39.2)
         assert metric['weight']==pytest.approx(1/3 if task=='stairs' else .4)
     assert objective(reports[0],scoring)['mean_objective']==pytest.approx(1/39.2)
+    missed_top=copy.deepcopy(reports)
+    missed_top[0]['pairs'][0]['tasks']['stairs']['reached_top']=False
+    assert bo.panel_scoring(missed_top,keys,scoring['benchmark']) == scoring
+    assert objective(missed_top[0],scoring) == objective(reports[0],scoring)
     incomplete=copy.deepcopy(reports)
     incomplete[0]['pairs'][0]['tasks']['stairs']['status']='failure'
     revised=bo.panel_scoring(incomplete,keys,{'initial_actor_sha256':'actor','updates':100})
@@ -244,7 +253,7 @@ def official_panel(tmp_path, monkeypatch):
     actor.write_bytes(b'selected student')
     seeds = [20261117, 20261119, 20261120]
     budget = dict(selection_design_count=200)
-    protocol = dict(selection_version='last_epoch_dagger_paired_200', selection_keys=selected,
+    protocol = dict(selection_version='last_epoch_dagger_paired_200', stair_evaluation=bo.COURSE, selection_keys=selected,
                     selection_budget=budget,
                     selection=dict(profile='robust',strength=1.0),
                     calibration_keys=fixed, selection_seeds=seeds, dagger_rounds=3,
@@ -283,7 +292,10 @@ def official_panel(tmp_path, monkeypatch):
         for j, seed in enumerate(conditions['seeds']):
             tasks = {t: dict(status='success',metrics={m:n+2 for m in bo.METRICS[t]}) for t in bo.TASKS}
             tasks['stairs']['reached_top'] = n not in (-1,0) or j != 2
-            pairs.append(dict(tasks=tasks,seed=seed,replica=0,feasible=True))
+            if n == 0 and j == 2:
+                tasks['stairs'].update(status='failure', reason='below_minimum_forward_speed', metrics=None)
+            pairs.append(dict(tasks=tasks,seed=seed,replica=0,
+                              feasible=all(t['status']=='success' for t in tasks.values())))
         report = dict(candidate=candidate,conditions=conditions,conditions_sha256=digest(conditions),
                       ppo_updates=a.updates,kind=bo.REPORT_VERSION,domain='simulation',pairs=pairs,
                       evaluation_manifest_sha256=bo.sha(folder/'manifest.json'))
@@ -308,8 +320,9 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
     saved=bo.read(p.root/'bo/search/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
-    assert saved['best_observed']['design_id'] == p.fixed_ids[1]
-    assert saved['candidates'][-1]['complete_objectives'] == 2
+    assert saved['candidates'][0]['complete_objectives'] == 2
+    assert saved['candidates'][-1]['complete_objectives'] == 3
+    assert saved['best_observed']['design_id'] == p.next_id
     assert not (p.root/'bo/search/trial_0000').exists()
 
 @pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])

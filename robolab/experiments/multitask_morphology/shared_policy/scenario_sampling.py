@@ -1,5 +1,6 @@
 """Recorded, deterministic operating conditions for shared policy collection."""
 from randomization import stairs_spec, payload_spec
+from stair_course import COURSE, WIDTH_M, evaluation_flight, flight_tile
 
 
 def rollout_env_count(args, design_count, default_copies, *, training_strata=1):
@@ -38,19 +39,32 @@ def verify_collection_layout(raw, designs, num_envs):
         raise ValueError('Native teacher context differs from the round-robin design assignment')
 
 
-def configure_stairs(cfg, *, profile, seed):
+def configure_stairs(cfg, *, profile, seed, evaluation_seconds=None):
     # Lazy imports keep protocol and sampling tests independent of Isaac Lab.
     import isaaclab.terrains as terrains
     from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
     spec = stairs_spec(profile)
     strata = spec['strata']
-    generator = TerrainGeneratorCfg(seed=seed, curriculum=True, size=(40., 40.), border_width=2.,
-        num_rows=1, num_cols=len(strata), horizontal_scale=.05, vertical_scale=.005,
-        difficulty_range=(.5, .5), use_cache=False,
-        sub_terrains={f'stairs_{i}': terrains.MeshInvertedPyramidStairsTerrainCfg(
+    if evaluation_seconds is None:
+        size, border = (40., 40.), 2.
+        tiles = {f'stairs_{i}': terrains.MeshInvertedPyramidStairsTerrainCfg(
             proportion=1. / len(strata), step_height_range=(row['step_height_m'],) * 2,
             step_width=row['step_width_m'], platform_width=2., border_width=1., holes=False)
-            for i, row in enumerate(strata)})
+            for i, row in enumerate(strata)}
+    else:
+        speed = max(cfg.commands.ranges.lin_vel_x)
+        flights = [evaluation_flight(evaluation_seconds, speed, row['step_width_m']) for row in strata]
+        size, border = (max(f['length_m'] for f in flights), WIDTH_M), 0.
+        tiles = {f'stairs_{i}': flight_tile(row['step_height_m'], row['step_width_m'], 1. / len(strata))
+                 for i, row in enumerate(strata)}
+        # A longitudinal reset on another tread would need a different spawn height.
+        cfg.events.reset_base.params['pose_range']['x'] = (0., 0.)
+        cfg.episode_length_s = max(cfg.episode_length_s, evaluation_seconds + .04)
+        spec.update(terrain=COURSE, duration_s=evaluation_seconds, max_command_mps=speed,
+                    tile_length_m=size[0], origin_x_by_stratum_m=[f['origin_x_m'] for f in flights])
+    generator = TerrainGeneratorCfg(seed=seed, curriculum=True, size=size, border_width=border,
+        num_rows=1, num_cols=len(strata), horizontal_scale=.05, vertical_scale=.005,
+        difficulty_range=(.5, .5), use_cache=False, sub_terrains=tiles)
     for terrain in (cfg.scene.terrain, cfg.scene_context):
         terrain.terrain_type = 'generator'
         terrain.terrain_generator = generator

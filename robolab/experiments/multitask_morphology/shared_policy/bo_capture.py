@@ -5,6 +5,7 @@ import numpy as np
 
 from shared_bo_metrics import DT, TRIAL_VERSION, digest, read_conditions, score_trial
 from contract import sha, write_new
+from stair_course import COURSE, WIDTH_M, evaluation_flight, flight_tile, outside_flight
 
 
 def straight_stairs(_difficulty, cfg):
@@ -47,7 +48,20 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
     if task != 'run':
         import isaaclab.terrains as terrains
 
-        if task == 'stairs':
+        size = (40., 40.)
+        flight = None
+        if task == 'stairs' and spec.get('course') == COURSE:
+            flight = evaluation_flight(conditions['duration_s'], spec['speed_mps'], spec['step_depth_m'],
+                                       spec['travel_margin_factor'])
+            tile = flight_tile(spec['step_height_m'], spec['step_depth_m'], 1.)
+            size = (flight['length_m'], WIDTH_M)
+            base = cfg.events.reset_base.params
+            for key in ('pose_range', 'velocity_range'):
+                base[key] = {axis: (0., 0.) for axis in base[key]}
+            cfg.events.reset_robot_joints.params.update(position_range=(0., 0.), velocity_range=(0., 0.))
+            if audit is not None:
+                audit['reset'].update(base=dict(base), joint_position=(0., 0.), joint_velocity=(0., 0.))
+        elif task == 'stairs':
             from isaaclab.utils import configclass
 
             @configclass
@@ -62,7 +76,7 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
         else:
             # Use a mesh plane so the native ground-filtered fall sensors keep their paths.
             tile = terrains.MeshPlaneTerrainCfg(proportion=1.)
-        generator = terrains.TerrainGeneratorCfg(seed=seed, size=(40., 40.), num_rows=1, num_cols=1,
+        generator = terrains.TerrainGeneratorCfg(seed=seed, size=size, num_rows=1, num_cols=1,
             border_width=0., curriculum=True, use_cache=False, sub_terrains={'bo_course': tile})
         for terrain in (cfg.scene.terrain, cfg.scene_context):
             terrain.terrain_type = 'generator'
@@ -78,6 +92,8 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
             rel_heading_envs=0., source=TRIAL_VERSION)
         if task == 'stairs':
             audit['stairs'] = dict(terrain='straight_stairs_bo', **spec)
+            if flight:
+                audit['stairs'].update(flight)
 
 
 def parse_conditions(args, ids):
@@ -205,7 +221,15 @@ class TrialCapture:
             end = samples.pop('position')[-1]
             forward = float(end[0] - self.initial[i, 0])
             reached_top = None
-            if self.task == 'stairs':
+            outside = False
+            if self.task == 'stairs' and self.spec.get('course') == COURSE:
+                flight = evaluation_flight(self.conditions['duration_s'], self.spec['speed_mps'],
+                                           self.spec['step_depth_m'], self.spec['travel_margin_factor'])
+                positions = values['position'][active, i] - self.origins[i]
+                outside = bool(outside_flight(positions[:, 0], positions[:, 1],
+                                              flight['origin_x_m'], flight['length_m']).any())
+                route_completed = None
+            elif self.task == 'stairs':
                 top = self.spec['approach_m'] + self.spec['step_count'] * self.spec['step_depth_m']
                 height = self.spec['step_count'] * self.spec['step_height_m']
                 positions = values['position'][active, i] - self.origins[i]
@@ -223,7 +247,7 @@ class TrialCapture:
             rows.append(dict(replica=i, **score_trial(self.task, speed=self.spec['speed_mps'], dt=DT,
                 expected_steps=self.steps, mass=float(self.mass[i]), forward=forward,
                 motors=self.motors, fell=self.fell[i], timeout=self.timeout[i], reached_top=reached_top,
-                route_completed=route_completed, payload=payload, **samples)))
+                route_completed=route_completed, payload=payload, outside_stairs=outside, **samples)))
         write_new(Path(output)/'bo_trials.json', dict(kind=TRIAL_VERSION, task=self.task, seed=self.seed,
             conditions_sha256=digest(self.conditions), trace=str(trace), trace_sha256=sha(trace),
             motors=self.motors, trials=rows, **identity))

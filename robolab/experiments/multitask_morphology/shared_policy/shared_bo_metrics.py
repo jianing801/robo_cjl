@@ -6,6 +6,7 @@ from pathlib import Path
 from statistics import fmean
 
 import numpy as np
+from stair_course import COURSE
 
 TASKS = ('stairs', 'backpack', 'run')
 KNEE_ANKLE = frozenset(f'{side}_{joint}_joint' for side in ('left', 'right')
@@ -39,23 +40,25 @@ def read_conditions(path):
             or not isinstance(seeds, list) or not seeds or len(set(seeds)) != len(seeds)
             or any(type(s) is not int or not 0 <= s < 2**32-1_000_000 for s in seeds)):
         raise ValueError('Conditions require integral control steps, unique seeds and 1–32 copies')
+    stair = value['tasks']['stairs']
+    timed = stair.get('course') == COURSE
+    geometry = {'course', 'travel_margin_factor'} if timed else {'step_count', 'approach_m'}
     fields = dict(run={'route_distance_m'}, backpack={'payload_kg', 'route_distance_m'},
-                  stairs={'step_height_m', 'step_depth_m', 'step_count', 'approach_m'})
+                  stairs={'step_height_m', 'step_depth_m'} | geometry)
     for task, spec in value['tasks'].items():
         if (spec.keys() != fields[task] | {'speed_mps'}
-                or any(not positive(v) for v in spec.values())):
+                or any(not positive(v) for k, v in spec.items() if k != 'course')):
             raise ValueError(f'Invalid fixed {task} conditions')
-    stair = value['tasks']['stairs']
-    if (value['tasks']['backpack']['payload_kg'] > 15
-            or type(stair['step_count']) is not int or stair['step_count'] > 64
-            or stair['approach_m'] + stair['step_count'] * stair['step_depth_m'] >= 30):
+    if (value['tasks']['backpack']['payload_kg'] > 15 or (timed and stair['travel_margin_factor'] <= 1)
+            or (not timed and (type(stair['step_count']) is not int or stair['step_count'] > 64
+                or stair['approach_m'] + stair['step_count'] * stair['step_depth_m'] >= 30))):
         raise ValueError('Conditions exceed the supported payload or stair geometry')
     return value
 
 
 def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, torque,
                 joint_vel, motors, fell, timeout=False, reached_top=None, route_completed=None,
-                protection_stop=False, payload=None):
+                protection_stop=False, payload=None, outside_stairs=False):
     """Samples use world +X velocity/displacement and joint-output torque/velocity."""
     count = len(vx)
     torque, joint_vel = (np.asarray(x, dtype=float) for x in (torque, joint_vel))
@@ -66,6 +69,8 @@ def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, to
                reached_top=reached_top, route_completed=route_completed, timed_out=bool(timeout),
                protection_stop=bool(protection_stop), payload=payload, total_mass_kg=mass,
                metrics=None, observed=None, motors=None)
+    if outside_stairs:
+        return dict(row, reason='outside_stair_course')
     if (not 0 < count <= expected_steps or (count != expected_steps and not fell)
             or (timeout and count < expected_steps and not fell)):
         if fell and count == 0:
@@ -154,8 +159,6 @@ def objective(report, scoring):
         feasible = pair['feasible']
         if feasible is None:
             continue
-        if scoring.get('method') == 'post_finetune_panel50' and pair['tasks']['stairs'].get('reached_top') is not True:
-            feasible = False
         result = dict(seed=pair['seed'], replica=pair['replica'], feasible=feasible, objective=None)
         if feasible:
             normalized = {}

@@ -23,6 +23,7 @@ from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from persistence import resume_pause, run_lock
+from stair_course import COURSE, evaluation_flight, outside_flight
 
 
 def read(path):
@@ -43,6 +44,8 @@ def check_formal_selection(root, plan, manifest, complete, student):
     version = protocol.get('selection_version')
     if version != SELECTION_VERSION:
         raise ValueError(f'Formal BO requires selection protocol {SELECTION_VERSION}, found {version!r}')
+    if protocol.get('stair_evaluation') != COURSE:
+        raise ValueError('Formal BO requires round selection on the timed ascending stair flight')
     if (digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
             or complete.get('result') != 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
             or complete.get('full_bank_evaluated') is not False or protocol.get('dagger_rounds') != 3
@@ -166,6 +169,8 @@ def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, g
                 or report['plan_sha256'] != sha(plan_path) or sha(report['trace']) != report['trace_sha256']
                 or sorted(row['replica'] for row in report['trials']) != list(range(conditions['copies']))):
             raise ValueError(f'Incomplete or mismatched BO telemetry: {report_path}')
+        if any(row.get('reason') == 'outside_stair_course' for row in report['trials']):
+            raise ValueError(f'The timed stair course boundary was reached; extend the measurement course: {report_path}')
         if any(row['status'] == 'invalid' for row in report['trials']):
             raise ValueError(f'Invalid trial preserved for diagnosis. Repeat the same command: {report_path}')
         if not commit.exists():
@@ -181,7 +186,7 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
         raise ValueError('BO measurements require the fully configured motor curves')
     identity = dict(kind='rpo_bo_candidate_v1', source_plan_sha256=sha(source), candidate=candidate,
         initial_actor_sha256=sha(initial), conditions_sha256=digest(conditions), updates=a.updates,
-        sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py',
+        sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
                                          SHARED/'rollout.py', SHARED/'rollout_amp.py')})
     work.mkdir(parents=True, exist_ok=True)
     freeze(work/'manifest.json', identity)
@@ -256,11 +261,18 @@ def ingest_measurements(spec_path, conditions_path):
             forward = float(positions[-1, 0] - samples['initial_position'][0]) if len(positions) else 0.
             if positions.shape != (len(samples['vx']), 3):
                 raise ValueError('Imported positions must align with the velocity series')
+            outside = False
+            stair = conditions['tasks']['stairs']
+            if task == 'stairs' and stair.get('course') == COURSE:
+                flight = evaluation_flight(conditions['duration_s'], speed, stair['step_depth_m'],
+                                           stair['travel_margin_factor'])
+                xy = positions[:, :2] - samples['initial_position'][:2]
+                outside = bool(outside_flight(xy[:, 0], xy[:, 1], flight['origin_x_m'], flight['length_m']).any())
             score = score_trial(task, speed=speed, dt=DT, expected_steps=round(conditions['duration_s'] / DT),
                 mass=trial['total_mass_kg'], forward=forward, vx=samples['vx'], omega=samples['omega'],
                 torque=samples['torque'], joint_vel=samples['joint_vel'], motors=motors, fell=trial['fell'],
                 reached_top=trial.get('reached_top'), route_completed=trial.get('route_completed'),
-                protection_stop=trial.get('protection_stop', False), payload=payload)
+                protection_stop=trial.get('protection_stop', False), payload=payload, outside_stairs=outside)
         grouped.setdefault((task, seed), []).append(dict(replica=replica, **score))
     return dict(kind=REPORT_VERSION, domain=specification['domain'], candidate=specification['candidate'],
         conditions=conditions, conditions_sha256=digest(conditions), source_sha256=sha(spec_path),
@@ -308,7 +320,7 @@ def panel_scoring(reports, keys, benchmark):
             runs = [pair['tasks'][task] for pair in pairs]
             if any(run['status'] == 'invalid' for run in runs):
                 raise ValueError('Invalid trial must be resolved before calibration')
-            if not all(run['status'] == 'success' and (task != 'stairs' or run.get('reached_top') is True) for run in runs):
+            if not all(run['status'] == 'success' for run in runs):
                 continue
             for metric in METRICS[task]:
                 values = [run['metrics'][metric] for run in runs]

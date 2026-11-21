@@ -12,8 +12,8 @@
       "speed_mps": 0.5,
       "step_height_m": 0.075,
       "step_depth_m": 0.3,
-      "step_count": 12,
-      "approach_m": 1.0
+      "course": "timed_continuous_ascent",
+      "travel_margin_factor": 2.0
     },
     "backpack": {
       "speed_mps": 0.5,

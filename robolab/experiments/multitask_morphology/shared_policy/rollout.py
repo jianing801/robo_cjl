@@ -14,6 +14,8 @@ HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context,input_width
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 from scenario_sampling import rollout_env_count, verify_collection_layout, verify_stair_origins
+from stair_course import outside_flight
+from shared_bo_metrics import DT
 
 
 def load_rollout_bank(spec, task, selected_ids, identity, native_loader):
@@ -238,8 +240,14 @@ def main():
         cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
             strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
         cfg.capture_terminal_state=True
+        evaluation_stairs=None
         if args.task=='stairs' and not bo_conditions:
-            randomization_audit['stairs']=configure_stairs(cfg,profile=args.profile,seed=args.seed)
+            timed=args.mode=='evaluate' and not args.ppo_channel
+            randomization_audit['stairs']=configure_stairs(cfg,profile=args.profile,seed=args.seed,
+                evaluation_seconds=args.steps*DT if timed else None)
+            if timed:
+                evaluation_stairs=randomization_audit['stairs']
+                randomization_audit['reset']['base']['pose_range']['x']=(0.,0.)
         if bo_conditions:
             configure_conditions(cfg, args.task, bo_conditions, args.seed, randomization_audit)
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=args.reset_yaw_range))
@@ -328,6 +336,9 @@ def main():
                 write_new(output/'payload_audit.json',dict(properties=properties,audit=audit))
                 validation=(copy_index%2)==1
             terrain_indices=raw.scene.terrain.terrain_types if args.task=='stairs' else None
+            if evaluation_stairs:
+                spawn_x=torch.tensor(evaluation_stairs['origin_x_by_stratum_m'],device=raw.device)[terrain_indices]
+                outside_course=torch.zeros(n,dtype=torch.bool,device=raw.device)
             scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
                 profile=args.profile,properties=properties)
             if bo_conditions:
@@ -426,6 +437,14 @@ def main():
                 if bo:
                     bo.capture(command, dones)
                 after=raw.robot.data.root_pos_w.clone()
+                if evaluation_stairs:
+                    measured=after.clone()
+                    terminal=extras.get('terminal_state')
+                    if terminal is not None:
+                        measured[terminal['env_ids']]=terminal['root_pos_w']
+                    relative=measured-raw.scene.env_origins
+                    outside_course |= alive & outside_flight(relative[:,0],relative[:,1],spawn_x,
+                                                             evaluation_stairs['tile_length_m'])
                 if recorder:recorder.capture(step,dones)
                 # Terminal resets may move roots; exclude that step's displacement.
                 active=alive&~dones.bool()
@@ -442,6 +461,9 @@ def main():
                     break
             rows=[]
             if recorder:recorder.close()
+            if evaluation_stairs and outside_course.any():
+                ids=outside_course.nonzero().flatten().tolist()
+                raise ValueError(f'Stair flight boundary reached in environments {ids}; extend the course before scoring')
             tracking_rows=tracking.rows()
             for i in range(n):
                 rows.append(dict(design=designs[int(groups[i])]['id'],environment=i,

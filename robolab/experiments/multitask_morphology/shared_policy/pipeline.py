@@ -14,6 +14,8 @@ sys.path[:0]=[str(HERE.parents[2]),str(HERE)]
 from contract import load_plan,sha,write_new,design_ids_for_keys
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from randomization import protocol_metadata
+from stair_course import COURSE
+from stair_resume import frozen_engine, upgrade_manifest
 from persistence import run_lock,resume_pause
 from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_rank,
                         evaluation_criteria, teacher_comparison, SELECTION_RULE, GATE_VERSION,
@@ -106,22 +108,24 @@ def validate_evaluation_report(report, task, ids, spec, student_sha, protocol):
 
 
 def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed,
-                   suite, environment, timeout, criteria=None):
+                   suite, environment, timeout, criteria=None, frozen=None):
     """Persist fixed-seed evaluation separately from training and from final tests."""
     policy = 'student' if student else 'teacher'
     evaluations = []
-    protocol = protocol_metadata(profile, strength)
     criteria_parameters = criteria or {}
     declared_criteria = evaluation_criteria(**criteria_parameters)
     for index, (task, ids) in enumerate(jobs):
+        engine, metadata = frozen[:2] if frozen and task != 'stairs' else (HERE, protocol_metadata)
+        protocol = metadata(profile, strength)
         expected = dict(profile=profile, protocol=protocol, seed=seed, design_ids=ids,evaluation_criteria=declared_criteria,
                         policy=policy, actor_sha256=sha(student) if student else plan['teachers'][task]['checkpoint_sha256'])
-        commit = root/'evaluation_commits'/suite/f'{index:04d}_{task}_{policy}.json'
+        suffix = '_timed_stairs' if task == 'stairs' else ''
+        commit = root/'evaluation_commits'/suite/f'{index:04d}_{task}_{policy}{suffix}.json'
         new_commit = not commit.exists()
         if new_commit:
             folder = root/'evaluation'/suite/f'{index:04d}_{task}_{policy}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
             command = [sys.executable, '-X', 'faulthandler', '-u',
-                       str(HERE/('rollout_amp.py' if task == 'run' else 'rollout.py')),
+                       str(engine/('rollout_amp.py' if task == 'run' else 'rollout.py')),
                        '--plan', str(plan_path), '--design-ids', ','.join(ids), '--output', str(folder),
                        '--mode', 'evaluate', '--profile', profile, '--randomization-strength', str(strength),
                        '--steps', '1000', '--seed', str(seed), '--headless', '--device', 'cuda:0']
@@ -152,11 +156,11 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
 
 
 def run_selection_suite(plan, plan_path, root, jobs, student, profile, strength, seeds,
-                        suite, environment, timeout, criteria=None):
+                        suite, environment, timeout, criteria=None, frozen=None):
     records, by_seed = [], {}
     for seed in seeds:
         current = run_evaluation(plan, plan_path, root, jobs, student, profile, strength,
-                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria)
+                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria, frozen)
         records.extend(current)
         by_seed[str(seed)] = aggregate_evaluations(current, plan['schema']['tasks'])
     return dict(task_metrics=aggregate_evaluations(records, plan['schema']['tasks']),
@@ -239,6 +243,9 @@ def main(argv=None):
 
 def execute_pipeline(a,seeds):
     plan=load_plan(a.plan);root=Path(a.output).resolve()
+    previous=json.loads((root/'manifest.json').read_bytes()) if a.resume else None
+    frozen=frozen_engine(root,HERE,previous,a.resume_paused) if previous else None
+    collector,collection_metadata=frozen[:2] if frozen else (HERE,protocol_metadata)
     criteria_parameters=dict(duration_s=20.,time_tolerance_s=.1,
         tracking_rel_tol=a.tracking_rel_tolerance,
         min_command_progress_ratio=a.min_command_progress_ratio,max_missing_tracking_steps=1)
@@ -257,24 +264,28 @@ def execute_pipeline(a,seeds):
                                      for task,ids in selected_jobs},
         candidate_rollout_processes_per_round=len(selected_jobs)*len(seeds),
         total_selection_rollout_processes=(1+a.dagger_rounds)*len(selected_jobs)*len(seeds),final_test_rollout_processes=0)
-    protocol=dict(collection=protocol_metadata(a.collection_profile,a.randomization_strength if a.collection_profile=='robust' else 0.),
+    protocol=dict(collection=collection_metadata(a.collection_profile,a.randomization_strength if a.collection_profile=='robust' else 0.),
         collection_scope=collection_scope,
         initial_strength=a.initial_randomization_strength,dagger_rounds=a.dagger_rounds,
         selection=protocol_metadata(a.selection_profile,a.randomization_strength if a.selection_profile=='robust' else 0.),
         selection_seeds=seeds,selection_keys=selected_keys,calibration_keys=reserved,
         selection_version=SELECTION_VERSION,selection_budget=budget,
+        stair_evaluation=COURSE,
         comparison_version=COMPARISON_VERSION,
         evaluation_criteria=criteria,evaluation_version=GATE_VERSION,
         implementation_sha256=sha(__file__),fit_implementation_sha256=sha(HERE/'fit.py'),
         evaluation_implementation_sha256=sha(HERE/'evaluation.py'),
-        rollout_implementation={p:sha(HERE/p) for p in ('rollout.py','rollout_amp.py','scenario_sampling.py','physical_audit.py')})
+        rollout_implementation={p:sha(HERE/p) for p in ('rollout.py','rollout_amp.py','scenario_sampling.py','physical_audit.py','stair_course.py')})
     protocol_sha256=hashlib.sha256(json.dumps(protocol,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     if a.resume:
-        previous=json.loads((root/'manifest.json').read_text())
         expected={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused')}
+        if previous['arguments']!=expected or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
+        if frozen and 'stair_evaluation' not in previous['protocol']:
+            current=json.loads(json.dumps(dict(previous,protocol=protocol,protocol_sha256=protocol_sha256)))
+            upgrade_manifest(root,previous,current)
+            previous=current
         if previous.get('protocol_sha256')!=protocol_sha256:
             raise ValueError('Collection/selection protocol changed or this is a legacy run. Keep old data; use a new output directory.')
-        if previous['arguments']!=expected or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
     else:
         root.mkdir(parents=True,exist_ok=False)
         write_new(root/'manifest.json',dict(plan_sha256=sha(a.plan),arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused')},
@@ -308,14 +319,14 @@ def execute_pipeline(a,seeds):
                 if commit.exists():
                     saved=json.loads(commit.read_text());folder=Path(saved['folder'])
                     if (sha(folder/'data.pt')!=saved['sha256']
-                            or saved.get('protocol')!=protocol_metadata(a.collection_profile,strength)
+                            or saved.get('protocol')!=collection_metadata(a.collection_profile,strength)
                             or saved.get('round_index')!=round_index
                             or saved.get('execution_student_sha256')!=execution_sha):
                         raise ValueError('Committed data or collection protocol changed')
                     all_paths.append(str(folder/'data.pt'));continue
                 folder=root/'data'/f'round_{round_index}'/f'{index:04d}_{task}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
                 attempt=root/'processes'/f'collect_{round_index}_{index:04d}_{datetime.now():%Y%m%d_%H%M%S_%f}'
-                command=[sys.executable,'-X','faulthandler','-u',str(HERE/('rollout_amp.py' if task=='run' else 'rollout.py')),'--plan',str(Path(a.plan).resolve()),
+                command=[sys.executable,'-X','faulthandler','-u',str(collector/('rollout_amp.py' if task=='run' else 'rollout.py')),'--plan',str(Path(a.plan).resolve()),
                     '--task',task,'--design-ids',','.join(ids),'--output',str(folder),'--asset-cache-root',str(root),
                     '--num-envs','4096','--steps',str(a.collect_steps),'--stride',str(a.stride),'--seed',str(42+round_index*10000+index),
                     '--profile',a.collection_profile,'--randomization-strength',str(strength),
@@ -329,7 +340,7 @@ def execute_pipeline(a,seeds):
                 if not (folder/'data.pt').exists() or (folder/'failure.json').exists():raise ValueError('Missing real teacher data')
                 commit.parent.mkdir(parents=True,exist_ok=True)
                 write_new(commit,dict(folder=str(folder),sha256=sha(folder/'data.pt'),
-                    protocol=protocol_metadata(a.collection_profile,strength),round_index=round_index,
+                    protocol=collection_metadata(a.collection_profile,strength),round_index=round_index,
                     execution_student_sha256=execution_sha))
                 all_paths.append(str(folder/'data.pt'))
                 print('COLLECT_COMPLETE',round_index,index+1,'/',len(collection_jobs),flush=True)
@@ -341,7 +352,7 @@ def execute_pipeline(a,seeds):
                 implementation_sha256=sha(HERE/'fit.py'))
             if not fit_commit.exists():
                 fit=root/f'bc_round_{round_index}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
-                command=[sys.executable,'-u',str(HERE/'fit.py'),'--plan',str(Path(a.plan).resolve()),
+                command=[sys.executable,'-u',str(collector/'fit.py'),'--plan',str(Path(a.plan).resolve()),
                     '--data-list',str(data_list),'--output',str(fit),'--architecture','mlp','--epochs',str(a.epochs),
                     '--steps-per-epoch',str(a.steps_per_epoch),
                     '--samples-per-design-per-epoch',str(a.samples_per_design_per_epoch),
@@ -367,11 +378,11 @@ def execute_pipeline(a,seeds):
                 continue
             if teacher_baseline is None:
                 teacher_reference=run_selection_suite(plan,Path(a.plan).resolve(),root,selected_jobs,None,
-                    a.selection_profile,selection_strength,seeds,'selection/teacher',environment,a.timeout_seconds,criteria_parameters)
+                    a.selection_profile,selection_strength,seeds,'selection/teacher',environment,a.timeout_seconds,criteria_parameters,frozen)
                 teacher_baseline=teacher_reference['task_metrics']
             assessment=run_selection_suite(plan,Path(a.plan).resolve(),root,selected_jobs,student,
                 a.selection_profile,selection_strength,seeds,f'selection/round_{round_index}',environment,
-                a.timeout_seconds,criteria_parameters)
+                a.timeout_seconds,criteria_parameters,frozen)
             measured=assessment['task_metrics']
             selection_reports.append(dict(round_report,**assessment,rank=candidate_rank(measured,teacher_baseline),
                 teacher_comparison=teacher_comparison(measured,teacher_baseline)))

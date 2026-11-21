@@ -19,7 +19,7 @@ PROFILES = ("nominal", "robust")
 TASKS = ("stairs", "backpack", "run")
 FRAME_WIDTH = 78
 PROTOCOL_SOURCE_FILES = ("randomization.py", "student_observations.py", "scenario_sampling.py",
-    "rollout.py", "rollout_amp.py")
+    "rollout.py", "rollout_amp.py", "stair_course.py")
 COMMAND_RULES = {
     "stairs": dict(lin_vel_x=(.2, .6), heading=(0., 0.), standing=0.),
     "backpack": dict(lin_vel_x=(.2, .8), heading=(-.3, .3), standing=0.),
