@@ -136,7 +136,14 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
     assert objective(report, bo.calibrate(report, dict(name='fixture')))['mean_objective'] == pytest.approx(1)
 
 
-def test_candidate_evaluation_checks_handoff_and_reuses_measurements(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused'), [
+    (100, None, False, False), (200, None, True, False),
+    (200, False, False, False), (200, True, True, False),
+    pytest.param(200, None, True, True, id='manual-resume-fresh-tuning'),
+    pytest.param(200, True, True, True, id='manual-resume-existing-tuning'),
+])
+def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
+        tmp_path, monkeypatch, updates, frozen_compaction, expect_compact, resume_paused):
     import finetune_state
     from robolab import rough_gpu
 
@@ -150,26 +157,42 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(tmp_path, m
     candidate = dict(structure_key=[.3, .35, 'K', 'A'], design_ids={t: t+'id' for t in bo.TASKS})
     monkeypatch.setattr(finetune_state, 'select_candidate', lambda *_args, **_kw: (plan, candidate))
     monkeypatch.setattr(bo, 'load_plan', lambda path: bo.read(path))
+    monkeypatch.setattr(bo, 'shared_input', lambda *_args, **_kw: (source, plan, initial))
+    monkeypatch.setattr(bo, 'read_conditions', bo.read)
     monkeypatch.setattr(rough_gpu, 'query_gpus', lambda: [])
     monkeypatch.setattr(rough_gpu, 'gpu_lease', lambda *_: nullcontext(dict(index=3, uuid='GPU-test')))
     calls = []
+    out = tmp_path/'candidate'
+    tuning = out/'tuning'
+    manifest = dict(candidate=candidate, updates=updates, plan_sha256=bo.sha(source),
+                    initial_actor_sha256=bo.sha(initial))
+    if expect_compact:
+        manifest['compact_training_artifacts'] = True
+    if frozen_compaction is not None:
+        tuning.mkdir(parents=True)
+        (tuning/'manifest.json').write_text(json.dumps(manifest))
+    if resume_paused:
+        out.mkdir(exist_ok=True)
+        (out/'USER_PAUSED').touch()
 
     def worker(command, _folder, _env, _timeout, _root):
         def arg(name):
             return command[command.index(name)+1]
         out = Path(arg('--output'))
-        out.mkdir(parents=True)
+        out.mkdir(parents=True, exist_ok=True)
         if Path(command[2]).name == 'finetune.py':
             calls.append('finetune')
-            manifest = dict(candidate=candidate, updates=2, plan_sha256=bo.sha(source),
-                            initial_actor_sha256=bo.sha(initial))
+            assert arg('--updates') == str(updates)
+            assert ('--compact-training-artifacts' in command) is expect_compact
+            assert ('--resume' in command) is (frozen_compaction is not None)
+            assert ('--resume-paused' in command) is (resume_paused and frozen_compaction is not None)
             (out/'manifest.json').write_text(json.dumps(manifest))
             (out/'plan.json').write_text(json.dumps(plan))
             actor, tracking = out/'finetuned.pt', out/'candidate_result.json'
             actor.write_bytes(b'finetuned')
             tracking.write_text('{}')
             (out/'completed.json').write_text(json.dumps(dict(result='CANDIDATE_FINETUNED_EVALUATED',
-                candidate=candidate, ppo_updates=2, manifest_sha256=bo.sha(out/'manifest.json'),
+                candidate=candidate, ppo_updates=updates, manifest_sha256=bo.sha(out/'manifest.json'),
                 student=str(actor), student_sha256=bo.sha(actor), evaluation=str(tracking),
                 evaluation_sha256=bo.sha(tracking))))
         else:
@@ -185,12 +208,20 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(tmp_path, m
                 plan_sha256=bo.sha(arg('--plan')), trials=[dict(replica=i, **trial(task)) for i in range(2)])))
 
     monkeypatch.setattr(bo, 'run_worker', worker)
-    args = SimpleNamespace(updates=2, resume_paused=False, gpu=3, timeout=15, conditions=conditions_path)
-    out = tmp_path/'candidate'
-    first = bo.evaluate(args, out, source, plan, initial, 'stairsid', conditions)
+    args = ['evaluate', '--root', str(tmp_path), '--output', str(out), '--candidate', 'stairsid',
+            '--conditions', str(conditions_path), '--gpu', '3', '--timeout', '15']
+    if updates != 200:
+        args += ['--updates', str(updates)]
+    if resume_paused:
+        args.append('--resume-paused')
+    bo.main(args)
+    assert not (out/'USER_PAUSED').exists()
+    first = bo.read(out/'bo_evaluation.json')
     assert calls == ['finetune', *bo.TASKS]
+    assert first['ppo_updates'] == updates
     assert all(pair['feasible'] for pair in first['pairs'])
-    assert bo.evaluate(args, out, source, plan, initial, 'stairsid', conditions) == first
+    bo.main(args)
+    assert bo.read(out/'bo_evaluation.json') == first
     assert calls == ['finetune', *bo.TASKS]
 
 
@@ -263,6 +294,7 @@ def official_panel(tmp_path, monkeypatch):
     seeds = [20261117, 20261119, 20261120]
     budget = dict(selection_design_count=200)
     protocol = dict(selection_version='last_epoch_dagger_paired_200', stair_evaluation=bo.COURSE, selection_keys=selected,
+                    evaluation_velocity_frame='horizontal_heading',
                     selection_budget=budget,
                     selection=dict(profile='robust',strength=1.0),
                     calibration_keys=fixed, selection_seeds=seeds, dagger_rounds=3,
@@ -323,10 +355,12 @@ def official_panel(tmp_path, monkeypatch):
 def test_official_panel_initializes_once_and_proposes_candidate_51(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
-    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
+    assert p.calls == [(k,bo.sha(p.student),200) for k in p.fixed_ids]
+    manifest = bo.read(p.root/'bo/calibration50/manifest.json')
+    assert manifest['updates'] == 200 and manifest['selection_velocity_frame'] == 'horizontal_heading'
     bo.main(['search','--migrated','--trials','50'])
     bo.main(['search','--migrated','--trials','51'])
-    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
+    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),200)]
     saved=bo.read(p.root/'bo/search/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
     assert saved['candidates'][0]['complete_objectives'] == 2
@@ -336,7 +370,10 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
-    bo.main(['initialize', '--migrated'])
+    initialize = ['initialize', '--migrated', '--updates', '100']
+    search = ['search', '--migrated', '--updates', '100', '--trials', '50']
+    bo.main(initialize)
+    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
     calibration = p.root/'bo/calibration50'
     old_scoring = calibration/'scoring.json'
     old_receipt = calibration/'completed.json'
@@ -353,22 +390,37 @@ def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_
     assert objective(legacy_report, data)['mean_objective'] > 0
 
     with pytest.raises(ValueError, match='initialize'):
-        bo.main(['search', '--migrated', '--trials', '50'])
+        bo.main(search)
     original_report = report_path.read_bytes()
     report_path.write_bytes(original_report + b' ')
     with pytest.raises(ValueError, match='Frozen initial BO report changed'):
-        bo.main(['initialize', '--migrated'])
+        bo.main(initialize)
     report_path.write_bytes(original_report)
 
-    bo.main(['initialize', '--migrated'])
-    bo.main(['initialize', '--migrated'])
+    bo.main(initialize)
+    bo.main(initialize)
     assert len(p.calls) == 50
     assert (bo.sha(old_scoring), bo.sha(old_receipt)) == old_hashes
 
     updated = calibration/'percentile_scoring/scoring.json'
     assert objective(legacy_report, bo.read(updated))['mean_objective'] < 0
-    bo.main(['search', '--migrated', '--trials', '50'])
+    bo.main(search)
     assert bo.read(p.root/'bo/search/manifest.json')['scoring_sha256'] == bo.sha(updated)
+
+
+def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
+    p = official_panel
+    args = ['initialize', '--migrated', '--updates', '100']
+    bo.main(args)
+    manifest = p.root/'bo/calibration50/manifest.json'
+    original_manifest = manifest.read_bytes()
+    bo.main(args)
+    assert len(p.calls) == 50
+    assert manifest.read_bytes() == original_manifest
+    with pytest.raises(ValueError, match='Frozen BO identity differs'):
+        bo.main(['initialize', '--migrated'])
+    assert len(p.calls) == 50
+    assert manifest.read_bytes() == original_manifest
 
 
 @pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
@@ -400,7 +452,7 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     assert not (p.root/'bo/search/manifest.json').exists()
 
 @pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
-                                    'conditions','selection_hash','nominal'])
+                                    'conditions','selection_hash','nominal','body_axis'])
 def test_official_initialization_checks_selection_before_tuning(official_panel,change):
     p=official_panel
     args=['initialize','--root',str(p.root)]
@@ -425,6 +477,8 @@ def test_official_initialization_checks_selection_before_tuning(official_panel,c
             data['profile']='nominal'
         elif change=='old_version':
             protocol['selection_version']='last_epoch_dagger_paired_50'
+        elif change=='body_axis':
+            protocol['evaluation_velocity_frame']='body_axis'
         elif change=='budget_50':
             data['budget']['selection_design_count']=50
             protocol['selection_budget']=manifest['selection_budget']=data['budget']

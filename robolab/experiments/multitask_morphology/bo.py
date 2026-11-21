@@ -13,6 +13,7 @@ REPO = HERE.parents[2]
 SHARED = HERE/'shared_policy'
 DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
+DEFAULT_BO_UPDATES = 200
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
@@ -22,6 +23,7 @@ from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_
                                validate_scoring)
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
+from evaluation import EVALUATION_VELOCITY_FRAME
 from persistence import resume_pause, run_lock
 from stair_course import COURSE, evaluation_flight, outside_flight
 
@@ -38,7 +40,7 @@ def freeze(path, data):
         write_new(path, data)
 
 
-def check_formal_selection(root, plan, manifest, complete, student):
+def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
     protocol = manifest.get('protocol', {})
     arguments = manifest.get('arguments', {})
     version = protocol.get('selection_version')
@@ -46,6 +48,8 @@ def check_formal_selection(root, plan, manifest, complete, student):
         raise ValueError(f'Formal BO requires selection protocol {SELECTION_VERSION}, found {version!r}')
     if protocol.get('stair_evaluation') != COURSE:
         raise ValueError('Formal BO requires round selection on the timed ascending stair flight')
+    if require_horizontal_selection and protocol.get('evaluation_velocity_frame') != EVALUATION_VELOCITY_FRAME:
+        raise ValueError('Formal 200-update BO requires selection in the horizontal heading frame')
     if (digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
             or complete.get('result') != 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
             or complete.get('full_bank_evaluated') is not False or protocol.get('dagger_rounds') != 3
@@ -86,7 +90,7 @@ def check_formal_selection(root, plan, manifest, complete, student):
         raise ValueError('Selected DAgger checkpoint differs from the reported winner')
 
 
-def shared_input(root, *, formal=False):
+def shared_input(root, *, formal=False, require_horizontal_selection=False):
     path = root/'shared_plan/plan.json'
     plan = load_plan(path)
     manifest = read(root/'shared_policy/manifest.json')
@@ -97,7 +101,8 @@ def shared_input(root, *, formal=False):
             or sha(student) != complete['student_sha256']):
         raise ValueError('Shared three-task plan or selected student identity does not match')
     if formal:
-        check_formal_selection(root, plan, manifest, complete, student)
+        check_formal_selection(root, plan, manifest, complete, student,
+                               require_horizontal_selection=require_horizontal_selection)
     return path, plan, student
 
 
@@ -198,10 +203,16 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
                    '--device', f'cuda:{a.gpu}', '--evaluation-profile', 'both',
                    '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
                    '--timeout-seconds', str(a.timeout)]
-        if (tuning/'manifest.json').is_file():
+        tuning_manifest = tuning/'manifest.json'
+        if tuning_manifest.is_file():
             command.append('--resume')
-        if a.resume_paused:
-            command.append('--resume-paused')
+            if a.resume_paused:
+                command.append('--resume-paused')
+            compact = read(tuning_manifest).get('compact_training_artifacts') is True
+        else:
+            compact = a.updates == DEFAULT_BO_UPDATES
+        if compact:
+            command.append('--compact-training-artifacts')
         logs = work/'tuning_logs'/uuid4().hex[:8]
         print('BO_FINETUNING', design_id, candidate['structure_key'], logs, flush=True)
         # The native fine-tune coordinator owns GPU leases and per-worker timeouts.
@@ -357,33 +368,52 @@ def check_panel_receipt(scoring_path):
         raise ValueError('Frozen calibration scoring or manifest changed')
 
 
+def initial_report(path, evidence, benchmark):
+    if sha(path) != evidence['sha256']:
+        raise ValueError(f'Frozen initial BO report changed: {path}')
+    report = checked_report(path)
+    manifest_path = path.parent/'manifest.json'
+    if report.get('evaluation_manifest_sha256') != sha(manifest_path):
+        raise ValueError('Initial BO observation candidate manifest changed')
+    identity = read(manifest_path)
+    if (identity.get('source_plan_sha256') != benchmark['source_plan_sha256']
+            or identity.get('initial_actor_sha256') != benchmark['initial_actor_sha256']
+            or identity.get('updates') != benchmark['updates'] or identity.get('candidate') != report['candidate']
+            or identity.get('conditions_sha256') != report['conditions_sha256']):
+        raise ValueError('Initial BO observation has different tuning inputs')
+    return report
+
+
 def initialize(a, work, source, plan, actor, conditions):
     keys = calibration_keys()
     lookup = {tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
     if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
         raise ValueError('Missing fixed calibration structures in shared plan')
     benchmark = dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates)
+    if a.updates == DEFAULT_BO_UPDATES:
+        benchmark['selection_velocity_frame'] = EVALUATION_VELOCITY_FRAME
     manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
     freeze(work/'manifest.json', manifest)
     resume_pause(work,a.resume_paused)
     reports, evidence = [], []
     old_scoring_path = work/'scoring.json'
     previous = read(old_scoring_path) if old_scoring_path.is_file() else None
-    if previous is not None and span_only_panel(previous):
-        check_panel_receipt(old_scoring_path)
+    if previous is not None and (a.updates == 100 or span_only_panel(previous)):
+        reanchor = span_only_panel(previous)
+        if reanchor or (work/'completed.json').is_file():
+            check_panel_receipt(old_scoring_path)
         previous_benchmark = previous['benchmark']
         if any(previous_benchmark.get(key) != value for key, value in benchmark.items()):
             raise ValueError('Frozen calibration uses a different starting policy, plan or PPO budget')
         for entry in previous_benchmark['reports']:
             relative = Path(entry['report'])
             path = work/relative
-            if sha(path) != entry['sha256']:
-                raise ValueError(f'Frozen initial BO report changed: {path}')
-            reports.append(checked_report(path))
-            evidence.append(dict(entry, report=(Path('..')/relative).as_posix()))
-        work = work/'percentile_scoring'
-        work.mkdir(exist_ok=True)
-        freeze(work/'manifest.json', manifest)
+            reports.append(initial_report(path, entry, benchmark))
+            evidence.append(dict(entry, report=(Path('..')/relative).as_posix()) if reanchor else entry)
+        if reanchor:
+            work = work/'percentile_scoring'
+            work.mkdir(exist_ok=True)
+            freeze(work/'manifest.json', manifest)
     else:
         for index, key in enumerate(keys, 1):
             folder = work/f'design_{index:02d}'
@@ -455,23 +485,15 @@ def search(a, work, source, plan, actor, conditions):
         if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
                 or benchmark['updates'] != a.updates or len(benchmark['reports']) != len(keys)):
             raise ValueError('Initial observations must share the selected actor, source plan and PPO budget')
+        if (a.updates == DEFAULT_BO_UPDATES
+                and benchmark.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME):
+            raise ValueError('Initial observations must come from horizontal heading checkpoint selection')
         if a.trials < len(keys):
             raise ValueError('The total BO budget must include the 50 initial observations')
         lookup = {tuple(row['key']): row for row in pool}
         for key, evidence in zip(keys,benchmark['reports'],strict=True):
             path = a.scoring.parent/evidence['report']
-            if sha(path) != evidence['sha256']:
-                raise ValueError('Frozen initial BO report changed')
-            report = checked_report(path)
-            manifest_path = path.parent/'manifest.json'
-            if report.get('evaluation_manifest_sha256') != sha(manifest_path):
-                raise ValueError('Initial BO observation candidate manifest changed')
-            identity = read(manifest_path)
-            if (identity.get('source_plan_sha256') != benchmark['source_plan_sha256']
-                    or identity.get('initial_actor_sha256') != benchmark['initial_actor_sha256']
-                    or identity.get('updates') != a.updates or identity.get('candidate') != report['candidate']
-                    or identity.get('conditions_sha256') != report['conditions_sha256']):
-                raise ValueError('Initial BO observation has different tuning inputs')
+            report = initial_report(path, evidence, benchmark)
             row = lookup[key]
             design_id = row['design_ids']['stairs']
             if (report['candidate']['design_ids'] != row['design_ids'] or tuple(report['candidate']['structure_key']) != key
@@ -527,7 +549,7 @@ def main(argv=None):
         p.add_argument('--output', type=Path)
         p.add_argument('--conditions', type=Path)
         p.add_argument('--gpu', type=int, default=0)
-        p.add_argument('--updates', type=int, default=100)
+        p.add_argument('--updates', type=int, default=DEFAULT_BO_UPDATES)
         p.add_argument('--timeout', type=int, default=1800)
         p.add_argument('--resume-paused', action='store_true')
         if command == 'evaluate':
@@ -583,7 +605,8 @@ def main(argv=None):
     conditions = read_conditions(a.conditions)
     if formal and conditions != read_conditions(FORMAL_CONDITIONS):
         raise ValueError('Official BO calibration and search require the fixed three-task conditions')
-    source, plan, actor = shared_input(a.root, formal=formal)
+    source, plan, actor = shared_input(a.root, formal=formal,
+                                      require_horizontal_selection=formal and a.updates == DEFAULT_BO_UPDATES)
     if a.command == 'evaluate' and a.candidate not in plan['teachers']['stairs']['design_ids']:
         parser.error('Candidate must be an exact shared Rough structure ID')
     if getattr(a, 'finetuned', None) and not (a.finetuned/'completed.json').is_file():

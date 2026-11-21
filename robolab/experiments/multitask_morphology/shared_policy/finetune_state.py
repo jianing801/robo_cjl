@@ -2,8 +2,10 @@
 from copy import deepcopy
 import json
 import math
+import os
 from pathlib import Path
 import random
+import re
 import uuid
 
 import numpy as np
@@ -63,7 +65,7 @@ def restore_rng(state):
     np.random.set_state((name, np.asarray(keys, dtype=np.uint32), pos, gaussian, cached))
 
 
-def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_sha256, metrics=None):
+def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_sha256, metrics=None, *, rollout=None):
     folder = Path(root) / 'checkpoints'
     folder.mkdir(exist_ok=True)
     path = folder / f'update_{completed_updates:06d}_{uuid.uuid4().hex}.pt'
@@ -74,20 +76,31 @@ def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_
     publish(path, value)
     record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
                   path=path.name, sha256=sha(path))
+    if rollout is not None:
+        record.update(metrics=metrics, rollout=rollout)
     write_new(folder / f'update_{completed_updates:06d}.json', record)
     return record
 
 
+def _checkpoint_receipt(path, index, manifest_sha256):
+    record = json.loads(path.read_text(encoding='utf8'))
+    if (path.name != f'update_{index:06d}.json' or record['completed_updates'] != index
+            or record['manifest_sha256'] != manifest_sha256):
+        raise ValueError('PPO checkpoint history is incomplete or belongs to another run')
+    return record
+
+
+def _checkpoint_history(folder, manifest_sha256):
+    commits = sorted(folder.glob('update_*.json'))
+    return [_checkpoint_receipt(path, index, manifest_sha256) for index, path in enumerate(commits)]
+
+
 def load_checkpoint(root, model, critic, optimizer, manifest_sha256):
     folder = Path(root) / 'checkpoints'
-    commits = sorted(folder.glob('update_*.json'))
-    if not commits:
+    history = _checkpoint_history(folder, manifest_sha256)
+    if not history:
         return None
-    for index, path in enumerate(commits):
-        record = json.loads(path.read_text(encoding='utf8'))
-        if (path.name != f'update_{index:06d}.json' or record['completed_updates'] != index
-                or record['manifest_sha256'] != manifest_sha256):
-            raise ValueError('PPO checkpoint history is incomplete or belongs to another run')
+    record = history[-1]
     state_path = folder / record['path']
     if state_path.parent != folder or sha(state_path) != record['sha256']:
         raise ValueError('Committed PPO checkpoint changed')
@@ -106,6 +119,82 @@ def load_checkpoint(root, model, critic, optimizer, manifest_sha256):
         raise ValueError('Nonfinite restored PPO learning state')
     restore_rng(state['rng'])
     return state['completed_updates']
+
+
+def _sync_directory(folder):
+    if os.name != 'nt':
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _checkpoint_blob(folder, record):
+    name = record['path']
+    if not re.fullmatch(rf'update_{record["completed_updates"]:06d}_[0-9a-f]{{32}}\.pt', name):
+        raise ValueError('Invalid compact PPO checkpoint path')
+    path = folder / name
+    if path.is_symlink():
+        raise ValueError('Compact PPO checkpoint path cannot be a symlink')
+    return path
+
+
+def _consumed_rollout_paths(attempts, record):
+    tasks = ('stairs', 'backpack', 'run')
+    rollout = record.get('rollout', {})
+    session_id = rollout.get('session_id', '')
+    if not re.fullmatch(r'[0-9a-f]{32}', session_id) or set(rollout.get('task_audits', {})) != set(tasks):
+        raise ValueError('Missing compact PPO rollout provenance')
+    attempt = attempts / session_id
+    if attempt.resolve() != attempt:
+        raise ValueError('Compact PPO attempt must be inside the run')
+    index = record['completed_updates'] - 1
+    actor = attempt / f'actor_{index:03d}.pt'
+    request = json.loads((attempt / f'request_{index:03d}.json').read_text(encoding='utf8'))
+    expected = dict(kind='shared_ppo_request_v2', session_id=session_id,
+                    manifest_sha256=record['manifest_sha256'], index=index, student=str(actor))
+    if any(request.get(key) != value for key, value in expected.items()):
+        raise ValueError('Compact PPO rollout request identity mismatch')
+    return attempt, [actor, *(attempt / f'{task}_{index:03d}.pt' for task in tasks)]
+
+
+def prune_training_artifacts(root, manifest_sha256, completed, *, reconcile=False):
+    """Reclaim compact-run tensors only after their owning update was committed."""
+    root = Path(root).resolve()
+    folder, attempts = root / 'checkpoints', root / 'attempts'
+    if folder.resolve() != folder or attempts.resolve() != attempts:
+        raise ValueError('Compact PPO storage must be inside the run')
+
+    def receipt(index):
+        return _checkpoint_receipt(folder / f'update_{index:06d}.json', index, manifest_sha256)
+
+    latest = receipt(completed)
+    if sha(_checkpoint_blob(folder, latest)) != latest['sha256']:
+        raise ValueError('Committed PPO checkpoint changed')
+    if reconcile:
+        history = _checkpoint_history(folder, manifest_sha256)
+        if history[-1] != latest:
+            raise ValueError('Compact PPO checkpoint history changed')
+        obsolete = history[1:-2]
+        consumed = history[1:]
+    else:
+        obsolete = [receipt(completed - 2)] if completed >= 3 else []
+        consumed = [latest]
+    blobs = [_checkpoint_blob(folder, record) for record in obsolete]
+    rollouts = [_consumed_rollout_paths(attempts, record) for record in consumed]
+    # A killed process may leave consumed tensors behind. Sync the receipt and
+    # request directories before unlinking, and repeat reclamation on resume.
+    _sync_directory(folder)
+    _sync_directory(root)
+    _sync_directory(attempts)
+    for attempt in {attempt for attempt, _ in rollouts}:
+        _sync_directory(attempt)
+    for path in blobs:
+        path.unlink(missing_ok=True)
+    for _, paths in rollouts:
+        for path in paths:
+            path.unlink(missing_ok=True)
 
 
 def validate_batch(data, *, task, index, session, actor_sha256, width, envs=8, actions=23):

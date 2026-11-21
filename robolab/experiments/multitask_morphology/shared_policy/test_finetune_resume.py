@@ -22,7 +22,7 @@ from test_shared import banks
 from test_pipeline_protocol import row
 
 
-def fixture_plan(tmp_path, designs=None):
+def fixture_plan(tmp_path, designs=None, *, full_body_torque=False):
     native = banks(); native['run'] = deepcopy(native['stairs'])
     keys = designs or [dict(thigh_m=.25, calf_m=.3, knee_motor='K1', ankle_motor='RS06'),
                        dict(thigh_m=.4, calf_m=.45, knee_motor='K2', ankle_motor='RS06')]
@@ -33,7 +33,7 @@ def fixture_plan(tmp_path, designs=None):
         checkpoint = tmp_path/f'{task}.pt'; checkpoint.write_bytes(b'frozen teacher')
         teachers[task] = dict(bank=str(path), bank_sha256=sha(path), checkpoint=str(checkpoint),
             checkpoint_sha256=sha(checkpoint), design_ids=[d['id'] for d in bank['designs']],
-            copies=8, full_body_torque=False)
+            copies=8, full_body_torque=full_body_torque)
     schema = schema_for(native)
     schema['shared_structure_keys'] = [list(structure_key(d)) for d in keys]
     shared = tmp_path/'shared.json'
@@ -141,8 +141,9 @@ def test_batch_rejects_corruption(tmp_path,corruption):
         validate_batch(data,task='stairs',index=1,session=session,actor_sha256='actor',width=model.width)
 
 
-def test_real_ipc_pause_resume_then_independent_evaluation(tmp_path, monkeypatch):
-    plan_path,plan=fixture_plan(tmp_path)
+@pytest.mark.parametrize('compact', [False, True], ids=['full-retention', 'compact'])
+def test_real_ipc_pause_resume_then_independent_evaluation(tmp_path, monkeypatch, compact):
+    plan_path,plan=fixture_plan(tmp_path, full_body_torque=compact)
     model,_,_=learning_state(plan['schema']); initial=tmp_path/'actor.pt'; save_student(initial,model)
     output=tmp_path/'candidate'
     gpu=ModuleType('robolab.rough_gpu')
@@ -159,21 +160,31 @@ sys.path.insert(0,sys.argv[1])
 from ppo_channel import serve
 from student import load_student
 torch.set_num_threads(1)
-channel,task,actor=sys.argv[2:]
+channel,task,actor,*options=sys.argv[2:]
 model,_=load_student(actor)
 obs=torch.zeros(8,model.width)
+raw=SimpleNamespace(device='cpu')
+if '--full-body-torque' in options:
+ raw._full_body_torque_diagnostics=dict(cost=torch.full((8,),.25),
+     hard_clip_excess_nm=torch.zeros(8,23),unavailable=torch.zeros(8,23),
+     utilization=torch.ones(8,23))
+ raw.reward_manager=SimpleNamespace(_term_names=['full_body_torque_limits'],
+     _term_cfgs=[SimpleNamespace(weight=-12.)],_step_reward=torch.full((8,1),-3.))
+ raw.step_dt=.02
+ raw.robot=SimpleNamespace(actuators={})
 class Env:
  def step(self,action):
   return obs,torch.ones(8),torch.zeros(8,dtype=torch.int64),{}
 session=json.loads((Path(channel)/'session.json').read_text())
-serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None,protocol=session['collection_protocol'])
+serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collection_protocol'])
 ''')
     original_popen=joint.subprocess.Popen; launches=[]
     def popen(command,**kwargs):
         channel=command[command.index('--ppo-channel')+1]
         task=command[command.index('--task')+1] if '--task' in command else 'run'
         launches.append((channel,task))
-        return original_popen([sys.executable,str(stub),str(joint.HERE),channel,task,str(initial)],**kwargs)
+        torque_options=['--full-body-torque'] if '--full-body-torque' in command else []
+        return original_popen([sys.executable,str(stub),str(joint.HERE),channel,task,str(initial),*torque_options],**kwargs)
     monkeypatch.setattr(joint.subprocess,'Popen',popen)
     original_sleep=joint.time.sleep
     monkeypatch.setattr(joint.time,'sleep',lambda seconds:None if seconds==3 else original_sleep(seconds))
@@ -182,7 +193,11 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
     def checkpoint(*args,**kwargs):
         result=original_save(*args,**kwargs)
         if args[4]==1 and not paused:
-            paused.append(True); (output/'USER_PAUSED').touch()
+            paused.append(True)
+            if compact:
+                # Interrupt after the receipt is committed, just before reclamation.
+                raise KeyboardInterrupt('checkpoint committed before compaction')
+            (output/'USER_PAUSED').touch()
         return result
     monkeypatch.setattr(joint,'save_checkpoint',checkpoint)
     evaluations=[]; evaluation_paused=[]
@@ -204,15 +219,24 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
             velocity_frame=pipeline.EVALUATION_VELOCITY_FRAME,
             collection_protocol=pipeline.protocol_metadata(profile,1. if profile=='robust' else 0.)))
     monkeypatch.setattr(pipeline,'child',evaluate)
+    updates=4 if compact else 2
     args=['--plan',str(plan_path),'--student',str(initial),'--output',str(output),
-          '--design-id','stairs_1','--updates','2','--timeout-seconds','60']
+          '--design-id','stairs_1','--updates',str(updates),'--timeout-seconds','60']
+    if compact:
+        args.extend(['--compact-training-artifacts','--full-body-torque'])
     with pytest.raises(KeyboardInterrupt): joint.main(args)
     assert (output/'checkpoints/update_000001.json').exists() and not (output/'completed.json').exists()
+    if compact:
+        first_attempt=next((output/'attempts').iterdir())
+        assert {p.name for p in first_attempt.glob('*.pt')}=={
+            'actor_000.pt','stairs_000.pt','backpack_000.pt','run_000.pt'}
+        # A payload without a corresponding committed receipt is not consumed.
+        (first_attempt/'actor_001.pt').write_bytes(b'unconsumed')
     with pytest.raises(RuntimeError,match='resume-paused'): joint.main(args+['--resume'])
-    with pytest.raises(ValueError,match='changed'): joint.main(args+['--resume-paused','--updates','3'])
+    with pytest.raises(ValueError,match='changed'): joint.main(args+['--resume-paused','--updates','5'])
     assert (output/'USER_PAUSED').exists()
     with pytest.raises(KeyboardInterrupt): joint.main(args+['--resume-paused'])
-    assert (output/'checkpoints/update_000002.json').exists()
+    assert (output/f'checkpoints/update_{updates:06d}.json').exists()
     assert (output/'shared_actor_finetuned.pt').exists() and not (output/'completed.json').exists()
     joint.main(args+['--resume-paused'])
     assert not (output/'USER_PAUSED').exists() and len(launches)==6
@@ -222,7 +246,31 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
     resumed_folder=output/'attempts'/resumed_session['session_id']
     assert not (resumed_folder/'request_000.json').exists() and (resumed_folder/'request_001.json').exists()
     actor,meta=load_student(output/'shared_actor_finetuned.pt')
-    assert meta['ppo_updates']==2 and meta['critic_trained'] and 'PPO_updates' not in meta
+    assert meta['ppo_updates']==updates and meta['critic_trained'] and 'PPO_updates' not in meta
+    manifest=json.loads((output/'manifest.json').read_text())
+    if compact:
+        assert manifest['compact_training_artifacts'] is True
+    else:
+        assert 'compact_training_artifacts' not in manifest
+    receipts=[json.loads(p.read_text()) for p in sorted((output/'checkpoints').glob('update_*.json'))]
+    assert [r['completed_updates'] for r in receipts]==list(range(updates+1))
+    retained={r['completed_updates'] for r in receipts if (output/'checkpoints'/r['path']).is_file()}
+    assert retained==({0,3,4} if compact else {0,1,2})
+    for index in range(updates):
+        folder=next(p.parent for p in (output/'attempts').glob(f'*/request_{index:03d}.json'))
+        blobs=[folder/f'{name}_{index:03d}.pt' for name in ('actor','stairs','backpack','run')]
+        assert all(p.exists() is (not compact) for p in blobs)
+        assert all((folder/f'{task}.stdout.log').exists() for task in plan['teachers'])
+        if compact:
+            assert receipts[index+1]['rollout']['session_id']==folder.name
+            audits=receipts[index+1]['rollout']['task_audits']
+            assert set(audits)==set(plan['teachers'])
+            for audit in audits.values():
+                assert audit['dt_verified'] and audit['joint_count']==23 and len(audit['steps'])==24
+                assert audit['steps'][0]['mean_penalty']==pytest.approx(-.06)
+            assert receipts[index+1]['metrics']['samples']==576
+    if compact:
+        assert (first_attempt/'actor_001.pt').read_bytes()==b'unconsumed'
     assert any(not torch.equal(v,actor.state_dict()[k]) for k,v in model.state_dict().items())
     result=json.loads((output/'candidate_result.json').read_text())
     assert result['candidate']['design_ids']=={t:f'{t}_1' for t in plan['teachers']}
@@ -230,6 +278,10 @@ serve(channel,task,Env(),SimpleNamespace(device='cpu'),obs,lambda x,reset:x,None
     assert len(evaluations)==6 and {s for _,_,s in evaluations}=={20261118}
     for profile in ('nominal','robust'):
         assert set(result['profiles'][profile]['task_metrics'])==set(plan['teachers'])
+        for evaluation in result['profiles'][profile]['evaluations']:
+            summary=json.loads(Path(evaluation['summary']).read_text())
+            assert summary['velocity_frame']==pipeline.EVALUATION_VELOCITY_FRAME
+            assert summary['student']==sha(output/'shared_actor_finetuned.pt')
     joint.main(args+['--resume'])
     assert len(launches)==6 and len(evaluations)==6
     (output/'candidate_result.json').write_text('{}')

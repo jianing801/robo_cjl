@@ -13,7 +13,8 @@ import numpy as np
 import torch
 
 from contract import load_plan, sha, write_new
-from finetune_state import select_candidate, save_checkpoint, load_checkpoint, validate_batch
+from finetune_state import (select_candidate, save_checkpoint, load_checkpoint,
+                            prune_training_artifacts, validate_batch)
 from persistence import run_lock, resume_pause
 from randomization import protocol_metadata, assert_protocol_unchanged
 from student import load_student, save_student
@@ -131,7 +132,13 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
             check_pause(root)
             metrics = ppo_update(model, critic, optimizer, batches)
             check_pause(root); assert_protocol_unchanged(protocol)
-            save_checkpoint(root, model, critic, optimizer, index+1, manifest_sha256, metrics)
+            rollout = None
+            if a.compact_training_artifacts:
+                rollout = dict(session_id=attempt.name,
+                    task_audits={batch['task']: batch.get('full_body_audit') for batch in batches})
+            save_checkpoint(root, model, critic, optimizer, index+1, manifest_sha256, metrics, rollout=rollout)
+            if rollout is not None:
+                prune_training_artifacts(root, manifest_sha256, index+1)
             print('JOINT_PPO_UPDATE', index+1, '/', a.updates, flush=True)
     finally:
         (attempt/'STOP').touch(exist_ok=True)
@@ -190,6 +197,8 @@ def run(a):
         actor_lr=3e-6, critic_lr=1e-3, teacher_actor_updates=0,
         method='joint clipped PPO; all three tasks collected before each shared update',
         resume_scope='Committed PPO update; all learning state restored, simulator episodes restarted')
+    if a.compact_training_artifacts:
+        manifest['compact_training_artifacts'] = True
     if a.resume:
         if json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest:
             raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
@@ -226,6 +235,8 @@ def run(a):
                 or sha(record['evaluation']) != record['evaluation_sha256']):
             raise ValueError('Completed candidate result changed')
         print('CANDIDATE_ALREADY_COMPLETE', root); return
+    if a.compact_training_artifacts and completed:
+        prune_training_artifacts(root, manifest_sha256, completed, reconcile=True)
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
     choices = candidates(query_gpus(), os.environ, min_free_mib=a.gpu_min_free_gb*1024,
                          max_utilization=a.gpu_max_utilization, requested=a.device)
@@ -266,6 +277,8 @@ def main(argv=None):
     selector.add_argument('--design-key', nargs=4, metavar=('THIGH_M', 'CALF_M', 'KNEE', 'ANKLE'))
     parser.add_argument('--design-task', choices=['stairs', 'backpack', 'run'], default='stairs')
     parser.add_argument('--updates', type=int, default=100)
+    parser.add_argument('--compact-training-artifacts', action='store_true',
+                        help='After committed updates, retain only initial and latest two learning states and rollout receipts')
     parser.add_argument('--full-body-torque', action='store_true')
     parser.add_argument('--profile', choices=['nominal', 'robust'], default='robust')
     parser.add_argument('--randomization-strength', type=float, default=1.)

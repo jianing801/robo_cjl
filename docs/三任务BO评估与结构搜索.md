@@ -1,14 +1,14 @@
 # 微调后的三任务评估与结构搜索
 
-先完成[共享策略蒸馏](共享策略蒸馏详细说明.md)。下列命令在仓库根目录执行，使用迁移的 2500 结构库。使用从头生成的结构库时省去 `--migrated`。
+先完成上楼、负重和跑步均采用水平航向速度的鲁棒选模，确认 `shared_policy/selection.json` 和 `shared_policy/completed.json` 记录了获选模型及其身份，后者的 `protocol.evaluation_velocity_frame` 为 `horizontal_heading`。下列命令在仓库根目录执行，使用迁移的 2500 结构库。使用从头生成的结构库时省去 `--migrated`。[共享策略蒸馏及产物](共享策略蒸馏详细说明.md#查看产物和下一步)
 
 ## 第一步　运行固定的 50 个结构并冻结尺度
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0 --updates 200
 ```
 
-程序在原第 21 组按既定序号逐个取结构。每个结构从同一胜出共享模型独立开始，默认做 100 次三任务联合 PPO 更新，然后记录固定工况下的实际表现。后续 BO 新候选使用相同微调预算。每项任务跑 20 秒，关闭随机扰动，使用 20261118、20261119、20261120 三个种子，各一个环境试次。50 个结构共取得 450 条任务试次。原始模型、成功与失败、测量条件和检查点身份均可追溯；完全确定的试次可能重复相同结果。
+程序按原第 21 组的既定顺序评估 50 个结构。每个结构从同一胜出共享模型独立开始，做 200 次三任务联合 PPO 更新，然后冻结该结构的控制器并测量固定工况。`initialize`、`search` 和 `evaluate` 的默认微调预算均为 200 次。所有正式候选使用相同预算。每项任务跑 20 秒，关闭随机扰动，使用 20261118、20261119、20261120 三个种子，每个种子一个试次。三项任务 × 三个种子 × 50 个结构共 450 条试次。完全确定的试次可能重复相同结果。
 
 | 任务 | 工况 | 三项代价及对应权重 |
 |---|---|---|
@@ -16,31 +16,43 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 | 负重 | 平地直行 0.5 m/s，实装 10 kg | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
 | AMP 跑步 | 平地直线 1.5 m/s，使用本结构参考 | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
 
-固定工况的指令沿世界水平 +X 前进。三项任务均以该方向的实际速度计算前向速度 RMSE，并将 RMSE 作为连续硬件代价计分。
+固定工况的指令沿世界水平 +X 前进。三项任务均以该方向的实际速度计算前向速度 RMSE，并按表中权重计入连续硬件代价。蒸馏选模依据闭环通过率和存活比例，速度用于累计水平前向行程，选模排序排除速度 RMSE。[共享策略的选模判据](共享策略蒸馏详细说明.md#如何从-abc-中选一个)
 
 机器人从 2 m 长的底部平地中央起步，向前 1 m 到第一级，20 秒从起步开始计时。前方按评估时长 × 最高指令速度 × 2 配置连续上升的台阶。固定工况的目标行程为 10 m，前方有 67 级，登顶不作为成功条件。轨迹触及场地边界时，该次测量无效，需要延长场地后复评。旧专家的 12 级试验单独归档。
 
-**三项任务都是代价，越低越好。** 每个结构先在同一任务上取三次成功试验的指标均值，上楼按摔倒和前向均速判定。在该任务的合格结构均值中，按结构等权，通过线性插值计算每项指标的 P10 和 P90。缺少有效测量时先排查原因。任务失败保留为可行性记录，对应代价留空。某任务的有效结构不足两种，或某项指标的分位差为零时，程序中止定标。
+**三项任务都是代价，越低越好。** 摔倒或平均前向速度低于指令的 10% 记为失败。每个结构先在同一任务上取三次成功试验的指标均值。在该任务的合格结构均值中，按结构等权，通过线性插值计算每项指标的 P10 和 P90。缺少有效测量时先排查原因。任务失败保留为可行性记录，对应代价留空。某任务的有效结构不足两种，或某项指标的分位差为零时，程序中止定标。
 
 先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。综合代价默认对三个任务等权。定标产物 `bo/calibration50/scoring.json` 冻结九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
 
 Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，并保留区间外数值。《综合指标构建手册》第 5.3 节说明如何使用固定参照尺度，第 6.10 节式（31）给出了线性加权。历史专家图的原始权重和分数见[专家评估记录](Rough与AMP专家评估及评分记录.md#归一化方法与文献)。[Moharir 等，AIAA AVIATION 2026](https://doi.org/10.2514/6.2026-4497) · [作者公开全文](https://www.researchgate.net/publication/406033991_A_Unified_Objective_Layer_for_Multidisciplinary_Optimization_of_Aircraft_Arrival_Trajectories) · [OECD/JRC 手册](https://doi.org/10.1787/9789264043466-en)
 
-### 复用已有的完整定标测量
+### 暂停、恢复与保存产物
 
-如果 `bo/calibration50/` 中已有按旧公式定标的完整记录，按原工况和预算重新运行 `initialize`。程序校验旧定标记录和 50 份原始评估报告，直接用这些测量生成新版 `bo/calibration50/percentile_scoring/scoring.json`，无需重新微调或仿真。旧评分文件和报告仍可用于复现此前的分数。新版 `search` 默认选用已完成的分位数评分文件。自定定标目录时，可用 `--scoring` 指明新版评分文件。
+同一轮定标中断后重复原命令，人工暂停后加 `--resume-paused`。正式 BO 启动的 200 次微调启用精简留存。每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的 JSON 提交与指标、最终模型及原始评估数据。训练更新提交后释放当次的采样批次张量和临时 actor，保留扭矩审计摘要。指定 `--output` 时，恢复须使用相同目录，后续搜索用 `--scoring` 指向该目录的 `scoring.json`。
 
-中断的旧版定标先用原提交完成，然后用新版复用测量。已有旧版搜索记录时，可用原提交继续该搜索，或在新版用 `--output` 指定新搜索目录。
+### 归档的 100 次定标
+
+续跑或复现历史 100 次实验时，在原冻结版本中显式传 `--updates 100`，并沿用原工况、起始模型和输出目录。旧公式定标的完整测量如需按锚定分位数重算，可用支持该定标版本的 `initialize --updates 100` 核验 50 份原始报告并生成 `percentile_scoring/scoring.json`，保留原报告和评分。200 次正式流程使用自身的定标测量、分位端点和搜索目录。
 
 ## 第二步　在冻结尺度下运行 BO
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 60 --gpu 0
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 60 --gpu 0 --updates 200
 ```
 
 示例总预算 60 个结构，包含已经测过的 50 个，只新增 10 个候选。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构；默认三任务之间等权。最终报告在全部三个重复均取得完整综合代价的结构中给出最低代价候选，可用独立种子复核。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
 
 蒸馏选模的 200 个结构均已排除这 50 个定标结构。历史教师参考成绩保留在独立归档中；新的尺度来自本次学生微调后的测量。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
+
+## 单独评估一个候选
+
+把 `真实结构ID` 换成共同结构库里该候选的 `stairs` ID。
+
+```bash
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py evaluate --migrated --gpu 0 --updates 200 --candidate 真实结构ID
+```
+
+`evaluate` 输出单结构的固定工况测量。已有预算、初始模型和结构身份均匹配的完整微调时，可以用 `--finetuned` 复用其输出目录。使用同预算的冻结定标文件计算分数时，运行 `bo.py score <评估目录>/bo_evaluation.json --scoring <定标目录>/scoring.json`。
 
 ## 附录　导入原始 RPO 或实机测量
 
