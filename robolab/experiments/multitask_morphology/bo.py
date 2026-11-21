@@ -337,10 +337,24 @@ def panel_scoring(reports, keys, benchmark):
             low, high = map(float, np.percentile(values, [10, 90], method='linear'))
             if not high > low:
                 raise ValueError(f'Zero P90-P10 range for {task}/{name}')
-            metrics[task][name] = dict(p10=low,p90=high,baseline=high-low,scale=None,weight=weight,
-                                        eligible_designs=len(values))
+            # With an explicit scale, the scorer maps the baseline to 1.
+            metrics[task][name] = dict(p10=low, p90=high, baseline=high, scale=high-low,
+                                      weight=weight, eligible_designs=len(values))
     return dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=first['conditions_sha256'],
         method='post_finetune_panel50',benchmark=benchmark,metrics=metrics,task_weights={t:1/3 for t in TASKS})
+
+
+def span_only_panel(scoring):
+    return scoring.get('method') == 'post_finetune_panel50' and all(
+        row.get('scale') is None for metrics in scoring['metrics'].values() for row in metrics.values()
+    )
+
+
+def check_panel_receipt(scoring_path):
+    receipt = read(scoring_path.parent/'completed.json')
+    if (receipt['scoring_sha256'] != sha(scoring_path)
+            or receipt['manifest_sha256'] != sha(scoring_path.parent/'manifest.json')):
+        raise ValueError('Frozen calibration scoring or manifest changed')
 
 
 def initialize(a, work, source, plan, actor, conditions):
@@ -349,16 +363,35 @@ def initialize(a, work, source, plan, actor, conditions):
     if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
         raise ValueError('Missing fixed calibration structures in shared plan')
     benchmark = dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates)
-    freeze(work/'manifest.json',dict(**benchmark,conditions_sha256=digest(conditions),structure_keys=list(map(list,keys))))
+    manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
+    freeze(work/'manifest.json', manifest)
     resume_pause(work,a.resume_paused)
     reports, evidence = [], []
-    for index, key in enumerate(keys,1):
-        folder = work/f'design_{index:02d}'
-        report = evaluate(a,folder,source,plan,actor,lookup[key]['design_ids']['stairs'],conditions)
-        path = folder/'bo_evaluation.json'
-        reports.append(report)
-        evidence.append(dict(report=str(path.relative_to(work)),sha256=sha(path)))
-        print('CALIBRATION_PROGRESS',index,'/ 50',flush=True)
+    old_scoring_path = work/'scoring.json'
+    previous = read(old_scoring_path) if old_scoring_path.is_file() else None
+    if previous is not None and span_only_panel(previous):
+        check_panel_receipt(old_scoring_path)
+        previous_benchmark = previous['benchmark']
+        if any(previous_benchmark.get(key) != value for key, value in benchmark.items()):
+            raise ValueError('Frozen calibration uses a different starting policy, plan or PPO budget')
+        for entry in previous_benchmark['reports']:
+            relative = Path(entry['report'])
+            path = work/relative
+            if sha(path) != entry['sha256']:
+                raise ValueError(f'Frozen initial BO report changed: {path}')
+            reports.append(checked_report(path))
+            evidence.append(dict(entry, report=(Path('..')/relative).as_posix()))
+        work = work/'percentile_scoring'
+        work.mkdir(exist_ok=True)
+        freeze(work/'manifest.json', manifest)
+    else:
+        for index, key in enumerate(keys, 1):
+            folder = work/f'design_{index:02d}'
+            report = evaluate(a, folder, source, plan, actor, lookup[key]['design_ids']['stairs'], conditions)
+            path = folder/'bo_evaluation.json'
+            reports.append(report)
+            evidence.append(dict(report=str(path.relative_to(work)), sha256=sha(path)))
+            print('CALIBRATION_PROGRESS', index, '/ 50', flush=True)
     scoring = panel_scoring(reports,keys,dict(benchmark,reports=evidence))
     freeze(work/'scoring.json',scoring)
     freeze(work/'completed.json',dict(scoring_sha256=sha(work/'scoring.json'),
@@ -414,10 +447,9 @@ def search(a, work, source, plan, actor, conditions):
     pool = [r for r in pool if tuple(r['key']) in keys]
     observations, evaluated, results = [], set(), []
     if scoring.get('method') == 'post_finetune_panel50':
-        receipt = read(a.scoring.parent/'completed.json')
-        if (receipt['scoring_sha256'] != sha(a.scoring)
-                or receipt['manifest_sha256'] != sha(a.scoring.parent/'manifest.json')):
-            raise ValueError('Frozen calibration scoring or manifest changed')
+        check_panel_receipt(a.scoring)
+        if span_only_panel(scoring):
+            raise ValueError('Rerun BO initialize to reuse completed measurements with P10/P90 anchors')
         benchmark = scoring['benchmark']
         keys = calibration_keys()
         if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
@@ -537,6 +569,9 @@ def main(argv=None):
     default_conditions = FORMAL_CONDITIONS
     if a.command == 'search':
         default_scoring = a.root/'bo/calibration50/scoring.json'
+        anchored_scoring = default_scoring.parent/'percentile_scoring/scoring.json'
+        if (anchored_scoring.parent/'completed.json').is_file():
+            default_scoring = anchored_scoring
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
         formal = scoring.get('method') == 'post_finetune_panel50'

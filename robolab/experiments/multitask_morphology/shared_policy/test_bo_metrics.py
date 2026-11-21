@@ -213,9 +213,18 @@ def test_post_finetune_panel_uses_structure_means_and_frozen_weights():
         metric=scoring['metrics'][task]['cot']
         assert metric['p10']==pytest.approx(5.9)
         assert metric['p90']==pytest.approx(45.1)
-        assert metric['baseline']==pytest.approx(39.2)
+        assert metric['baseline']==pytest.approx(45.1)
+        assert metric['scale']==pytest.approx(39.2)
         assert metric['weight']==pytest.approx(1/3 if task=='stairs' else .4)
-    assert objective(reports[0],scoring)['mean_objective']==pytest.approx(1/39.2)
+    assert objective(reports[0],scoring)['mean_objective']==pytest.approx((1-5.9)/39.2)
+    for value, normalized in ((1., (1-5.9)/39.2), (5.9, 0.), (45.1, 1.), (50., (50-5.9)/39.2)):
+        sample = copy.deepcopy(reports[0])
+        for pair in sample['pairs']:
+            for task, trial in pair['tasks'].items():
+                trial['metrics'] = dict.fromkeys(bo.METRICS[task], value)
+        for observation in objective(sample, scoring)['observations']:
+            for task, metrics in observation['normalized'].items():
+                assert metrics == pytest.approx(dict.fromkeys(bo.METRICS[task], normalized))
     missed_top=copy.deepcopy(reports)
     missed_top[0]['pairs'][0]['tasks']['stairs']['reached_top']=False
     assert bo.panel_scoring(missed_top,keys,scoring['benchmark']) == scoring
@@ -324,6 +333,43 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     assert saved['candidates'][-1]['complete_objectives'] == 3
     assert saved['best_observed']['design_id'] == p.next_id
     assert not (p.root/'bo/search/trial_0000').exists()
+
+def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
+    p = official_panel
+    bo.main(['initialize', '--migrated'])
+    calibration = p.root/'bo/calibration50'
+    old_scoring = calibration/'scoring.json'
+    old_receipt = calibration/'completed.json'
+    data = bo.read(old_scoring)
+    for metrics in data['metrics'].values():
+        for metric in metrics.values():
+            metric.update(baseline=metric['p90']-metric['p10'], scale=None)
+    old_scoring.write_text(json.dumps(data), encoding='utf8')
+    receipt = bo.read(old_receipt)
+    old_receipt.write_text(json.dumps(dict(receipt, scoring_sha256=bo.sha(old_scoring))), encoding='utf8')
+    old_hashes = (bo.sha(old_scoring), bo.sha(old_receipt))
+    report_path = calibration/'design_02/bo_evaluation.json'
+    legacy_report = bo.read(report_path)
+    assert objective(legacy_report, data)['mean_objective'] > 0
+
+    with pytest.raises(ValueError, match='initialize'):
+        bo.main(['search', '--migrated', '--trials', '50'])
+    original_report = report_path.read_bytes()
+    report_path.write_bytes(original_report + b' ')
+    with pytest.raises(ValueError, match='Frozen initial BO report changed'):
+        bo.main(['initialize', '--migrated'])
+    report_path.write_bytes(original_report)
+
+    bo.main(['initialize', '--migrated'])
+    bo.main(['initialize', '--migrated'])
+    assert len(p.calls) == 50
+    assert (bo.sha(old_scoring), bo.sha(old_receipt)) == old_hashes
+
+    updated = calibration/'percentile_scoring/scoring.json'
+    assert objective(legacy_report, bo.read(updated))['mean_objective'] < 0
+    bo.main(['search', '--migrated', '--trials', '50'])
+    assert bo.read(p.root/'bo/search/manifest.json')['scoring_sha256'] == bo.sha(updated)
+
 
 @pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
 def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
