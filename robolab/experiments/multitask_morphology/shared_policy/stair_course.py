@@ -1,17 +1,18 @@
 """A straight evaluation flight sized for the measurement window, in SI units."""
 import math
 
-COURSE = 'timed_centered_ascent'
+COURSE = 'bottom_start_long_stairs'
 TRAVEL_MARGIN = 2.
 WIDTH_M = 40.
+APPROACH_M = 1.
 
 
 def evaluation_flight(duration, speed, depth, margin=TRAVEL_MARGIN):
     if not all(math.isfinite(v) and v > 0 for v in (duration, speed, depth, margin)) or margin <= 1:
         raise ValueError('A timed stair flight needs positive dimensions and a travel margin above one')
     count = max(2, math.ceil(duration * speed * margin / depth))
-    return dict(forward_steps=count, rear_steps=count, length_m=(2 * count + 1) * depth,
-                origin_x_m=(count + .5) * depth)
+    return dict(forward_steps=count, rear_steps=count, length_m=2 * (count * depth + APPROACH_M),
+                origin_x_m=count * depth + APPROACH_M, approach_m=APPROACH_M)
 
 
 def flight_mesh(_difficulty, cfg):
@@ -19,17 +20,22 @@ def flight_mesh(_difficulty, cfg):
     import trimesh
     length, width = cfg.size
     height, depth = cfg.step_height_range[0], cfg.step_width
-    # A common tile size can give the last tread of a stratum a fractional width.
-    meshes = []
-    for index in range(math.ceil(length / depth)):
-        left, right = index * depth, min((index + 1) * depth, length)
-        if right - left <= 1e-8:
-            break
-        z = (index + 1) * height
+    back = cfg.rear_steps * depth
+    front = back + 2 * APPROACH_M
+    def slab(left, right, top):
+        bottom = -.15
         transform = trimesh.transformations.translation_matrix(
-            ((left + right) / 2, width / 2, z / 2 - (cfg.rear_steps + 1) * height))
-        meshes.append(trimesh.creation.box((right - left, width, z), transform=transform))
-    return meshes, np.array(((cfg.rear_steps + .5) * depth, width / 2, 0.))
+            ((left + right) / 2, width / 2, (top + bottom) / 2))
+        return trimesh.creation.box((right - left, width, top - bottom), transform=transform)
+
+    meshes = [slab(back, front, 0.)]
+    for i in range(cfg.rear_steps):
+        meshes.append(slab(back - (i + 1) * depth, back - i * depth, (i + 1) * height))
+    for i in range(math.ceil((length - front) / depth)):
+        left, right = front + i * depth, min(front + (i + 1) * depth, length)
+        if right - left > 1e-8:
+            meshes.append(slab(left, right, (i + 1) * height))
+    return meshes, np.array((back + APPROACH_M, width / 2, 0.))
 
 
 def flight_tile(height, depth, proportion, rear_steps):

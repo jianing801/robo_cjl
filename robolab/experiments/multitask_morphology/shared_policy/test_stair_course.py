@@ -8,7 +8,7 @@ from stair_course import evaluation_flight, flight_mesh, outside_flight
 
 
 @pytest.mark.parametrize("duration,speed,expected", [(20, .5, 67), (10, .5, 34), (20, .6, 80)])
-def test_entire_evaluation_is_on_rising_treads(duration, speed, expected):
+def test_starts_on_floor_then_climbs_until_past_target_distance(duration, speed, expected):
     depth, height = .3, .075
     flight = evaluation_flight(duration, speed, depth)
     assert flight['forward_steps'] == expected
@@ -22,9 +22,12 @@ def test_entire_evaluation_is_on_rising_treads(duration, speed, expected):
     assert surface(origin[0]) == pytest.approx(origin[2])
     assert origin[2] == pytest.approx(0.)
     assert origin[0] >= duration * speed * 2
-    assert surface(origin[0] - expected * depth) == pytest.approx(origin[2] - expected * height)
+    for x in (-.999, -.3, 0., .3, .999):
+        assert surface(origin[0] + x) == pytest.approx(0.)
     for i in range(1, expected + 1):
-        assert surface(origin[0] + i * depth) == pytest.approx(origin[2] + i * height)
+        offset = 1. + (i - .5) * depth
+        assert surface(origin[0] + offset) == pytest.approx(i * height)
+        assert surface(origin[0] - offset) == pytest.approx(i * height)
     assert flight['length_m'] - origin[0] > duration * speed
     assert np.max(bounds[:, 1, 0]) == pytest.approx(flight['length_m'])
 

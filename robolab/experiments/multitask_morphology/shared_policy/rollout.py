@@ -14,7 +14,7 @@ HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context,input_width
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 from scenario_sampling import rollout_env_count, verify_collection_layout, verify_stair_origins
-from stair_course import outside_flight
+from stair_course import APPROACH_M, COURSE, outside_flight
 from shared_bo_metrics import DT
 
 
@@ -326,6 +326,12 @@ def main():
                 if args.num_envs is not None:
                     collection_columns=raw.scene.terrain.terrain_types.clone()
                 raw.reset()
+                if evaluation_stairs or (bo_conditions and bo_conditions['tasks']['stairs'].get('course') == COURSE):
+                    distance=APPROACH_M-(raw.robot.data.root_pos_w[:,0]-raw.scene.env_origins[:,0])
+                    if not ((distance > 0) & (distance < 2*APPROACH_M)).all():
+                        raise ValueError('Stair evaluation did not start on the bottom platform')
+                    write_new(output/'stair_start.json',dict(course=COURSE, environments=n,
+                        first_riser_min_m=float(distance.min()), first_riser_max_m=float(distance.max())))
                 if collection_columns is not None:
                     verify_stair_origins(raw.scene,collection_columns)
             elif args.task=='backpack':

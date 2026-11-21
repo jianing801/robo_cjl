@@ -119,7 +119,7 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
         protocol = metadata(profile, strength)
         expected = dict(profile=profile, protocol=protocol, seed=seed, design_ids=ids,evaluation_criteria=declared_criteria,
                         policy=policy, actor_sha256=sha(student) if student else plan['teachers'][task]['checkpoint_sha256'])
-        suffix = '_timed_stairs' if task == 'stairs' else ''
+        suffix = '_' + COURSE if task == 'stairs' else ''
         commit = root/'evaluation_commits'/suite/f'{index:04d}_{task}_{policy}{suffix}.json'
         new_commit = not commit.exists()
         if new_commit:
