@@ -49,6 +49,25 @@ def freeze(path, value):
         save(path, value)
 
 
+def select_reference_structures(bank, configuration, source):
+    """Match the published AMP cohort to the Rough schedule in AMP evaluation order."""
+    from hybrid_schedule import load_schedule
+
+    assert source["group"] == 21 and len(source["structures"]) == 50
+    lookup = {structure_key(row): row for row in bank["designs"]}
+    keys = [structure_key(row) for row in source["structures"]]
+    chosen = [lookup[key] for key in keys]
+    ids = {row["id"] for row in chosen}
+    assert len(set(keys)) == len(ids) == 50
+    schedule, _ = load_schedule(bank, configuration)
+    assert ids == set(schedule["groups"][source["group"] - 1])
+    return [
+        dict(amp_id=amp["id"], id=row["id"], thigh_m=row["thigh_m"], calf_m=row["calf_m"],
+             knee_motor=row["knee_motor"], ankle_motor=row["ankle_motor"])
+        for amp, row in zip(source["structures"], chosen, strict=True)
+    ]
+
+
 def preparation(root):
     bank_path = PROJECT/"banks/rough/bank.json"
     bank = read(bank_path)
@@ -71,25 +90,16 @@ def preparation(root):
     original = root/"amp_selection.json"
     source = read(AMP_SELECTION)
     freeze(original, source)
-    assert source["group"]==21 and len(source["structures"])==50
-    lookup = {structure_key(row):row for row in bank["designs"]}
-    keys = [structure_key(row) for row in source["structures"]]
-    chosen = [lookup[key] for key in keys]
-    assert len(set(keys)) == len({r["id"] for r in chosen})==50
-    ids = [row["id"] for row in chosen]
-    from hybrid_schedule import load_schedule
-    schedule, _ = load_schedule(bank,old_plan["configuration"])
-    assert set(ids)==set(schedule["groups"][20])
+    structures = select_reference_structures(bank, old_plan["configuration"], source)
+    ids = [row["id"] for row in structures]
     selection = dict(
         amp_selection_sha256=sha(AMP_SELECTION), schedule_group=21, motor_pairs=25,
-        structures=[dict(amp_id=amp["id"],id=row["id"],thigh_m=row["thigh_m"],calf_m=row["calf_m"],
-                         knee_motor=row["knee_motor"],ankle_motor=row["ankle_motor"])
-                    for amp,row in zip(source["structures"],chosen,strict=True)],
+        structures=structures,
     )
     frozen = root/"selection.json"
     freeze(frozen, selection)
     schema = {key:bank[key] for key in ("knees","ankles","context_schema","context_width")}
-    schema.update(tasks=["stairs"],shared_structure_keys=[list(p) for p in keys])
+    schema.update(tasks=["stairs"],shared_structure_keys=[list(structure_key(row)) for row in structures])
     binding = EXPERT / "cloud_import/evaluation_teacher.json"
     if checkpoint_sha == SERVER_CHECKPOINT:
         imported = read(binding)

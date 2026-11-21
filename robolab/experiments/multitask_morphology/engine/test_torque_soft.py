@@ -108,7 +108,7 @@ def test_installs_only_one_native_reward_term(monkeypatch):
 
 
 def test_new_pool_and_frozen_settings_identity(tmp_path):
-    c=json.loads((HERE/'config.local900.json').read_text())
+    c=json.loads((HERE/'config.local900.json').read_text(encoding='utf-8'))
     assert c['grid']['ankle_pool']==['DM-J4340P-2EC','DM-J6216P-2EC','RS06']
     assert c['torque_soft_constraint']==dict(weight=-4.,limit_ratio=.8)
     b=bank();base=config(b);validate_config(base,b)
@@ -121,10 +121,10 @@ def test_new_pool_and_frozen_settings_identity(tmp_path):
 
 
 def test_persistent_no_preflight_and_unchanged_action_path():
-    text=(HERE/'train.py').read_text()
+    text=(HERE/'train.py').read_text(encoding='utf-8')
     assert "default='persistent'" in text and 'preflight_updates_per_new_layout=0' in text
     assert '--preflight-only' not in text
-    node=next(n for n in ast.parse((HERE/'hybrid_runtime.py').read_text()).body
+    node=next(n for n in ast.parse((HERE/'hybrid_runtime.py').read_text(encoding='utf-8')).body
               if isinstance(n,ast.ClassDef) and n.name=='SpatialRoughEnv')
     assert not any(isinstance(n,ast.FunctionDef) and n.name=='_pre_physics_step' for n in node.body)
 
@@ -148,7 +148,7 @@ def test_dynamic_fairness_speed_zero_and_calibration():
 
 def test_real_clip_method_exports_exact_limit_and_updates_each_step():
     from hybrid_layout import interpolate_validated_envelope
-    tree=ast.parse((HERE/'hybrid_runtime.py').read_text())
+    tree=ast.parse((HERE/'hybrid_runtime.py').read_text(encoding='utf-8'))
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='SpatialMotor')
     fn=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='_clip_effort')
     scope=dict(torch=torch,interpolate_validated_envelope=interpolate_validated_envelope)

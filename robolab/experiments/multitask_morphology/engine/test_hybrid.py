@@ -73,7 +73,7 @@ def test_each_onpolicy_sample_used_once_after_group_change():
 
 def runner_class():
     # Compile the actual copied runner class without importing the Isaac-only scene module.
-    tree=ast.parse((HERE/'hybrid_runtime.py').read_text())
+    tree=ast.parse((HERE/'hybrid_runtime.py').read_text(encoding='utf-8'))
     cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='SpatialRunner')
     namespace=dict(torch=torch,Path=Path,OnPolicyRunner=object)
     exec(compile(ast.Module(body=[cls],type_ignores=[]),'hybrid_runtime.py','exec'),namespace)
@@ -129,13 +129,13 @@ def test_three_stage_exact_restore_normalization_adam_and_live_gradients(tmp_pat
 def test_copy_provenance_and_runtime_isolation():
     # Historical copy hashes document origin, not a dependency on uncommitted
     # versions of the original AMP/backpack/spatial entry points.
-    manifest=json.loads((HERE/'COPY_PROVENANCE.json').read_text())
+    manifest=json.loads((HERE/'COPY_PROVENANCE.json').read_text(encoding='utf-8'))
     for row in manifest['files']:
         assert len(row['source_sha256'])==64 and (HERE/row['copy']).is_file()
     forbidden={'robolab.rough_contract','robolab.configurable_morphology',
                'robolab.spatial_policy','spatial_rough_runtime','train_spatial_expert'}
     for path in HERE.glob('*.py'):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if isinstance(node,ast.ImportFrom):assert node.module not in forbidden
 
 def test_source_identity_is_rough_only():
@@ -151,7 +151,7 @@ def test_source_identity_is_rough_only():
     with pytest.raises(ValueError):source_identity('run')
 
 def test_worker_schedule_not_overwritten_by_usd_stage():
-    tree=ast.parse((HERE/'train_stage.py').read_text())
+    tree=ast.parse((HERE/'train_stage.py').read_text(encoding='utf-8'))
     assignments=[n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='stage' for t in n.targets)]
     assert len(assignments)==1 and isinstance(assignments[0].value,ast.Call) and assignments[0].value.func.id=='stage_spec'
 
@@ -215,7 +215,7 @@ def test_controller_stage_commit_failure_and_resume(tmp_path,monkeypatch):
     with pytest.raises(RuntimeError,match='USER_PAUSED'):module.main(args+['--resume','--execute'])
 
 def test_template_cannot_implicitly_start_a_training():
-    c=json.loads((HERE/'config.template.json').read_text())
+    c=json.loads((HERE/'config.template.json').read_text(encoding='utf-8'))
     with pytest.raises(ValueError):validate_config(c,bank())
 
 
@@ -254,7 +254,7 @@ def test_persistent_observation_contract_uses_tensordict_keys():
     obs=TensorDict({'policy':torch.zeros(8,12),'critic':torch.zeros(8,20)},batch_size=[8])
     storage=TensorDict({'policy':torch.zeros(24,8,12),'critic':torch.zeros(24,8,20)},batch_size=[24,8])
     assert all(obs[k].shape==storage[k].shape[1:] for k in obs.keys())
-    text=(HERE/'train_stage.py').read_text()
+    text=(HERE/'train_stage.py').read_text(encoding='utf-8')
     assert 'for k in obs.keys()' in text and 'RayCaster.meshes.clear()' in text
 
 
@@ -271,7 +271,7 @@ def test_native_logger_global_target_without_training_changes():
 
 
 def test_worker_has_no_preflight_execution_path():
-    source=(HERE/'train_stage.py').read_text()
+    source=(HERE/'train_stage.py').read_text(encoding='utf-8')
     assert '--preflight-only' not in source and '--preflight-report' not in source
 
 
