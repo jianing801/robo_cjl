@@ -15,6 +15,11 @@ DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
 DEFAULT_BO_UPDATES = 200
 PRE_TRAINING_ONLY_BO_SHA256 = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
+# LF and CRLF coordinator hashes before the measurement-import default changed.
+PRE_INGEST_ALIGNMENT_BO_SHA256 = {
+    'fead4dca36355e514f86981a1526cd79c1bb96ce7ee12a7c8e7d16cde9773233',
+    'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
+}
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions_single_seed.json'
 LEGACY_FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 # Exact LF and CRLF source sets preceding the fixed-reset protocol.
@@ -53,16 +58,19 @@ def freeze(path, data):
 
 
 def freeze_candidate_manifest(path, identity, *, fixed_reset=False):
-    if path.is_file() and not fixed_reset:
+    if path.is_file():
         saved = read(path)
         coordinator = saved.get('sources', {}).get('bo.py')
-        for coordinators, capture, metrics in PRE_FIXED_BO_SOURCES:
-            if coordinator in coordinators:
-                previous_sources = dict(identity['sources'])
-                previous_sources.update({'bo.py': coordinator, 'bo_capture.py': capture,
-                                         'shared_bo_metrics.py': metrics})
-                if saved == dict(identity, sources=previous_sources):
-                    return
+        if (coordinator in PRE_INGEST_ALIGNMENT_BO_SHA256
+                and saved == dict(identity, sources={**identity['sources'], 'bo.py': coordinator})):
+            return
+        if not fixed_reset:
+            for coordinators, capture, metrics in PRE_FIXED_BO_SOURCES:
+                if coordinator in coordinators:
+                    previous_sources = {**identity['sources'], 'bo.py': coordinator,
+                                        'bo_capture.py': capture, 'shared_bo_metrics.py': metrics}
+                    if saved == dict(identity, sources=previous_sources):
+                        return
     freeze(path, identity)
 
 
@@ -610,11 +618,13 @@ def search(a, work, source, plan, actor, conditions):
         initial_actor_sha256=sha(actor), conditions_sha256=conditions_sha256, scoring_sha256=sha(a.scoring),
         coordinator_sha256=sha(__file__), surrogate_sha256=sha(REPO/'rough_bo/constrained_gp.py'),
         updates=a.updates, seed=a.seed)
-    if manifest.is_file() and conditions.get('reset_mode') != 'fixed':
+    if manifest.is_file():
         saved = read(manifest)
         previous_sha = saved.get('coordinator_sha256')
-        if (previous_sha in {coordinators[0] for coordinators, _, _ in PRE_FIXED_BO_SOURCES}
-                and saved == dict(identity, coordinator_sha256=previous_sha)):
+        accepted = PRE_INGEST_ALIGNMENT_BO_SHA256
+        if conditions.get('reset_mode') != 'fixed':
+            accepted = accepted | {coordinators[0] for coordinators, _, _ in PRE_FIXED_BO_SOURCES}
+        if previous_sha in accepted and saved == dict(identity, coordinator_sha256=previous_sha):
             identity = saved
     freeze(manifest, identity)
     resume_pause(work, a.resume_paused)
@@ -680,7 +690,7 @@ def main(argv=None):
     p.add_argument('--scoring', required=True, type=Path)
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
-    p.add_argument('--conditions', type=Path, default=LEGACY_FORMAL_CONDITIONS)
+    p.add_argument('--conditions', type=Path, default=FORMAL_CONDITIONS)
     p.add_argument('--output', type=Path, required=True)
     a = parser.parse_args(argv)
     if a.command == 'ingest':

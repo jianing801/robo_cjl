@@ -22,7 +22,7 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 
 机器人从 2 m 长的底部平地中央起步，向前 1 m 到第一级，20 秒从起步开始计时。前方按评估时长 × 最高指令速度 × 2 配置连续上升的台阶。固定工况的目标行程为 10 m，前方有 67 级，登顶不作为成功条件。轨迹触及场地边界时，该次测量无效，需要延长场地后复评。旧专家的 12 级试验单独归档。
 
-**三项任务都是代价，越低越好。** 正式试次只要摔倒，或终点相对起点沿世界水平 +X 的净前进距离低于指令行程的 **20%**，就记为策略失败，对应任务代价留空。指令行程为指令速度乘以 20 秒，上楼和负重至少净前进 **2 m**，AMP 跑步至少 **6 m**。结构必须三项任务均成功才有综合代价和最终排名资格。仿真中断、场地越界或测量无效时保留诊断记录，修复后用原命令补跑该试次。
+**正式 BO 和蒸馏选模都以未摔倒、且沿指令方向的水平行程达到指令行程的 20% 为成功判据。** 正式 BO 每次测量完整的 20 秒，指令固定沿世界水平 +X，实际行程取该方向的净前进距离。上楼和负重至少前进 **2 m**，AMP 跑步至少前进 **6 m**。任务失败时对应代价留空，三个任务均成功才计算综合代价并参与最终排名。三项任务代价越低越好。仿真中断、场地越界或测量无效时保留诊断记录，修复后用原命令补跑该试次。
 
 净前进行程门槛属于定标和搜索的固定工况。已有按平均速度判定的定标时，用 `initialize --output` 指定新目录，后续搜索通过 `--scoring` 使用新目录中的 `scoring.json`。
 
@@ -69,6 +69,8 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 ```bash
 conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py ingest --spec baseline_measurements.json --output baseline.json
 ```
+
+导入默认按上文的正式单种子工况和 20% 水平行程门槛判定。使用 `calibrate` 做独立定标时，至少需要两组各任务均成功的试次。可用 `--conditions` 指定实际种子或副本数，并设置 `min_forward_progress_ratio` 为 0.20。复现旧的三种子测量时，显式传入 `--conditions robolab/experiments/multitask_morphology/configs/bo_conditions.json`。
 
 测量清单采用 JSON。顶层需要 `domain`（`simulation` 或 `hardware`）、`measurement_convention`（`rpo_three_task_mechanical_positive_v1`）、`dt_s`（0.02）、`candidate` 和 `trials`。每条试次填写 `task`（`stairs`、`backpack` 或 `run`）、`seed`、从 0 开始的 `replica`、`trace`、实测 `total_mass_kg`、`fell` 及 `motors`。可同时标记 `reached_top`、`route_completed` 和 `protection_stop`。负重加 `payload.mass_kg` 和 `payload.mount_position_torso_m`。
 

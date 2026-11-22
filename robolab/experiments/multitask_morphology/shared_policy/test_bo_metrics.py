@@ -203,6 +203,34 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
         assert pair['feasible'] is False
 
 
+def test_bo_ingest_defaults_to_the_formal_forward_progress_gate(tmp_path):
+    motors = [dict(joint=joint, motor_id='test', torque_side='joint_output')
+              for joint in sorted(KNEE_ANKLE) + [f'j{i}' for i in range(17)]]
+    steps = 1000
+    position = np.zeros((steps, 3))
+    position[:, 0] = np.linspace(.003, 3., steps)
+    np.savez(tmp_path/'trace.npz', position=position, initial_position=np.zeros(3),
+             vx=np.full(steps, .15), omega=np.zeros((steps, 2)),
+             torque=np.ones((steps, 23)), joint_vel=np.ones((steps, 23)))
+    trials = [dict(task=task, seed=20261118, replica=0, trace='trace.npz', motors=motors,
+                   total_mass_kg=35. if task == 'backpack' else 25., fell=False,
+                   reached_top=False, route_completed=False,
+                   payload=dict(mass_kg=10., mount_position_torso_m=[-.1, 0., 0.]) if task == 'backpack' else None)
+              for task in bo.TASKS]
+    spec, output = tmp_path/'measurements.json', tmp_path/'report.json'
+    spec.write_text(json.dumps(dict(domain='hardware', measurement_convention=TRIAL_VERSION,
+                                    dt_s=DT, candidate='fixture', trials=trials)))
+
+    bo.main(['ingest', '--spec', str(spec), '--output', str(output)])
+
+    report = bo.read(output)
+    pair, = report['pairs']
+    assert report['conditions']['min_forward_progress_ratio'] == .2
+    assert pair['tasks']['stairs']['status'] == pair['tasks']['backpack']['status'] == 'success'
+    assert pair['tasks']['run']['reason'] == 'below_minimum_forward_progress'
+    assert pair['feasible'] is False
+
+
 @pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused', 'old_bo'), [
     (100, None, False, False, False), (200, None, True, False, False),
     (200, False, False, False, False), (200, True, True, False, False),
@@ -327,6 +355,18 @@ def test_frozen_bo_manifest_only_allows_the_previous_bo_source(tmp_path):
         'bo.py': bo.PRE_TRAINING_ONLY_BO_SHA256, 'rollout.py': 'different'})))
     with pytest.raises(ValueError, match='Frozen BO identity differs'):
         bo.freeze_candidate_manifest(path, identity)
+
+
+def test_formal_candidate_accepts_the_previous_ingest_coordinator_only(tmp_path):
+    path = tmp_path/'manifest.json'
+    identity = dict(updates=200, conditions_sha256='formal', sources={'bo.py': 'current', 'rollout.py': 'unchanged'})
+    previous = dict(identity, sources={**identity['sources'],
+        'bo.py': 'fead4dca36355e514f86981a1526cd79c1bb96ce7ee12a7c8e7d16cde9773233'})
+    path.write_text(json.dumps(previous))
+    bo.freeze_candidate_manifest(path, identity, fixed_reset=True)
+    assert bo.read(path) == previous
+    with pytest.raises(ValueError, match='Frozen BO identity differs'):
+        bo.freeze_candidate_manifest(path, dict(identity, conditions_sha256='different'), fixed_reset=True)
 
 
 def write_legacy_completion(root, candidate, updates, actor):
