@@ -8,8 +8,10 @@ import time
 from types import SimpleNamespace
 
 from contract import design_ids_for_keys, load_plan, sha, write_new
-from dagger_comparison import summarize_comparison
+from dagger_comparison import (TASK_SUCCESS_PROGRESS_RATIO, TASK_SUCCESS_SELECTION_RULE,
+                               selection_rank, summarize_comparison)
 from dagger_parent import load_parent
+from evaluation import SELECTION_RULE, evaluation_criteria
 from persistence import resume_pause
 from pipeline import (collect_round, fit_round, jobs_for, run_selection_suite)
 
@@ -19,31 +21,48 @@ from task_timer import start_task_timer
 
 KIND = 'shared_dagger_continuation_v1'
 RESULT = 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
-# The initial continuation used 12 mmap slots even after adding more archives.
-PRE_CACHE_FIX_SOURCES = {
-    '361280a2887272284db59072aa3c961bb62371b59865146013798844eb884822',
-    'ea271341b9f48f0bfd3f33e35b6411517f2fbd8672e4a2ccae422e99b0106845',
-}
+SELECTION_CRITERIA_FIELDS = (
+    'duration_s', 'time_tolerance_s', 'min_command_progress_ratio', 'max_missing_tracking_steps',
+)
+# Source identities immediately before task-success ranking, in LF and CRLF.
+PRE_TASK_SUCCESS_SOURCES = (
+    {
+        'dagger_continue.py': 'e2562c130dcf7e53c263586431f0cb0d66349a5e306cd9908992913640c021fb',
+        'dagger_parent.py': '32b83652b71ded8d686b794ef34ec59c84ffa4893966dde3a6c4f0d37bc77c93',
+        'dagger_comparison.py': 'cad9ce1db9fe2d21e77538586679b8dab4df7d77c303d9390efd35f2c86f33e4',
+        'pipeline.py': 'edf3bf0ac0de5a69fe48b58b3102d5a87da8b56bd5bd2a60eceb22001c10e126',
+    },
+    {
+        'dagger_continue.py': '02a12134a4eb5aa7607518235c6339ed08f72db9aabeafcd2cca0f2e4effb166',
+        'dagger_parent.py': '47d83189b2d41c20b6911a47b9bdf56cac8c70b7cd93bb85445910ec04e416da',
+        'dagger_comparison.py': '5546cb6ec458c441e0b451e8fba5a338c04c5856464d95ef3dc61a9bb4e4951c',
+        'pipeline.py': 'f3df4192178a4e3f915eb6c3825b2555d6cf615d94af2e9f7d38d0b06af2bb09',
+    },
+)
 # All changed source identities must match one exact pre-long-replay runtime.
 PRE_LONG_REPLAY_SOURCES = (
     {
         'dagger_continue.py': '361280a2887272284db59072aa3c961bb62371b59865146013798844eb884822',
         'dagger_parent.py': 'bc68b3e9e5a3021ca7f83d16aa774ef9e3537c8be5f1d988f072182d4afb5c4a',
+        'dagger_comparison.py': 'cad9ce1db9fe2d21e77538586679b8dab4df7d77c303d9390efd35f2c86f33e4',
         'pipeline.py': 'a5c2160468e01a8399fd2884f94f4f5c98daa1054a363819e52d5741b90c5000',
     },
     {
         'dagger_continue.py': 'ea271341b9f48f0bfd3f33e35b6411517f2fbd8672e4a2ccae422e99b0106845',
         'dagger_parent.py': 'b4e14457a26478a9c231b867933ac23160ad2daea9d7c532e24269b1f0266a6c',
+        'dagger_comparison.py': '5546cb6ec458c441e0b451e8fba5a338c04c5856464d95ef3dc61a9bb4e4951c',
         'pipeline.py': 'd86aef6775f2677da2c409149748e8dc09a38ae58f4388fda2f6c9b327a7eb7f',
     },
     {
         'dagger_continue.py': 'e4c4584eed80dcd77daee90ce4ca339969d675035e723a22900003e93ce6dcf3',
         'dagger_parent.py': 'bc68b3e9e5a3021ca7f83d16aa774ef9e3537c8be5f1d988f072182d4afb5c4a',
+        'dagger_comparison.py': 'cad9ce1db9fe2d21e77538586679b8dab4df7d77c303d9390efd35f2c86f33e4',
         'pipeline.py': 'a5c2160468e01a8399fd2884f94f4f5c98daa1054a363819e52d5741b90c5000',
     },
     {
         'dagger_continue.py': '83c4a9394678e271db9b7bd8a27b7d87861a54a7db743afdf21963e0bfde643a',
         'dagger_parent.py': 'b4e14457a26478a9c231b867933ac23160ad2daea9d7c532e24269b1f0266a6c',
+        'dagger_comparison.py': '5546cb6ec458c441e0b451e8fba5a338c04c5856464d95ef3dc61a9bb4e4951c',
         'pipeline.py': 'd86aef6775f2677da2c409149748e8dc09a38ae58f4388fda2f6c9b327a7eb7f',
     },
 )
@@ -62,13 +81,12 @@ def long_replay_spec():
 def same_continuation_manifest(saved, current):
     if saved == current:
         return True
-    if 'long_replay' in current or 'long_replay' in saved:
+    if 'selection_criteria' in current or 'selection_criteria' in saved:
         return False
-    saved_source = saved.get('sources', {}).get('dagger_continue.py')
-    old_sources = PRE_LONG_REPLAY_SOURCES
-    if saved_source in PRE_CACHE_FIX_SOURCES:
-        old_sources = (*old_sources, {'dagger_continue.py': saved_source})
-    return any(saved == dict(current, sources={**current['sources'], **prior}) for prior in old_sources)
+    allowed = PRE_TASK_SUCCESS_SOURCES
+    if 'long_replay' not in current:
+        allowed += PRE_LONG_REPLAY_SOURCES
+    return any(saved == dict(current, sources=sources) for sources in allowed)
 
 
 def freeze(path, value):
@@ -89,43 +107,79 @@ def lease_environment(a):
         yield child_environment(gpu, os.environ)
 
 
-def compare_round(source, ids, teacher, previous, candidate, incumbent):
+def compare_round(source, ids, teacher, previous, candidate, incumbent, rule=TASK_SUCCESS_SELECTION_RULE):
     protocol = source['manifest']['protocol']
     return summarize_comparison(round_index=candidate['round_index'], previous_report=previous,
         candidate_report=candidate, incumbent_report=incumbent, teacher=teacher,
         structure_keys=protocol['selection_keys'], training_keys=protocol['collection_scope']['structure_keys'],
-        design_ids=ids)
+        design_ids=ids, rule=rule)
 
 
-def verify_selection_history(a, source, plan, ids, jobs, seeds, criteria):
+def selection_parameters(criteria):
+    parameters = {key: criteria[key] for key in SELECTION_CRITERIA_FIELDS}
+    if evaluation_criteria(**parameters) != criteria:
+        raise ValueError('Unrecognized archived DAgger success criteria')
+    return parameters
+
+
+def verify_selection_history(a, source, plan, ids, jobs, seeds, criteria=None, *, rule=TASK_SUCCESS_SELECTION_RULE):
+    """Verify each frozen comparison, then rank all committed rounds under one criterion."""
     profile = a.selection_profile
-    strength = source['manifest']['protocol']['selection']['strength']
+    protocol = source['manifest']['protocol']
+    strength = protocol['selection']['strength']
+    base_criteria = selection_parameters(protocol['evaluation_criteria'])
+    if criteria is None:
+        criteria = dict(base_criteria, min_command_progress_ratio=TASK_SUCCESS_PROGRESS_RATIO)
+    base_candidates = source['selection']['candidates']
+    archives = {0: (source['base'], None, base_criteria)}
+    archives.update({row['round_index']: (source['base'], row, base_criteria) for row in base_candidates})
+    scored = {}
 
-    def archived_suite(root, student, suite):
-        return run_selection_suite(plan, Path(a.plan), root, jobs, student, profile, strength,
-            seeds, suite, None, a.timeout_seconds, criteria, reuse_only=True)
+    def assessed(index, target):
+        key = (index, tuple(sorted(target.items())))
+        if key not in scored:
+            root, checkpoint, frozen = archives[index]
+            suite = 'teacher' if index == 0 else f'round_{index}'
+            rescore = {} if target == frozen else {'rescore': target}
+            assessment = run_selection_suite(plan, Path(a.plan), root, jobs,
+                checkpoint['student'] if checkpoint else None, profile, strength, seeds,
+                f'selection/{suite}', None, a.timeout_seconds, frozen, reuse_only=True, **rescore)
+            scored[key] = {**checkpoint, **assessment} if checkpoint else assessment
+        return scored[key]
 
-    teacher = archived_suite(source['base'], None, 'selection/teacher')['task_metrics']
+    def winner(indices, target, ranking_rule, teacher):
+        return max((assessed(index, target) for index in indices),
+                   key=lambda row: selection_rank(row['task_metrics'], teacher, ranking_rule))
+
+    teacher = assessed(0, base_criteria)['task_metrics']
     if teacher != source['selection']['teacher']:
         raise ValueError('Original teacher evaluation differs from the frozen selection')
-    previous = incumbent = None
-    for ancestor in source['lineage']:
+    for recorded in base_candidates:
+        measured = assessed(recorded['round_index'], base_criteria)
+        if any(measured[field] != recorded[field] for field in ('task_metrics', 'by_seed', 'evaluations')):
+            raise ValueError('Original round evaluation differs from the frozen selection')
+        expected_rank = selection_rank(measured['task_metrics'], teacher, source['selection']['rule'])
+        if tuple(recorded['rank']) != expected_rank:
+            raise ValueError('Original round rank differs from the frozen selection')
+    for ancestor in source['lineage'][1:]:
         index = ancestor['round_index']
-        suite = archived_suite(ancestor['root'], ancestor['student'], f'selection/round_{index}')
-        measured = {**ancestor, **suite}
-        if previous is None:
-            recorded = next(row for row in source['selection']['candidates'] if row['round_index'] == index)
-            if any(suite[field] != recorded[field] for field in ('task_metrics', 'by_seed', 'evaluations')):
-                raise ValueError('Original round evaluation differs from the frozen selection')
-            incumbent = measured
+        root = ancestor['root']
+        manifest = read(root/'manifest.json')
+        if 'selection_criteria' in manifest:
+            frozen = selection_parameters(manifest['selection_criteria'])
+            ranking_rule = TASK_SUCCESS_SELECTION_RULE
         else:
-            recomputed = compare_round(source, ids, teacher, previous, measured, incumbent)
-            if read(ancestor['root'] / 'comparison.json') != recomputed:
-                raise ValueError(f'Committed comparison differs for round {index}')
-            if recomputed['strictly_improves_incumbent']:
-                incumbent = measured
-        previous = measured
-    return teacher, previous, incumbent
+            frozen, ranking_rule = base_criteria, SELECTION_RULE
+        archives[index] = (root, ancestor, frozen)
+        archived_teacher = assessed(0, frozen)['task_metrics']
+        incumbent = winner(range(1, index), frozen, ranking_rule, archived_teacher)
+        recomputed = compare_round(source, ids, archived_teacher, assessed(index-1, frozen),
+                                   assessed(index, frozen), incumbent, rule=ranking_rule)
+        if read(root/'comparison.json') != recomputed:
+            raise ValueError(f'Committed comparison differs for round {index}')
+    teacher = assessed(0, criteria)['task_metrics']
+    latest = source['round_index']
+    return teacher, assessed(latest, criteria), winner(range(1, latest+1), criteria, rule, teacher)
 
 
 def execute_continuation(args):
@@ -154,13 +208,27 @@ def execute_continuation(args):
         selection_protocol=protocol['selection'],
         sources={name: sha(HERE / name) for name in
                  ('dagger_continue.py', 'dagger_parent.py', 'dagger_comparison.py', 'pipeline.py')})
+    manifest = root / 'manifest.json'
+    saved = read(manifest) if a.resume and manifest.is_file() else None
+    ratio = getattr(args, 'min_command_progress_ratio', None)
+    rule = TASK_SUCCESS_SELECTION_RULE
+    if saved is not None and 'selection_criteria' not in saved:
+        criteria = selection_parameters(protocol['evaluation_criteria'])
+        rule = SELECTION_RULE
+        if ratio is not None and ratio != criteria['min_command_progress_ratio']:
+            raise ValueError('Continuation success criteria differ from the frozen identity')
+    else:
+        if ratio is None:
+            ratio = (saved['selection_criteria']['min_command_progress_ratio'] if saved is not None
+                     else TASK_SUCCESS_PROGRESS_RATIO)
+        identity['selection_criteria'] = evaluation_criteria(min_command_progress_ratio=ratio)
+        criteria = selection_parameters(identity['selection_criteria'])
+
     long_replay = long_replay_spec() if getattr(args, 'long_replay', False) else None
     if long_replay is not None:
         identity['long_replay'] = long_replay
-    manifest = root / 'manifest.json'
     if a.resume:
-        saved = read(manifest) if manifest.is_file() else {}
-        if not same_continuation_manifest(saved, identity):
+        if saved is None or not same_continuation_manifest(saved, identity):
             raise ValueError('Continuation source, protocol or code differs from its frozen identity')
     else:
         root.mkdir(parents=True, exist_ok=False)
@@ -189,10 +257,8 @@ def execute_continuation(args):
     selection_ids = design_ids_for_keys(plan, selection_keys)
     selection_jobs = jobs_for(plan, len(selection_keys), selection_ids)
     seeds = protocol['selection_seeds']
-    criteria = dict(duration_s=20., time_tolerance_s=.1, max_missing_tracking_steps=1,
-                    min_command_progress_ratio=a.min_command_progress_ratio)
     teacher, previous, incumbent = verify_selection_history(a, source, plan, selection_ids,
-                                                           selection_jobs, seeds, criteria)
+                                                           selection_jobs, seeds, criteria, rule=rule)
     start_student = source['student']
     print('DAGGER_CONTINUATION_START', index, 'strength', 1.0, 'parent', parent, flush=True)
 
@@ -207,7 +273,8 @@ def execute_continuation(args):
         assessment = run_selection_suite(plan, path, root, selection_jobs, report['student'],
             a.selection_profile, protocol['selection']['strength'], seeds, f'selection/round_{index}',
             environment, a.timeout_seconds, criteria)
-        comparison = compare_round(source, selection_ids, teacher, previous, {**report, **assessment}, incumbent)
+        comparison = compare_round(source, selection_ids, teacher, previous, {**report, **assessment},
+                                   incumbent, rule=rule)
     if (root / 'USER_PAUSED').exists():
         raise KeyboardInterrupt('USER_PAUSED')
 

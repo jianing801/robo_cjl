@@ -2,11 +2,24 @@
 
 from evaluation import (
     COMPARISON_VERSION, EVALUATION_VELOCITY_FRAME, SELECTION_RULE,
-    aggregate_evaluations, candidate_rank,
+    RANK_DECIMAL_PLACES, aggregate_evaluations, candidate_rank, teacher_comparison,
 )
 
 
+TASK_SUCCESS_PROGRESS_RATIO = .2
+TASK_SUCCESS_SELECTION_RULE = ("Maximize student task success with equal tasks and equal structures per task. "
+    "A successful episode survives the evaluation and reaches the declared forward progress. "
+    "Ties retain the earlier checkpoint.")
 METRICS = ('success_rate', 'survival_rate', 'mean_command_aligned_speed_m_s')
+
+
+def selection_rank(student, teacher, rule):
+    if rule == SELECTION_RULE:
+        return candidate_rank(student, teacher)
+    if rule != TASK_SUCCESS_SELECTION_RULE:
+        raise ValueError('Unknown DAgger selection rule')
+    comparison = teacher_comparison(student, teacher)
+    return (round(comparison['mean_student_success_rate'], RANK_DECIMAL_PLACES),)
 
 
 def _paired_metrics(rows, design_count):
@@ -35,11 +48,11 @@ def _subset_records(records, design_ids):
 
 
 def summarize_comparison(*, round_index, previous_report, candidate_report, incumbent_report,
-                         teacher, structure_keys, training_keys, design_ids):
+                         teacher, structure_keys, training_keys, design_ids, rule=TASK_SUCCESS_SELECTION_RULE):
     """Compare verified selection suites on the same panel, seeds and criteria.
 
     Reported rates pool episodes and mean speed pools measured horizontal
-    distance and time. Checkpoint selection uses the original teacher rank.
+    distance and time. Ranking uses the declared rule for this comparison.
     """
     if (candidate_report['round_index'] != round_index
             or previous_report['round_index'] != round_index - 1
@@ -70,7 +83,7 @@ def summarize_comparison(*, round_index, previous_report, candidate_report, incu
             raise ValueError('Compared task metrics differ from the recorded episodes')
         if any(set(observed[task]['design_metrics']) != set(design_ids[task]) for task in tasks):
             raise ValueError('Compared design IDs differ from the paired panel')
-        ranks[name] = candidate_rank(observed, teacher)
+        ranks[name] = selection_rank(observed, teacher, rule)
         summaries[name] = {'all': observed, **{
             scope: aggregate_evaluations(_subset_records(records, ids), tasks)
             for scope, ids in subset_ids.items()
@@ -83,11 +96,13 @@ def summarize_comparison(*, round_index, previous_report, candidate_report, incu
         selected_student_sha256=selected['student_sha256'], strictly_improves_incumbent=improves_incumbent,
         strictly_improves_previous=ranks['candidate'] > ranks['previous'],
         velocity_frame=EVALUATION_VELOCITY_FRAME, comparison_version=COMPARISON_VERSION,
-        rule=SELECTION_RULE, ranks={name: list(rank) for name, rank in ranks.items()},
+        rule=rule, ranks={name: list(rank) for name, rank in ranks.items()},
         checkpoints={name: {field: report[field] for field in ('round_index', 'student', 'student_sha256')}
                      for name, report in reports.items()},
         tasks={},
     )
+    if rule == TASK_SUCCESS_SELECTION_RULE:
+        result['evaluation_criteria'] = next(iter(teacher.values()))['criteria']
     for task in tasks:
         comparison = {
             scope: _paired_metrics(

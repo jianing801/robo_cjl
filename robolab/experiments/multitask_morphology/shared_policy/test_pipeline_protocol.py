@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pipeline
+from evaluation import candidate_rank
 
 
 def test_curriculum_reaches_target_and_nominal_never_randomizes():
@@ -84,8 +85,24 @@ def test_selection_does_not_hide_one_task_regression_in_average():
     teacher = metrics([.8, .8, .8])
     retained = metrics([.8, .8, .8], .1)
     better_average_but_regression = metrics([1., 1., .6], .01)
-    assert pipeline.candidate_rank(retained, teacher) > pipeline.candidate_rank(better_average_but_regression, teacher)
-    assert pipeline.candidate_rank(metrics([.8, .8, .8], .08), teacher) == pipeline.candidate_rank(retained, teacher)
+    assert candidate_rank(retained, teacher) > candidate_rank(better_average_but_regression, teacher)
+    assert candidate_rank(metrics([.8, .8, .8], .08), teacher) == candidate_rank(retained, teacher)
+
+
+def test_distill_selection_defaults_to_twenty_percent_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, 'execute_pipeline', lambda args, seeds: args.min_command_progress_ratio)
+    assert pipeline.main(['--plan', 'plan.json', '--output', str(tmp_path/'new')]) == .2
+
+
+def test_task_success_selects_the_highest_equal_task_average():
+    from dagger_comparison import TASK_SUCCESS_SELECTION_RULE, selection_rank
+
+    teacher = metrics([.8, .8, .8])
+    high_success = metrics([1., 1., .6])
+    balanced = metrics([.8, .8, .8])
+    assert selection_rank(high_success, teacher, TASK_SUCCESS_SELECTION_RULE) == (pytest.approx(2.6/3),)
+    assert selection_rank(high_success, teacher, TASK_SUCCESS_SELECTION_RULE) > selection_rank(
+        balanced, teacher, TASK_SUCCESS_SELECTION_RULE)
 
 
 def report_for(command):
@@ -164,6 +181,34 @@ def test_evaluation_resume_binds_policy_profile_seed_and_results(tmp_path, monke
     actor.write_bytes(b'actor-two')
     with pytest.raises(ValueError, match='changed'):
         pipeline.run_evaluation(**kwargs)
+
+
+def test_rescore_reuses_frozen_episodes_without_changing_the_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, 'protocol_metadata', comparison_protocol)
+
+    def child(command, *_):
+        folder = Path(command[command.index('--output')+1])
+        folder.mkdir(parents=True)
+        report = report_for(command)
+        for observed in report['rows']:
+            observed.update(command_aligned_distance_m=3., mean_horizontal_forward_speed_m_s=3./19.98)
+        report['rows'][0]['fell'] = True
+        (folder/'summary.json').write_text(json.dumps(report))
+
+    monkeypatch.setattr(pipeline, 'child', child)
+    kwargs = dict(plan={'teachers': {'stairs': {'checkpoint_sha256': 'teacher', 'copies': 1}}},
+                  plan_path=tmp_path/'plan.json', root=tmp_path, jobs=[('stairs', ['d'])],
+                  student=None, profile='robust', strength=1., seed=7, suite='selection/teacher',
+                  environment={}, timeout=30, criteria={'min_command_progress_ratio': .5})
+    assert pipeline.run_evaluation(**kwargs)[0]['success_rate'] == 0.
+    receipt, = (tmp_path/'evaluation_commits').rglob('*.json')
+    original = receipt.read_bytes()
+    rescored, = pipeline.run_evaluation(**kwargs, reuse_only=True, rescore={'min_command_progress_ratio': .2})
+    assert rescored['success_rate'] == pytest.approx(5/6)
+    assert receipt.read_bytes() == original
+    Path(rescored['summary']).write_text('{}')
+    with pytest.raises(ValueError, match='changed'):
+        pipeline.run_evaluation(**kwargs, reuse_only=True, rescore={'min_command_progress_ratio': .2})
 
 
 def test_final_test_suite_does_not_reuse_selection_cache(tmp_path, monkeypatch):

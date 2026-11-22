@@ -25,6 +25,7 @@ ANCHOR_SEEDS = [20261117, 20261119, 20261120]
 SHARED_ENGINE = Path('robolab/experiments/multitask_morphology/shared_policy')
 ROLLOUT_SOURCES = {'rollout.py', 'rollout_amp.py', 'scenario_sampling.py', 'physical_audit.py'}
 PRE_CONTINUATION_REVISION = '58fd4476d5694decbce288d61a7584a305d7cbee'
+PRE_TASK_SUCCESS_SELECTION_REVISION = '103bbd0be31ef7903d714cbd29326c6412653db5'
 LONG_REPLAY_SOURCES = {'dagger_long_collect.py', 'dagger_long_fit.py', 'stair_course.py'}
 
 
@@ -71,14 +72,14 @@ def _verify_selection_coordinator(engine, expected):
         raise ValueError(f'Invalid DAgger coordinator source: {path}')
     if sha(path) == expected:
         return
-    # The serial coordinator gained continuation helpers after the original
-    # selection. Resolve that exact predecessor from Git and verify its bytes.
-    previous = subprocess.check_output([
-        'git', '--no-optional-locks', '-C', str(engine), 'show',
-        f'{PRE_CONTINUATION_REVISION}:{(SHARED_ENGINE/"pipeline.py").as_posix()}',
-    ])
-    if expected not in (sha256(previous).hexdigest(), sha256(previous.replace(b'\n', b'\r\n')).hexdigest()):
-        raise ValueError('The DAgger selection coordinator does not match its recorded source')
+    for revision in (PRE_CONTINUATION_REVISION, PRE_TASK_SUCCESS_SELECTION_REVISION):
+        previous = subprocess.check_output([
+            'git', '--no-optional-locks', '-C', str(engine), 'show',
+            f'{revision}:{(SHARED_ENGINE/"pipeline.py").as_posix()}',
+        ])
+        if expected in (sha256(previous).hexdigest(), sha256(previous.replace(b'\n', b'\r\n')).hexdigest()):
+            return
+    raise ValueError('The DAgger selection coordinator does not match its recorded source')
 
 
 def _runtime(engine, protocol, purpose, *, archived=False):
@@ -93,6 +94,8 @@ def _runtime(engine, protocol, purpose, *, archived=False):
         'fit.py': protocol['fit_implementation_sha256'],
         'collection_grid.py': protocol['collection_scope']['selector_sha256'],
     }
+    if 'selection_implementation_sha256' in protocol:
+        sources['dagger_comparison.py'] = protocol['selection_implementation_sha256']
     for name, expected_hash in sources.items():
         if name == 'pipeline.py' and not archived:
             _verify_selection_coordinator(engine, expected_hash)
@@ -300,12 +303,12 @@ def _base_selection(parent, manifest, completion, rounds):
                 or any(type(v) not in (int, float) or not math.isfinite(v) for v in rank)):
             raise ValueError('A DAgger selection candidate differs from the verified final epoch')
     winner = max(candidates, key=lambda candidate: tuple(candidate['rank']))
-    if (winner['round_index'] != BASE_ROUND or selection.get('selected_round') != BASE_ROUND
-            or completion.get('selected_round') != BASE_ROUND
+    if (selection.get('selected_round') != winner['round_index']
+            or completion.get('selected_round') != winner['round_index']
             or selection.get('selected_student') != winner['student']
             or completion.get('student') != winner['student']
             or completion.get('student_sha256') != winner['student_sha256']):
-        raise ValueError('DAgger continuation requires the verified round-three selection winner')
+        raise ValueError('DAgger continuation requires the verified base selection winner')
     return selection
 
 

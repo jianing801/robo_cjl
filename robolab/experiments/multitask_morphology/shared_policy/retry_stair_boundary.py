@@ -99,7 +99,8 @@ def retry(root, log_dir):
         protocol, args = manifest['protocol'], manifest['arguments']
         if digest(protocol) != manifest['protocol_sha256']:
             raise ValueError('Selection manifest hash does not match')
-        if (sha(HERE/'pipeline.py') != protocol['implementation_sha256']
+        coordinator_hashes = {sha(HERE/'pipeline.py'), *pipeline.PRE_CONTINUATION_PIPELINE_SHA256}
+        if (protocol['implementation_sha256'] not in coordinator_hashes
                 or sha(HERE/'evaluation.py') != protocol['evaluation_implementation_sha256']
                 or protocol['stair_evaluation'] != COURSE or seed not in protocol['selection_seeds']):
             raise ValueError('Selection implementation, course or seed differs')

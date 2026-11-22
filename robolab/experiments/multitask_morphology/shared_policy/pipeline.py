@@ -18,7 +18,8 @@ from randomization import protocol_metadata
 from stair_course import COURSE
 from stair_resume import frozen_engine, upgrade_manifest, upgrade_tracking_manifest
 from persistence import run_lock,resume_pause
-from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_rank,
+from dagger_comparison import TASK_SUCCESS_PROGRESS_RATIO, TASK_SUCCESS_SELECTION_RULE, selection_rank
+from evaluation import (evaluation_statistics, aggregate_evaluations,
                         evaluation_criteria, teacher_comparison, SELECTION_RULE, GATE_VERSION,
                         COMPARISON_VERSION, EVALUATION_VELOCITY_FRAME)
 
@@ -29,6 +30,8 @@ PRE_CONTINUATION_PIPELINE_SHA256 = {
     'd86aef6775f2677da2c409149748e8dc09a38ae58f4388fda2f6c9b327a7eb7f',
     'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
     '4a6c0b5589d8faa30b402445db5f59dfcdab934a729b5fe04ea41e9350f36c20',
+    'edf3bf0ac0de5a69fe48b58b3102d5a87da8b56bd5bd2a60eceb22001c10e126',
+    'f3df4192178a4e3f915eb6c3825b2555d6cf615d94af2e9f7d38d0b06af2bb09',
 }
 
 
@@ -129,8 +132,10 @@ def validate_evaluation_report(report, task, ids, spec, student_sha, protocol, *
 
 
 def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed,
-                   suite, environment, timeout, criteria=None, *, reuse_only=False):
+                   suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None):
     """Persist fixed-seed evaluation separately from training and from final tests."""
+    if rescore is not None and not reuse_only:
+        raise ValueError('Rescoring requires committed evaluation evidence')
     policy = 'student' if student else 'teacher'
     evaluations = []
     criteria_parameters = criteria or {}
@@ -168,7 +173,8 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
         report = json.loads((folder/'summary.json').read_text())
         rows = validate_evaluation_report(report, task, ids, plan['teachers'][task],
             expected['actor_sha256'] if student else None, protocol, velocity_frame=EVALUATION_VELOCITY_FRAME)
-        statistics = evaluation_statistics(task, rows, profile, **criteria_parameters)
+        statistics = evaluation_statistics(task, rows, profile,
+                                           **(rescore if rescore is not None else criteria_parameters))
         if new_commit:
             commit.parent.mkdir(parents=True, exist_ok=True)
             write_new(commit, dict(folder=str(folder), identity=expected, summary_sha256=sha(folder/'summary.json')))
@@ -179,9 +185,11 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
 
 
 def run_selection_suite(plan, plan_path, root, jobs, student, profile, strength, seeds,
-                        suite, environment, timeout, criteria=None, *, reuse_only=False):
+                        suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None):
     records, by_seed = [], {}
     reuse = {'reuse_only': True} if reuse_only else {}
+    if rescore is not None:
+        reuse['rescore'] = rescore
     for seed in seeds:
         current = run_evaluation(plan, plan_path, root, jobs, student, profile, strength,
                                  seed, f'{suite}/seed_{seed}', environment, timeout, criteria, **reuse)
@@ -347,7 +355,8 @@ def main(argv=None):
     p.add_argument('--tracking-abs-tolerance',type=float,default=None,help=argparse.SUPPRESS)
     p.add_argument('--standing-speed-tolerance',type=float,default=None,help='Retired; standing commands and their acceptance gate have been removed')
     p.add_argument('--tracking-rel-tolerance',type=float,default=.25,help=argparse.SUPPRESS)
-    p.add_argument('--min-command-progress-ratio',type=float,default=.5,help='Minimum realized/commanded forward progress for moving commands')
+    p.add_argument('--min-command-progress-ratio', type=float,
+        help='Minimum realized/commanded forward progress for selection (default: 0.2 for new runs)')
     p.add_argument('--resume',action='store_true');p.add_argument('--device')
     p.add_argument('--resume-paused',action='store_true',help='Resume a manually paused run after identity checks')
     p.add_argument('--gpu-min-free-gb',type=float,default=4.)
@@ -380,6 +389,10 @@ def main(argv=None):
             if a.continue_from:
                 from dagger_continue import execute_continuation
                 return execute_continuation(a)
+            if a.min_command_progress_ratio is None:
+                a.min_command_progress_ratio = (
+                    json.loads((root/'manifest.json').read_bytes())['arguments']['min_command_progress_ratio']
+                    if a.resume else TASK_SUCCESS_PROGRESS_RATIO)
             return execute_pipeline(a,seeds)
         except KeyboardInterrupt:
             if root.is_dir():(root/'USER_PAUSED').touch(exist_ok=True)
@@ -394,6 +407,7 @@ def execute_pipeline(a,seeds):
     plan=load_plan(a.plan);root=Path(a.output).resolve()
     arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused','continue_from','long_replay')}
     previous=json.loads((root/'manifest.json').read_bytes()) if a.resume else None
+    selection_rule = previous['selection_rule'] if previous else TASK_SUCCESS_SELECTION_RULE
     frozen=frozen_engine(root,HERE,previous,a.resume_paused) if previous else None
     collector,collection_metadata=frozen[:2] if frozen else (HERE,protocol_metadata)
     criteria_parameters=dict(duration_s=20.,time_tolerance_s=.1,
@@ -425,6 +439,8 @@ def execute_pipeline(a,seeds):
         implementation_sha256=sha(__file__),fit_implementation_sha256=sha(HERE/'fit.py'),
         evaluation_implementation_sha256=sha(HERE/'evaluation.py'),
         rollout_implementation={p:sha(HERE/p) for p in ('rollout.py','rollout_amp.py','scenario_sampling.py','physical_audit.py','stair_course.py')})
+    if selection_rule == TASK_SUCCESS_SELECTION_RULE:
+        protocol['selection_implementation_sha256'] = sha(HERE/'dagger_comparison.py')
     protocol_sha256=_protocol_digest(protocol)
     if a.resume:
         if previous['arguments']!=arguments or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
@@ -442,12 +458,13 @@ def execute_pipeline(a,seeds):
             else:
                 upgrade_manifest(root,previous,current)
             previous=current
+            selection_rule=previous['selection_rule']
         if previous.get('protocol_sha256')!=protocol_sha256:
             raise ValueError('Collection/selection protocol changed or this is a legacy run. Keep old data; use a new output directory.')
     else:
         root.mkdir(parents=True,exist_ok=False)
         write_new(root/'manifest.json',dict(plan_sha256=sha(a.plan),arguments=arguments,
-            protocol=protocol,protocol_sha256=protocol_sha256,selection_rule=SELECTION_RULE,selection_budget=budget,
+            protocol=protocol,protocol_sha256=protocol_sha256,selection_rule=selection_rule,selection_budget=budget,
             teacher_updates=0,initial_collection='teacher actions',later_collection='student actions with frozen teacher labels'))
     resume_pause(root,a.resume_paused)
     if (root/'completed.json').exists():
@@ -486,13 +503,13 @@ def execute_pipeline(a,seeds):
                 a.selection_profile,selection_strength,seeds,f'selection/round_{round_index}',environment,
                 a.timeout_seconds,criteria_parameters)
             measured=assessment['task_metrics']
-            selection_reports.append(dict(round_report,**assessment,rank=candidate_rank(measured,teacher_baseline),
+            selection_reports.append(dict(round_report,**assessment,rank=selection_rank(measured,teacher_baseline,selection_rule),
                 teacher_comparison=teacher_comparison(measured,teacher_baseline)))
             print('DAGGER_ROUND_EVALUATED',round_index,student,flush=True)
         selected=max(selection_reports,key=lambda row:tuple(row['rank']))
         student=selected['student']
         training_keys=set(collection_keys)
-        selection=dict(rule=SELECTION_RULE,profile=a.selection_profile,seeds=seeds,budget=budget,
+        selection=dict(rule=selection_rule,profile=a.selection_profile,seeds=seeds,budget=budget,
             design_keys=selected_keys,teacher=teacher_baseline,candidates=selection_reports,
             selected_round=selected['round_index'],selected_student=student,
             teacher_comparison=selected['teacher_comparison'],comparison_version=COMPARISON_VERSION,

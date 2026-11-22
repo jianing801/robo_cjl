@@ -565,7 +565,7 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
             initial_randomization_strength=.25,
             selection_seeds='20261117,20261119,20261120', samples_per_design_per_epoch=32,
             validation_rows_per_design_shard=128, replay_cache_shards=12,
-            tracking_rel_tolerance=.25, min_command_progress_ratio=.5, resume_paused=False):
+            tracking_rel_tolerance=.25, min_command_progress_ratio=None, resume_paused=False):
     teachers = {t: select_run(root, t)[0] for t in ('rough', 'backpack', 'amp')}
     if not all((p/'completed.json').is_file() for p in teachers.values()):
         raise RuntimeError('请先完成三个专家；尚未完成的任务可用“状态”查看。')
@@ -593,8 +593,9 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
                '--validation-rows-per-design-shard', str(validation_rows_per_design_shard),
                '--replay-cache-shards', str(replay_cache_shards),
                '--tracking-rel-tolerance', str(tracking_rel_tolerance),
-               '--min-command-progress-ratio', str(min_command_progress_ratio),
                '--timeout-seconds', '1800', '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100']
+    if min_command_progress_ratio is not None:
+        command.extend(['--min-command-progress-ratio', str(min_command_progress_ratio)])
     if (output/'manifest.json').is_file():
         command.append('--resume')
     if resume_paused:command.append('--resume-paused')
@@ -689,7 +690,8 @@ def main(argv=None):
     parser.add_argument('--tracking-abs-tolerance', type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument('--standing-speed-tolerance', type=float, default=None, help='已停用：共享策略已关闭站立指令并移除站立验收项')
     parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help=argparse.SUPPRESS)
-    parser.add_argument('--min-command-progress-ratio', type=float, default=.5, help='运动指令下实际进度与指令进度的最小比例')
+    parser.add_argument('--min-command-progress-ratio', type=float,
+                        help='实际进度与指令进度的最小比例（蒸馏默认 0.2，常规微调报告默认 0.5）')
     args = parser.parse_args(argv)
     if args.tracking_abs_tolerance is not None:
         parser.error('--tracking-abs-tolerance 已停用，选模按存活和前进行程判定')
@@ -738,7 +740,7 @@ def main(argv=None):
             parser.error('微调需要--candidate-design-id和正数更新预算')
         finetune(root,args.gpu,args.candidate_design_id,args.candidate_task,args.finetune_updates,
             args.dry_run,args.resume_paused,args.finetune_output,args.evaluation_profile,args.finetune_evaluation_seeds,
-            args.tracking_rel_tolerance,args.min_command_progress_ratio)
+            args.tracking_rel_tolerance,.5 if args.min_command_progress_ratio is None else args.min_command_progress_ratio)
         return
     ensure_banks(root, args.dry_run)
     if action == 'prepare':

@@ -7,6 +7,7 @@ import pytest
 
 def extension_fixture(tmp_path, monkeypatch):
     import dagger_continue as continuation
+    from evaluation import evaluation_criteria
 
     plan_path = tmp_path / "plan.json"
     plan_path.write_text("{}")
@@ -28,6 +29,7 @@ def extension_fixture(tmp_path, monkeypatch):
                      selection_profile="robust", randomization_strength=1.,
                      min_command_progress_ratio=.5, device="cuda:0")
     protocol = dict(collection_scope={"structure_keys": [key]}, selection_keys=[key],
+                    evaluation_criteria=evaluation_criteria(),
                     selection_seeds=seeds, selection=profile)
     source = dict(round_index=3, base=parent, student=str(actor), lineage=lineage,
                   data_paths=[old_replay], collector=parent, collection_protocol=profile,
@@ -84,6 +86,7 @@ def test_runs_only_next_round_at_full_strength_and_reuses_previous_data(tmp_path
     assert completed["round_index"] == 4
     assert completed["previous_student_sha256"] == module.sha(source["student"])
     assert completed["comparison_sha256"] == module.sha(output / "comparison.json")
+    assert module.read(output/"manifest.json")["selection_criteria"]["min_command_progress_ratio"] == .2
     assert calls[0][0] == "timer"
     assert calls[1] == ("collect", 4, 1., source["student"], 250, 3)
     assert calls[2] == ("fit", 4, source["student"], 10, [old_replay, str(output / "new/data.pt")], 2)
@@ -115,12 +118,13 @@ def test_existing_parent_cannot_be_used_as_output(tmp_path, monkeypatch):
         module.execute_continuation(args)
     assert calls == []
 
-def test_resume_accepts_only_the_known_cache_predecessor(tmp_path, monkeypatch):
+def test_resume_accepts_only_an_exact_historical_source_set(tmp_path, monkeypatch):
     module, args, _, calls, _ = extension_fixture(tmp_path, monkeypatch)
     module.execute_continuation(args)
     manifest = Path(args.output) / "manifest.json"
     frozen = json.loads(manifest.read_bytes())
-    frozen['sources']['dagger_continue.py'] = min(module.PRE_CACHE_FIX_SOURCES)
+    frozen.pop('selection_criteria')
+    frozen['sources'] = dict(module.PRE_LONG_REPLAY_SOURCES[0])
     manifest.write_text(json.dumps(frozen))
     original_bytes = manifest.read_bytes()
     args.resume = True
@@ -128,7 +132,7 @@ def test_resume_accepts_only_the_known_cache_predecessor(tmp_path, monkeypatch):
     assert manifest.read_bytes() == original_bytes
     assert len(calls) == 4
 
-    frozen['sources']['dagger_parent.py'] = '0' * 64
+    frozen['sources']['dagger_comparison.py'] = module.sha(module.HERE/'dagger_comparison.py')
     manifest.write_text(json.dumps(frozen))
     with pytest.raises(ValueError, match="frozen identity"):
         module.execute_continuation(args)

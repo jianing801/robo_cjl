@@ -1,0 +1,582 @@
+{
+  "evaluations": [
+    {
+      "policy": "teacher",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "dbbe631bf0b95d3484e9014ec98b5c9766ea080eee5fa968a3848eb40ba0275b",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261117/0000_stairs_teacher_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "7a93b9a6cb16aa30b8a08ee28849594e245f1b064d295f0eca95dbf95d8892ec",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261117/0000_stairs_teacher/attempt_20261122_005848_141289/summary.json",
+      "summary_sha256": "2455e3f52d3a5b2ea458f46aaa945282677a0dcc4b4eef3083aca7e0c44bf9b4"
+    },
+    {
+      "policy": "teacher",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "dbbe631bf0b95d3484e9014ec98b5c9766ea080eee5fa968a3848eb40ba0275b",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261119/0000_stairs_teacher_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "0dff022c55664d9096ff165458a3646db1262e52c93b3b598895bd8296a8c78c",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261119/0000_stairs_teacher/attempt_20261122_011157_484032/summary.json",
+      "summary_sha256": "8f6e7f25d1e1899173997548c4cab4c3132f2efa927cfb056bff549237e8f4b6"
+    },
+    {
+      "policy": "teacher",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "dbbe631bf0b95d3484e9014ec98b5c9766ea080eee5fa968a3848eb40ba0275b",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261120/0000_stairs_teacher_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "bfb0b0d510cb4926b5ab5459fc53bff656ed0c309d8561420e1f611f35651a78",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261120/0000_stairs_teacher/attempt_20261122_012518_858362/summary.json",
+      "summary_sha256": "e287ff0ca19f1b6265b416373ec016632db3b6ba270888a6d3b65c09ec5c719c"
+    },
+    {
+      "policy": "teacher",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "095c5d11147f0c1df52539157ca49f4a3254750bf4b6fc435e9481aa22b1d259",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261117/0001_backpack_teacher_horizontal_heading.json",
+      "receipt_sha256": "f664474a3d71cbee841c147a6e9e5ff8de03c0a222aa73a78e80e79f604e7600",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261117/0001_backpack_teacher/attempt_20261122_010308_251409/summary.json",
+      "summary_sha256": "cdb4a69c4211e91b7dccb4cc8e64a47e23192b157dd689b872bbe4c5c0d54efe"
+    },
+    {
+      "policy": "teacher",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "095c5d11147f0c1df52539157ca49f4a3254750bf4b6fc435e9481aa22b1d259",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261119/0001_backpack_teacher_horizontal_heading.json",
+      "receipt_sha256": "c893eafd69d60afe464ad58273fc22d19346252d4339891763ffbca0d463afdc",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261119/0001_backpack_teacher/attempt_20261122_011620_598776/summary.json",
+      "summary_sha256": "045354984ffd5bdc7f426c90429b49c007891004a3677b99477b0bb4879f191c"
+    },
+    {
+      "policy": "teacher",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "095c5d11147f0c1df52539157ca49f4a3254750bf4b6fc435e9481aa22b1d259",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261120/0001_backpack_teacher_horizontal_heading.json",
+      "receipt_sha256": "25130434705bfb9b88b6680305fb0b161c3ccb6621bb4e0af10a6215a70bca44",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261120/0001_backpack_teacher/attempt_20261122_012942_964871/summary.json",
+      "summary_sha256": "ab43e9270ca90c3f2e2bbf15ced4f37f5a89933566bf184dffcd06f17c78b733"
+    },
+    {
+      "policy": "teacher",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261117/0002_run_teacher_horizontal_heading.json",
+      "receipt_sha256": "c0496fc52ec6fa986a94e461071faca70522f531706f0147d05f948743f4ffdd",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261117/0002_run_teacher/attempt_20261122_010721_359596/summary.json",
+      "summary_sha256": "f70c6165cc3feb45425f80a76bbb46dbd99d88b6df0c27c7eaa17447a6476b8d"
+    },
+    {
+      "policy": "teacher",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261119/0002_run_teacher_horizontal_heading.json",
+      "receipt_sha256": "c23c03110a3382f0b7ab2f6c832785fc9f5e9038242f33790f4975b208951ece",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261119/0002_run_teacher/attempt_20261122_012040_709219/summary.json",
+      "summary_sha256": "a4568e35dc18b71184c640017bf2866f742a956517beeaf6874846b9f6f39f1e"
+    },
+    {
+      "policy": "teacher",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0",
+      "receipt": "shared_policy/evaluation_commits/selection/teacher/seed_20261120/0002_run_teacher_horizontal_heading.json",
+      "receipt_sha256": "1ac3fd05a180d968ca4967ceeb5fcb0e029457da72daa1c494fe8255d35c9eaa",
+      "summary": "shared_policy/evaluation/selection/teacher/seed_20261120/0002_run_teacher/attempt_20261122_013401_071255/summary.json",
+      "summary_sha256": "618e5e9b63b5620b3f0a5ea070d3fb15544f223825ef6f36ac6e71d6122665bd"
+    },
+    {
+      "policy": "round_1",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261117/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "ea6c0e79a3198af30c1b69f5336b7a3b057f3f45b12d61b2bcfa9deb33b9793b",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261117/0000_stairs_student/attempt_20261122_013839_238699/summary.json",
+      "summary_sha256": "bac124d172a89bdba4088484b04bda446e1fe5d8cd1e13a2914d3e4896cabaa7"
+    },
+    {
+      "policy": "round_1",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261119/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "278aff20021612097bfbdd19be551e61e888e4c96bde31e09a6c1bf4e22659a7",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261119/0000_stairs_student/attempt_20261122_015256_628859/summary.json",
+      "summary_sha256": "84a2c5d5d72c16bcab9e48e020c917f92f96b6e7e39122834f16b9985c5afb83"
+    },
+    {
+      "policy": "round_1",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261120/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "f71f143c4f22e7e03262724c876470b58561caefa7e3bde7783c4c0d107ce18b",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261120/0000_stairs_student/attempt_20261122_020716_032969/summary.json",
+      "summary_sha256": "b07ba85bb6382459e4144f03a6dcc89ae2388a98e710c59bc57d4abfcd8fb808"
+    },
+    {
+      "policy": "round_1",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261117/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "372e076a3880ec56a1c20d802b1c5d8ef56e150af5d3fc7cba5dd0a8f211bf70",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261117/0001_backpack_student/attempt_20261122_014314_366107/summary.json",
+      "summary_sha256": "0467c9f949dfe8e0f899865ac92f094ab72c77441172be7c2f1e0f0525831a88"
+    },
+    {
+      "policy": "round_1",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261119/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "32596c0e76c1e2f4e6695450a03f001e196f777828f2e4874127bddcf579f00c",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261119/0001_backpack_student/attempt_20261122_015731_749899/summary.json",
+      "summary_sha256": "cc3d2c3aad35fedc355f7374ef22ee6baff258ef81ebab9513460340481f6dfa"
+    },
+    {
+      "policy": "round_1",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261120/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "e792fcae56bebd9989898ead906d208b09aa828e0f02efec38c858734b476fcc",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261120/0001_backpack_student/attempt_20261122_021151_152407/summary.json",
+      "summary_sha256": "c9e175d1aeb9516852d00daad6cf69cb4f6b5f02e03fc4eedd22662977ce25b2"
+    },
+    {
+      "policy": "round_1",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261117/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "8304ad6b756aec934c8b753108c60235d15e1db114e8f8bc730ddbee94bfd7f5",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261117/0002_run_student/attempt_20261122_014752_483843/summary.json",
+      "summary_sha256": "6c43ff60d6a61f1bc9e6d650fc1f9abba3fc6710c7ad5c5e5b682495a6507735"
+    },
+    {
+      "policy": "round_1",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261119/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "3cb6cc1c3f4e295896a2a2023f3a3801686930c1ac795e66435b22802211d84f",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261119/0002_run_student/attempt_20261122_020211_868860/summary.json",
+      "summary_sha256": "1527dcea029d1dcc95b75e231b370e0ba54f89acd38a77bac96f9ccf0e07f31a"
+    },
+    {
+      "policy": "round_1",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "ea3b1332bdafa40c1b032f4041a2c9d27d46d3160508bc9b3f6d1f662599bb3e",
+      "receipt": "shared_policy/evaluation_commits/selection/round_1/seed_20261120/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "28bcb26016f2915e0438f55c3e676510b08e26e3b7a3edb809529486d6a42dd5",
+      "summary": "shared_policy/evaluation/selection/round_1/seed_20261120/0002_run_student/attempt_20261122_021631_285051/summary.json",
+      "summary_sha256": "09fed3fcf3fa887ccee9a58522073d774346d8a04ab078a212316cea4f3c920b"
+    },
+    {
+      "policy": "round_2",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261117/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "a9bc60b3e7073b5f1064eca3cc58a406845b16ec976d28b20cb33ddef6dfd9fb",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261117/0000_stairs_student/attempt_20261122_024000_939530/summary.json",
+      "summary_sha256": "04ea0c54847bb73b9612770c9a9a095b832163ad1343b04828a4c7d28c6131c6"
+    },
+    {
+      "policy": "round_2",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261119/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "14f224938f118e0a3fc1db454048c3aa8b2a04113978026979432a7106464cbf",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261119/0000_stairs_student/attempt_20261122_025327_365089/summary.json",
+      "summary_sha256": "0536627f37d4dd057afabe5cbebe350b4ed7bec47c9f307a261d0594990859ed"
+    },
+    {
+      "policy": "round_2",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261120/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "498922c480f35d433dde72f1ea52484673b99251eef99ea9fa3f3e672d8e6f32",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261120/0000_stairs_student/attempt_20261122_030659_745167/summary.json",
+      "summary_sha256": "84759c9b0517721182a2e01169bc6c284fe850b8be45effaa416dd8e804013a9"
+    },
+    {
+      "policy": "round_2",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261117/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "a94064074ed42fcce49c63299390c0da1f069491d80571a228f554223ed38509",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261117/0001_backpack_student/attempt_20261122_024425_056259/summary.json",
+      "summary_sha256": "eca37d831ee9c9c5167d9626498db63e344335c9e44246586bd7ba14de45ed62"
+    },
+    {
+      "policy": "round_2",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261119/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "294f8254735c539329c743ff417c0a3ce201d3a6a148663519510f12e7514eee",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261119/0001_backpack_student/attempt_20261122_025752_483224/summary.json",
+      "summary_sha256": "6b6e06fb98f92a999c0d62669b69ef9bbb518ac101fdf1cba994d11a76511153"
+    },
+    {
+      "policy": "round_2",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261120/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "93c9d12c50248d8152c3f50fb53ebe0864415a00be187754d7731cec79a97361",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261120/0001_backpack_student/attempt_20261122_031124_860334/summary.json",
+      "summary_sha256": "905b7e7c9d459848be17ee21852cfec8291a918bb499c97bce3a3d6a6ac2b812"
+    },
+    {
+      "policy": "round_2",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261117/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "09dcecf6cc1d2989fa1fe5abc09aeebb7757bb76d521354673276f67f9f1b120",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261117/0002_run_student/attempt_20261122_024844_172668/summary.json",
+      "summary_sha256": "453437ed95759e2bd28bfa28313cb96d48c44b5dd09b315389ab261448de51f2"
+    },
+    {
+      "policy": "round_2",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261119/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "270a6f68352ff8381e75cbc6fc59e22273bbbdc7bd5d89f4e0f3e77b5a679d3e",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261119/0002_run_student/attempt_20261122_030216_610156/summary.json",
+      "summary_sha256": "f958c90a5033da1689a4686486f5ce24a23337667d42fe448f75a4fba61cb97a"
+    },
+    {
+      "policy": "round_2",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "9d7683e35825e8de6a2c60ac59ad9e063a8deba29401d22d16feb44ca6cc69ec",
+      "receipt": "shared_policy/evaluation_commits/selection/round_2/seed_20261120/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "c899a9ee0174d8e023cef4506cda4197fc07238da3d1edbe2b092900b703b8a5",
+      "summary": "shared_policy/evaluation/selection/round_2/seed_20261120/0002_run_student/attempt_20261122_031546_980032/summary.json",
+      "summary_sha256": "60b5d7090294a5c2929683d04032664ded09c1c80703d59847cd97a19d32ecea"
+    },
+    {
+      "policy": "round_3",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261117/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "ac98fcd9ec91b0982dd275ed20517c367b177ea173226713925b4874b60cb369",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261117/0000_stairs_student/attempt_20261122_033914_731520/summary.json",
+      "summary_sha256": "064cff21680eca62c36965842ac97ec01c307135d778810918df31c570e338d7"
+    },
+    {
+      "policy": "round_3",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261119/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "f7a941a847473a3949745080e4e5ee79a74ab7882cb645435e639ea0f42f997a",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261119/0000_stairs_student/attempt_20261122_035243_098495/summary.json",
+      "summary_sha256": "85da7c13e2ee654f1aca42d59d8f5f4a76d3628e7b92e91946b0337567a94320"
+    },
+    {
+      "policy": "round_3",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261120/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "1c22c41e2e76fc7c91ee3cc48eb3699d5063caec1ec67995f81095d07f7e5b66",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261120/0000_stairs_student/attempt_20261122_042029_632545/summary.json",
+      "summary_sha256": "bbea37544403ee5a291c5c6f71a6ae14c97539f3bbb62dc418b44bcabc09b2ab"
+    },
+    {
+      "policy": "round_3",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261117/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "8dd84209c7f2b20c6e47f5ae2bdeac85d6c295f7f3578e7a11c927a2beaec87b",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261117/0001_backpack_student/attempt_20261122_034342_852158/summary.json",
+      "summary_sha256": "b9d1b5481e253837fab0705bc9b56ce671c3d6d6f5809188ed883281acc767aa"
+    },
+    {
+      "policy": "round_3",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261119/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "5ab1d21c14f5669d59c73621ba029a7d5c135968302f544be95cc2c6c17b7f53",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261119/0001_backpack_student/attempt_20261122_035711_215158/summary.json",
+      "summary_sha256": "b0bcc85d451965a8d2dbdeb8d34e72dfc00e6d1c4f0e41ca61a6cc1555a68ad3"
+    },
+    {
+      "policy": "round_3",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261120/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "877e2e374698c187d9abba2047398708eb98ab1fab27efc874643a1b4988cf69",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261120/0001_backpack_student/attempt_20261122_042606_026675/summary.json",
+      "summary_sha256": "260eef645798d1753f6c8a9b85149b4c50722ff5115e61e1fae383ea8ff1cdeb"
+    },
+    {
+      "policy": "round_3",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261117/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "abc6429e314dc6e202816a0fd949c0d1487922ebf0788aa10242ed7d1ee6ea38",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261117/0002_run_student/attempt_20261122_034800_968579/summary.json",
+      "summary_sha256": "f0e0bcbd04726002f782a1b760307ecb2dec045d1fb1e70cc1a67422de7741b4"
+    },
+    {
+      "policy": "round_3",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261119/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "0bb051cc4e61f7d90b43fbdd20892bf8c5e08d8847ca78db24494a9a7201f810",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261119/0002_run_student/attempt_20261122_040133_329512/summary.json",
+      "summary_sha256": "e00268c0677eeeac7b63898509a018aa9a67881c1f94d65c89249958ae946efe"
+    },
+    {
+      "policy": "round_3",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "fae0a8638e04a5fed1cd70852fc277271a3ae550a3a3e98a72273103dcb88b5d",
+      "receipt": "shared_policy/evaluation_commits/selection/round_3/seed_20261120/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "d4de5a8623f36f42a6713b99c3d25ba79f35d573f966bb4aa64b66daf19736ba",
+      "summary": "shared_policy/evaluation/selection/round_3/seed_20261120/0002_run_student/attempt_20261122_043027_152766/summary.json",
+      "summary_sha256": "054a008069b3523ac39ee2ffdef671e3290131f26f83817c81d803aef93ea45c"
+    },
+    {
+      "policy": "round_4",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261117/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "8d2e92106089f022ca7833df3db508e42ac29892b120a129b1a38a92ae1c7802",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261117/0000_stairs_student/attempt_20261122_134308_131309/summary.json",
+      "summary_sha256": "cd77afe3a9b799e2c844c974f5465e57d01d8b0c925501e0e3d40511dd56cad6"
+    },
+    {
+      "policy": "round_4",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261119/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "239d68c58e1a8aec0b9362bd76eb4e221798639cf809fadd470823626d344b5c",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261119/0000_stairs_student/attempt_20261122_135639_620985/summary.json",
+      "summary_sha256": "d9b2e7757d4cce56796cdebdebe27dbad9cefcc7c7ff67088941e06d4f20e010"
+    },
+    {
+      "policy": "round_4",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261120/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "3ebb2e1b1c6113b2a9fa189954e3e7838c7f4a798da577fda38d3ce2c728ddfc",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261120/0000_stairs_student/attempt_20261122_141029_014861/summary.json",
+      "summary_sha256": "072a41bfe53c6bbe73de055f1c5700c5bfb6c206bebc8ff34632daf2d16a04da"
+    },
+    {
+      "policy": "round_4",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261117/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "9a0eebb1a189633a1e359a031b8fd3aa910e3c1771a65c0b0464f80a8056f86b",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261117/0001_backpack_student/attempt_20261122_134737_262044/summary.json",
+      "summary_sha256": "2e9f1a4dff2fc6e60db6efb16ec2becb17e11578cf8e3f7d5b3f8d6c47e067dc"
+    },
+    {
+      "policy": "round_4",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261119/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "321d4dadbe7eb1ac4c4a14f1827d196bfa963e793d8ed63b15099545b1a32a9e",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261119/0001_backpack_student/attempt_20261122_140116_747260/summary.json",
+      "summary_sha256": "8ed0f50a4c67c90153e691ce675ac96d2fae51b8f479c6895a7489035e6f7145"
+    },
+    {
+      "policy": "round_4",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261120/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "70ffa7f83b1715656b4cd11bf856fb72c49e36ce7026d0b910fc479b9cf135d2",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261120/0001_backpack_student/attempt_20261122_141507_139290/summary.json",
+      "summary_sha256": "1244d82d4231af7e3e4696724264b32cb3b534621396651fcb3d881e4e35648a"
+    },
+    {
+      "policy": "round_4",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261117/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "30701d78a43cb2e88e59e0db5167201662978469ee23f031489f5edffd0020a5",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261117/0002_run_student/attempt_20261122_135158_381040/summary.json",
+      "summary_sha256": "e15d0909b36462347f790121039d96fa90a539525a828f59fa97f3ca1c295a08"
+    },
+    {
+      "policy": "round_4",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261119/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "bb8d30256f7f0e4da436fca45b72878f26499930048b5bdfd1e0153a3e2e5fc8",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261119/0002_run_student/attempt_20261122_140544_869434/summary.json",
+      "summary_sha256": "60583daff5bd20090de833b4193989a4aa298d8b960fc5aba19573ec18ce5a4b"
+    },
+    {
+      "policy": "round_4",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "22cf9642f320b486236a039e417de623f55ef570dd9463e20f29f4dc11a1b5aa",
+      "receipt": "shared_policy_round4/evaluation_commits/selection/round_4/seed_20261120/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "45f554e352c19f24f3f8628ecddd88aac6993ed87132f18431afb58ce01c2c12",
+      "summary": "shared_policy_round4/evaluation/selection/round_4/seed_20261120/0002_run_student/attempt_20261122_141929_256730/summary.json",
+      "summary_sha256": "6f5b65d7763e65bd36ba788b004e1f0d48c5e8d4893d352813e961ffa13932df"
+    },
+    {
+      "policy": "round_5",
+      "task": "stairs",
+      "seed": 20261117,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261117/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "66b65c8c1764200633b10501fa125453fe253621deea6dadd0334e748120bafc",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261117/0000_stairs_student/attempt_20261122_170825_207903/summary.json",
+      "summary_sha256": "3bc3886ee7df61f7a4ab1a64427be8c90affc2b774daab2e37eb527891983869"
+    },
+    {
+      "policy": "round_5",
+      "task": "stairs",
+      "seed": 20261119,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261119/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "02046540d3f08793bbbfd7a7a3fe186803078311dc2dec80b5e2dcee3cc82eef",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261119/0000_stairs_student/attempt_20261122_172140_580945/summary.json",
+      "summary_sha256": "9ee4df42972c166249617864b8ef662c667e00c555adfc26bd86923b353ce7ac"
+    },
+    {
+      "policy": "round_5",
+      "task": "stairs",
+      "seed": 20261120,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261120/0000_stairs_student_bottom_start_long_stairs_horizontal_heading.json",
+      "receipt_sha256": "6ce4f93ece966001aba4a6dca3943a3731a3405700121f6f6282a27c23a46fef",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261120/0000_stairs_student/attempt_20261122_173459_953625/summary.json",
+      "summary_sha256": "808ce12bb4b39ad81dd413f83080b868556823a048dfb692e25db81b2289b4a9"
+    },
+    {
+      "policy": "round_5",
+      "task": "backpack",
+      "seed": 20261117,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261117/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "a304a221c8d8273271345008d998bf2a696c91c5c9bbf59f347cd0692f9c3c7d",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261117/0001_backpack_student/attempt_20261122_171243_323912/summary.json",
+      "summary_sha256": "d660d2ff0cf29db9b491d176f4b2aaf20cc58efdca18a8c5526e0f7a95c8824e"
+    },
+    {
+      "policy": "round_5",
+      "task": "backpack",
+      "seed": 20261119,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261119/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "d8b3109ae456e3c9823b77835eaee556390f29968c00e077d438d8290c462d70",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261119/0001_backpack_student/attempt_20261122_172557_702349/summary.json",
+      "summary_sha256": "f1f0e0d3047109b36f68bbd3d7b7f97a1db3e70377546177f5e38308695d546f"
+    },
+    {
+      "policy": "round_5",
+      "task": "backpack",
+      "seed": 20261120,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261120/0001_backpack_student_horizontal_heading.json",
+      "receipt_sha256": "85b2714e10a6641f45b3bbb4460df0edfe56eaeebefa8ba5d490fef0823bebce",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261120/0001_backpack_student/attempt_20261122_173919_069839/summary.json",
+      "summary_sha256": "0cdf60153a07ce2c56a60598f6d55ea45f46234e128b7453ddf207dd22e6e949"
+    },
+    {
+      "policy": "round_5",
+      "task": "run",
+      "seed": 20261117,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261117/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "b3569bc6554993163dc9975862223c02023b31004a36f2cec0fa17c01c675427",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261117/0002_run_student/attempt_20261122_171701_441056/summary.json",
+      "summary_sha256": "20c62b6d161cf3350fd601faf7e167593046c40ce9885bfd229203b4fe962a56"
+    },
+    {
+      "policy": "round_5",
+      "task": "run",
+      "seed": 20261119,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261119/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "1a499a14628d0cd0b0d7da36f296ecf1888e886009dd2aa383c2a117753fe925",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261119/0002_run_student/attempt_20261122_173020_819953/summary.json",
+      "summary_sha256": "cb9bc052abc1f4b4bccc5bd5f91e9a3ba8f1d80921ede06451e9f584f3d9dea8"
+    },
+    {
+      "policy": "round_5",
+      "task": "run",
+      "seed": 20261120,
+      "actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+      "receipt": "shared_policy_round5/evaluation_commits/selection/round_5/seed_20261120/0002_run_student_horizontal_heading.json",
+      "receipt_sha256": "d8f81f13f559ef121cfba95a0109819795c2bc8799171def06de93a7848cd5ff",
+      "summary": "shared_policy_round5/evaluation/selection/round_5/seed_20261120/0002_run_student/attempt_20261122_174339_188423/summary.json",
+      "summary_sha256": "d20b148137b79bac7c7a18567aeb092a6f1a9ff194008384a656c6113619e314"
+    }
+  ],
+  "profile": "robust",
+  "strength": 1.0,
+  "seeds": [
+    20261117,
+    20261119,
+    20261120
+  ],
+  "stair_course": "bottom_start_long_stairs",
+  "velocity_frame": "horizontal_heading",
+  "criteria": {
+    "version": "continuous_locomotion_progress_v4",
+    "duration_s": 20.0,
+    "time_tolerance_s": 0.1,
+    "min_command_progress_ratio": 0.2,
+    "max_missing_tracking_steps": 1,
+    "success_scope": "initial-episode survival and continuous forward progress",
+    "command_scope": "continuous locomotion; standing commands are disabled",
+    "progress_scope": "integrated forward speed along commanded direction, only while abs(commanded vx) > 0.05 m/s",
+    "active_command_threshold_m_s": 0.05,
+    "speed_summary": "signed progress divided by measured time and commanded distance divided by command exposure time",
+    "profiles": "same survival and progress criteria for nominal and robust"
+  },
+  "plan_sha256": "6be54ff434b89da4ffab8b4a67ff0658f3cd9f053ffecf67641b8ab2614e3c3e",
+  "round5_checkpoint_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+  "round5_active_time": "01:22:25",
+  "selection_rule": "maximize equal-task and equal-structure 20% task success; ties favor earlier round",
+  "mean_task_success_rate": {
+    "teacher": 0.9857638888888889,
+    "round_1": 0.4325,
+    "round_2": 0.9220138888888889,
+    "round_3": 0.9425694444444445,
+    "round_4": 0.9501388888888889,
+    "round_5": 0.9757638888888889
+  },
+  "selected_round": 5,
+  "structure_count": 200,
+  "episodes_per_design_seed_task_policy": 8,
+  "source_experiment": "shared-distill-20261121"
+}

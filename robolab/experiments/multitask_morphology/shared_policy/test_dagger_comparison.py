@@ -28,7 +28,7 @@ def _episode(environment, design, speed, seconds):
     )
 
 
-def _report(round_index, observations):
+def _report(round_index, observations, *, progress_ratio=.5):
     protocol = dict(profile='robust', version='test', protocol_hash='test', strength=1.)
     records = []
     for seed, samples in zip(SEEDS, observations, strict=True):
@@ -37,7 +37,8 @@ def _report(round_index, observations):
                     for i, (design, sample) in enumerate(zip(designs, samples, strict=True))]
             records.append(dict(
                 task=task, seed=seed, profile='robust', evaluation_protocol=protocol,
-                velocity_frame=EVALUATION_VELOCITY_FRAME, **evaluation_statistics(task, rows, 'robust'),
+                velocity_frame=EVALUATION_VELOCITY_FRAME,
+                **evaluation_statistics(task, rows, 'robust', min_command_progress_ratio=progress_ratio),
             ))
     return dict(
         round_index=round_index, student=f'round_{round_index}.pt',
@@ -96,6 +97,14 @@ def test_tied_rank_retains_the_incumbent_even_with_higher_speed():
     assert result['selected_student'] == previous['student']
     assert result['selected_student_sha256'] == previous['student_sha256']
     assert result['strictly_improves_incumbent'] is False
+
+
+def test_success_rate_tie_ignores_better_survival_on_failed_episodes():
+    previous = _report(3, [((.4, 20), (.05, 10))] * len(SEEDS))
+    candidate = _report(4, [((.4, 20), (.05, 20))] * len(SEEDS))
+    result = _compare(candidate, previous)
+    assert result['selected_round'] == 3
+    assert result['tasks']['run']['all']['delta_vs_previous']['survival_rate'] == .5
 
 
 def test_candidate_can_improve_on_previous_round_without_beating_incumbent():
