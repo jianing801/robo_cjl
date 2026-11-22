@@ -126,10 +126,12 @@ def execute_continuation(args):
 
     start_task_timer(path.parent.parent, 'distill', root, None, started_wall, started_monotonic,
                      start_source='distill.py --continue-from')
-    collection_ids = design_ids_for_keys(plan, protocol['collection_scope']['structure_keys'])
+    collection_keys = list(map(tuple, protocol['collection_scope']['structure_keys']))
+    collection_ids = design_ids_for_keys(plan, collection_keys)
     collection_jobs = jobs_for(plan, 400, collection_ids)
-    selection_ids = design_ids_for_keys(plan, protocol['selection_keys'])
-    selection_jobs = jobs_for(plan, len(protocol['selection_keys']), selection_ids)
+    selection_keys = list(map(tuple, protocol['selection_keys']))
+    selection_ids = design_ids_for_keys(plan, selection_keys)
+    selection_jobs = jobs_for(plan, len(selection_keys), selection_ids)
     seeds = protocol['selection_seeds']
     criteria = dict(duration_s=20., time_tolerance_s=.1, max_missing_tracking_steps=1,
                     min_command_progress_ratio=a.min_command_progress_ratio)

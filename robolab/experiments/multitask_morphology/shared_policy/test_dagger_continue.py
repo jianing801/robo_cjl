@@ -39,8 +39,10 @@ def extension_fixture(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(continuation, "load_plan", lambda _: plan)
     monkeypatch.setattr(continuation, "load_parent", lambda folder, *a, **kwargs: {**source, "round_index": 4} if folder == root else source)
-    monkeypatch.setattr(continuation, "design_ids_for_keys",
-                        lambda _p, _keys: {t: [t] for t in tasks})
+    def physical_ids(_plan, keys):
+        assert keys == [tuple(key)]
+        return {t: [t] for t in tasks}
+    monkeypatch.setattr(continuation, "design_ids_for_keys", physical_ids)
     monkeypatch.setattr(continuation, "jobs_for", lambda *_: [(t, [t]) for t in tasks])
     monkeypatch.setattr(continuation, "verify_selection_history",
                         lambda *a, **kwargs: (report["task_metrics"], candidate, candidate))
