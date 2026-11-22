@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from mixed_batch import advance, task_counts
+from mixed_batch import advance, initialize_episode_length, task_counts
 
 
 def test_fixed_mixed_layout():
@@ -11,6 +11,17 @@ def test_fixed_mixed_layout():
     assert task_counts(4096) == (1366, 1365, 1365)
     with pytest.raises(ValueError):
         task_counts(2)
+
+
+def test_episode_counter_initialization_matches_native_rsl_rl():
+    counters = torch.zeros(32, dtype=torch.long)
+    with torch.random.fork_rng():
+        torch.manual_seed(7)
+        expected = torch.randint_like(counters, high=1000)
+        torch.manual_seed(7)
+        initialize_episode_length(counters, 1000)
+    torch.testing.assert_close(counters, expected)
+    assert counters.unique().numel() > 1
 
 
 def test_each_native_scene_writes_before_one_shared_physics_tick():

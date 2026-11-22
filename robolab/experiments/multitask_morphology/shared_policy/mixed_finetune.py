@@ -15,7 +15,7 @@ from contract import load_plan, sha, write_new
 from finetune_settings import PPO_SCHEDULE
 from finetune_state import select_candidate, save_checkpoint
 from joint_finetune import ACTION_STD, STEPS_PER_TASK, check_pause, ppo_update, publish_training_completion
-from mixed_batch import advance, task_counts
+from mixed_batch import advance, initialize_episode_length, task_counts
 from randomization import protocol_metadata, assert_protocol_unchanged
 from student import load_student
 from training_reward import RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv, write_training_reward_csv
@@ -146,6 +146,15 @@ def train(a, root, plan, candidate, protocol, counts):
         torch.nn.Linear(256, 128), torch.nn.ELU(), torch.nn.Linear(128, 1)).to(a.device)
     optimizer = torch.optim.Adam([{'params': model.parameters(), 'lr': 3e-6},
                                   {'params': critic.parameters(), 'lr': 1e-3}])
+    if a.init_at_random_ep_len:
+        for task in tasks:
+            initialize_episode_length(task.raw.episode_length_buf, task.raw.max_episode_length)
+    write_new(root/'episode_start.json', {
+        task.name: dict(min_step=int(task.raw.episode_length_buf.min()),
+                        max_step=int(task.raw.episode_length_buf.max()),
+                        distinct_steps=task.raw.episode_length_buf.unique().numel(),
+                        max_episode_steps=int(task.raw.max_episode_length))
+        for task in tasks})
     digest = sha(root/'manifest.json')
     write_new(root/'mixed_scene.json', dict(physics_scenes=1, pid=os.getpid(),
               tasks={task.name: dict(envs=task.raw.num_envs, scope=task.raw.scene.scope,
@@ -189,6 +198,8 @@ def main():
     parser.add_argument('--design-id', required=True)
     parser.add_argument('--num-envs', type=int, default=4096)
     parser.add_argument('--updates', type=int, default=100)
+    parser.add_argument('--init-at-random-ep-len', action='store_true',
+                        help='Use ordinary RSL-RL episode counter initialization before the first update')
     parser.add_argument('--seed', type=int, default=20261104)
     parser.add_argument('--profile', choices=('nominal', 'robust'), default='robust')
     parser.add_argument('--randomization-strength', type=float, default=1.)
@@ -208,6 +219,7 @@ def main():
     write_new(root/'manifest.json', dict(kind='shared_candidate_finetuning_mixed_pilot',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
+              init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
               sources={name: sha(HERE/name) for name in files}))
     write_new(root/'plan.json', plan)
