@@ -101,7 +101,7 @@ def test_no_legacy_runtime_paths_or_historical_258_width():
 
 def test_three_task_shared_routing_and_mlp():
     source = (HERE/'shared_policy/pipeline.py').read_text()
-    assert "'rollout_amp.py' if task=='run'" in source
+    assert "'rollout_amp.py' if task == 'run'" in ast.unparse(ast.parse(source))
     assert "'--architecture','mlp'" in source
     assert "for index,(task,ids) in enumerate(collection_jobs):" in source
     assert "'--max-rows-per-design-shard'" in source
