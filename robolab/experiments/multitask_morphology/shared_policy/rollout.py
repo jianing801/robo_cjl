@@ -172,7 +172,12 @@ def prepare_rollout(argv=None, *, mixed_count=None):
     p.add_argument('--reset-yaw-range',type=float,default=.05,
         help='Explicit initial yaw coverage for real demonstrations; nominal evaluation remains .05 rad')
     from isaaclab.app import AppLauncher
-    AppLauncher.add_app_launcher_args(p)
+    if mixed_count is None:
+        AppLauncher.add_app_launcher_args(p)
+    else:
+        p.add_argument('--headless', action='store_true')
+        p.add_argument('--device', default='cuda:0')
+        p.set_defaults(kit_args=None)
     args=p.parse_args(argv)
     if args.video:args.enable_cameras=True
     if min(args.steps,args.stride)<1 or not 0<=args.reset_yaw_range<=.5:raise ValueError('Positive finite sampling budget and bounded reset distribution required')
@@ -529,6 +534,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                 **({'velocity_frame': velocity_frame} if velocity_frame else {}),
                 data=str(output/'data.pt') if args.mode=='collect' else None))
             exit_code=0
+    except GeneratorExit:
+        raise
     except BaseException:
         write_new(output/'failure.json',dict(traceback=traceback.format_exc()))
         if mixed_count is not None:

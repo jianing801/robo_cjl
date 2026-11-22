@@ -29,7 +29,13 @@ def prepare_rollout(argv=None, *, mixed_count=None):
     p.add_argument('--full-body-torque',action='store_true')
     p.add_argument('--video',action='store_true')
     p.add_argument('--bo-conditions', help='Collect independent fixed-condition BO measurements')
-    AppLauncher.add_app_launcher_args(p);a=p.parse_args(argv)
+    if mixed_count is None:
+        AppLauncher.add_app_launcher_args(p)
+    else:
+        p.add_argument('--headless', action='store_true')
+        p.add_argument('--device', default='cuda:0')
+        p.set_defaults(kit_args=None)
+    a=p.parse_args(argv)
     if a.video:a.enable_cameras=True
     if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
     plan=load_plan(a.plan);spec=plan['teachers']['run'];code=Path(spec['code_root'])
@@ -278,6 +284,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                 teacher_updates=0,reference_routing_verified=True,history_adapter_live_verified=True))
             write_new(out/'reference_cache_stats.json',dict(hits=routing.hits,misses=routing.misses))
             status=0
+    except GeneratorExit:
+        raise
     except BaseException:
         write_new(out/'failure.json',dict(traceback=traceback.format_exc()))
         if mixed_count is not None:
