@@ -136,21 +136,23 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
     assert objective(report, bo.calibrate(report, dict(name='fixture')))['mean_objective'] == pytest.approx(1)
 
 
-@pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused'), [
-    (100, None, False, False), (200, None, True, False),
-    (200, False, False, False), (200, True, True, False),
-    pytest.param(200, None, True, True, id='manual-resume-fresh-tuning'),
-    pytest.param(200, True, True, True, id='manual-resume-existing-tuning'),
+@pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused', 'old_bo'), [
+    (100, None, False, False, False), (200, None, True, False, False),
+    (200, False, False, False, False), (200, True, True, False, False),
+    pytest.param(200, None, True, True, False, id='manual-resume-fresh-tuning'),
+    pytest.param(200, True, True, True, False, id='manual-resume-existing-tuning'),
+    pytest.param(200, True, True, False, 'pending', id='reuse-frozen-bo-manifest'),
+    pytest.param(200, True, True, False, 'legacy', id='reuse-legacy-diagnostics-and-formal-measurements'),
 ])
 def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
-        tmp_path, monkeypatch, updates, frozen_compaction, expect_compact, resume_paused):
+        tmp_path, monkeypatch, updates, frozen_compaction, expect_compact, resume_paused, old_bo):
     import finetune_state
     from robolab import rough_gpu
 
     source, initial, conditions_path = (tmp_path/name for name in ('shared_plan.json', 'actor.pt', 'conditions.json'))
     source.write_text('{}')
     initial.write_bytes(b'initial')
-    conditions = dict(seeds=[9], copies=2, duration_s=.08)
+    conditions = dict(seeds=[9, 19, 29], copies=2, duration_s=.08)
     conditions_path.write_text(json.dumps(conditions))
     plan = dict(teachers={task: dict(design_ids=[task+'id'], bank_sha256=task, full_body_torque=True)
                           for task in bo.TASKS})
@@ -174,6 +176,19 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     if resume_paused:
         out.mkdir(exist_ok=True)
         (out/'USER_PAUSED').touch()
+    if old_bo:
+        sources = {name: bo.sha(bo.SHARED/name) for name in (
+            'bo_capture.py', 'shared_bo_metrics.py', 'stair_course.py', 'rollout.py', 'rollout_amp.py')}
+        sources['bo.py'] = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
+        (out/'manifest.json').write_text(json.dumps(dict(kind='rpo_bo_candidate_v1', candidate=candidate,
+            source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial), conditions_sha256=digest(conditions),
+            updates=updates, sources=sources), indent=3))
+        original_manifest = (out/'manifest.json').read_bytes()
+    if old_bo == 'legacy':
+        (tuning/'plan.json').write_text(json.dumps(plan))
+        actor = tuning/'shared_actor_finetuned.pt'
+        actor.write_bytes(b'finetuned')
+        write_legacy_completion(tuning, candidate, updates, actor)
 
     def worker(command, _folder, _env, _timeout, _root):
         def arg(name):
@@ -183,18 +198,15 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
         if Path(command[2]).name == 'finetune.py':
             calls.append('finetune')
             assert arg('--updates') == str(updates)
+            assert '--training-only' in command
             assert ('--compact-training-artifacts' in command) is expect_compact
             assert ('--resume' in command) is (frozen_compaction is not None)
             assert ('--resume-paused' in command) is (resume_paused and frozen_compaction is not None)
             (out/'manifest.json').write_text(json.dumps(manifest))
             (out/'plan.json').write_text(json.dumps(plan))
-            actor, tracking = out/'finetuned.pt', out/'candidate_result.json'
+            actor = out/'shared_actor_finetuned.pt'
             actor.write_bytes(b'finetuned')
-            tracking.write_text('{}')
-            (out/'completed.json').write_text(json.dumps(dict(result='CANDIDATE_FINETUNED_EVALUATED',
-                candidate=candidate, ppo_updates=updates, manifest_sha256=bo.sha(out/'manifest.json'),
-                student=str(actor), student_sha256=bo.sha(actor), evaluation=str(tracking),
-                evaluation_sha256=bo.sha(tracking))))
+            write_training_completion(out, candidate, updates, actor)
         else:
             task = arg('--task') if '--task' in command else 'run'
             calls.append(task)
@@ -203,7 +215,8 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
             trace.write_bytes(b'test-trace')
             (out/'summary.json').write_text('{}')
             (out/'bo_trials.json').write_text(json.dumps(dict(kind=TRIAL_VERSION, task=task,
-                design_id=arg('--design-ids'), bank_sha256=task, seed=9, trace=str(trace), trace_sha256=bo.sha(trace),
+                design_id=arg('--design-ids'), bank_sha256=task, seed=int(arg('--seed')), trace=str(trace),
+                trace_sha256=bo.sha(trace),
                 conditions_sha256=digest(conditions), actor_sha256=bo.sha(arg('--student')),
                 plan_sha256=bo.sha(arg('--plan')), trials=[dict(replica=i, **trial(task)) for i in range(2)])))
 
@@ -217,12 +230,89 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     bo.main(args)
     assert not (out/'USER_PAUSED').exists()
     first = bo.read(out/'bo_evaluation.json')
-    assert calls == ['finetune', *bo.TASKS]
+    if old_bo:
+        assert (out/'manifest.json').read_bytes() == original_manifest
+        assert first['evaluation_manifest_sha256'] == bo.sha(out/'manifest.json')
+    expected_calls = [] if old_bo == 'legacy' else ['finetune']
+    expected_calls.extend(task for seed in conditions['seeds'] for task in bo.TASKS)
+    assert calls == expected_calls
+    assert len(list((out/'measurements').glob('*/accepted.json'))) == 9
     assert first['ppo_updates'] == updates
     assert all(pair['feasible'] for pair in first['pairs'])
-    bo.main(args)
+    frozen_report = (out/'bo_evaluation.json').read_bytes()
+    bo.main([*args, '--finetuned', str(tuning)])
     assert bo.read(out/'bo_evaluation.json') == first
-    assert calls == ['finetune', *bo.TASKS]
+    assert (out/'bo_evaluation.json').read_bytes() == frozen_report
+    assert calls == expected_calls
+
+
+def test_frozen_bo_manifest_only_allows_the_previous_bo_source(tmp_path):
+    path = tmp_path/'manifest.json'
+    identity = dict(updates=200, sources={'bo.py': 'current', 'rollout.py': 'unchanged'})
+    path.write_text(json.dumps(dict(identity, sources={
+        'bo.py': bo.PRE_TRAINING_ONLY_BO_SHA256, 'rollout.py': 'different'})))
+    with pytest.raises(ValueError, match='Frozen BO identity differs'):
+        bo.freeze_candidate_manifest(path, identity)
+
+
+def write_legacy_completion(root, candidate, updates, actor):
+    evaluation = root/'candidate_result.json'
+    evaluation.write_bytes(b'diagnostics')
+    (root/'completed.json').write_text(json.dumps(dict(result='CANDIDATE_FINETUNED_EVALUATED',
+        candidate=candidate, ppo_updates=updates, manifest_sha256=bo.sha(root/'manifest.json'),
+        student=str(actor), student_sha256=bo.sha(actor), evaluation=str(evaluation),
+        evaluation_sha256=bo.sha(evaluation))))
+    return evaluation
+
+
+def write_training_completion(root, candidate, updates, actor):
+    checkpoint_dir = root/'checkpoints'
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir/f'update_{updates:06d}.json'
+    blob = checkpoint_dir/f'update_{updates:06d}_fixed.pt'
+    blob.write_bytes(b'learning state')
+    manifest_hash = bo.sha(root/'manifest.json')
+    checkpoint.write_text(json.dumps(dict(completed_updates=updates, manifest_sha256=manifest_hash,
+                                          path=blob.name, sha256=bo.sha(blob))))
+    (root/'training_completed.json').write_text(json.dumps(dict(result='CANDIDATE_FINETUNED',
+        candidate=candidate, ppo_updates=updates, manifest_sha256=manifest_hash, student=str(actor),
+        student_sha256=bo.sha(actor), checkpoint_sha256=bo.sha(checkpoint))))
+    return checkpoint, blob
+
+
+@pytest.mark.parametrize('tampered', [None, 'state', 'outside', 'actor', 'legacy', 'legacy-diagnostics'])
+def test_completed_actor_validates_checkpoint_and_keeps_legacy_diagnostics_compatible(tmp_path, tampered):
+    root = tmp_path/'tuning'
+    root.mkdir()
+    source, initial, actor = tmp_path/'plan.json', tmp_path/'initial.pt', root/'shared_actor_finetuned.pt'
+    source.write_bytes(b'plan')
+    initial.write_bytes(b'initial')
+    actor.write_bytes(b'actor')
+    candidate = dict(design_ids={'stairs': 'one'})
+    updates = 200
+    manifest = dict(candidate=candidate, updates=updates, plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial))
+    (root/'manifest.json').write_text(json.dumps(manifest))
+    if tampered in ('legacy', 'legacy-diagnostics'):
+        evaluation = write_legacy_completion(root, candidate, updates, actor)
+        if tampered == 'legacy-diagnostics':
+            evaluation.write_bytes(b'replaced diagnostics')
+    else:
+        checkpoint, blob = write_training_completion(root, candidate, updates, initial if tampered == 'actor' else actor)
+        if tampered == 'state':
+            blob.write_bytes(b'replaced state')
+        elif tampered == 'outside':
+            outside = root/'outside.pt'
+            outside.write_bytes(blob.read_bytes())
+            checkpoint.write_text(json.dumps(dict(bo.read(checkpoint), path='../outside.pt')))
+            complete = root/'training_completed.json'
+            complete.write_text(json.dumps(dict(bo.read(complete), checkpoint_sha256=bo.sha(checkpoint))))
+    expected_error = {'state': 'checkpoint', 'outside': 'checkpoint', 'actor': 'canonical',
+                      'legacy-diagnostics': 'candidate evaluation'}.get(tampered)
+    if expected_error:
+        with pytest.raises(ValueError, match=expected_error):
+            bo.completed_actor(root, source, initial, candidate, updates)
+    else:
+        assert bo.completed_actor(root, source, initial, candidate, updates) == actor
 
 
 def test_post_finetune_panel_uses_structure_means_and_frozen_weights():

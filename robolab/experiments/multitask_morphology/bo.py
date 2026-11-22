@@ -14,6 +14,7 @@ SHARED = HERE/'shared_policy'
 DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
 DEFAULT_BO_UPDATES = 200
+PRE_TRAINING_ONLY_BO_SHA256 = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
@@ -38,6 +39,16 @@ def freeze(path, data):
             raise ValueError(f'Frozen BO identity differs: {path}')
     else:
         write_new(path, data)
+
+
+def freeze_candidate_manifest(path, identity):
+    # Preserve existing measurement provenance across the removal of optional diagnostics.
+    if path.is_file():
+        previous_sources = dict(identity['sources'])
+        previous_sources['bo.py'] = PRE_TRAINING_ONLY_BO_SHA256
+        if read(path) == dict(identity, sources=previous_sources):
+            return
+    freeze(path, identity)
 
 
 def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
@@ -106,20 +117,46 @@ def shared_input(root, *, formal=False, require_horizontal_selection=False):
     return path, plan, student
 
 
+def actor_receipt(root):
+    training = root/'training_completed.json'
+    return training if training.is_file() else root/'completed.json'
+
+
 def completed_actor(root, source_plan, initial, candidate, updates):
     manifest_path = root/'manifest.json'
-    complete = read(root/'completed.json')
+    receipt = actor_receipt(root)
+    complete = read(receipt)
     manifest = read(manifest_path)
     actor = Path(complete['student'])
-    if (complete.get('result') != 'CANDIDATE_FINETUNED_EVALUATED'
-            or complete['manifest_sha256'] != sha(manifest_path)
+    manifest_hash = sha(manifest_path)
+    training_only = receipt.name == 'training_completed.json'
+    expected_result = 'CANDIDATE_FINETUNED' if training_only else 'CANDIDATE_FINETUNED_EVALUATED'
+    if training_only:
+        root = root.resolve()
+        if actor != root/'shared_actor_finetuned.pt' or actor.resolve() != actor:
+            raise ValueError('Fine-tuned actor is outside its canonical tuning output')
+    if (complete.get('result') != expected_result
+            or complete['manifest_sha256'] != manifest_hash
             or manifest['plan_sha256'] != sha(source_plan)
             or manifest['initial_actor_sha256'] != sha(initial)
             or complete['candidate'] != candidate or manifest['candidate'] != candidate
             or complete['ppo_updates'] != updates or manifest['updates'] != updates
-            or sha(actor) != complete['student_sha256']
-            or sha(complete['evaluation']) != complete['evaluation_sha256']):
+            or sha(actor) != complete['student_sha256']):
         raise ValueError('Fine-tuned candidate/actor identity or PPO budget does not match')
+    if training_only:
+        folder = root/'checkpoints'
+        receipt = folder/f'update_{updates:06d}.json'
+        if (folder.resolve() != folder or receipt.resolve() != receipt or not receipt.is_file()
+                or sha(receipt) != complete['checkpoint_sha256']):
+            raise ValueError('Fine-tuned PPO checkpoint receipt changed')
+        checkpoint = read(receipt)
+        blob = folder/checkpoint['path']
+        if (checkpoint['completed_updates'] != updates or checkpoint['manifest_sha256'] != manifest_hash
+                or blob.parent != folder or blob.resolve() != blob or not blob.is_file()
+                or blob.suffix != '.pt' or sha(blob) != checkpoint['sha256']):
+            raise ValueError('Fine-tuned PPO checkpoint changed')
+    elif sha(complete['evaluation']) != complete['evaluation_sha256']:
+        raise ValueError('Fine-tuned candidate evaluation changed')
     return actor
 
 
@@ -194,13 +231,13 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
         sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
                                          SHARED/'rollout.py', SHARED/'rollout_amp.py')})
     work.mkdir(parents=True, exist_ok=True)
-    freeze(work/'manifest.json', identity)
+    freeze_candidate_manifest(work/'manifest.json', identity)
     resume_pause(work, a.resume_paused)
     tuning = (a.finetuned if getattr(a, 'finetuned', None) else work/'tuning').resolve()
-    if not (tuning/'completed.json').is_file():
+    if not actor_receipt(tuning).is_file():
         command = [sys.executable, '-u', HERE/'finetune.py', '--plan', source, '--student', initial,
                    '--output', tuning, '--design-id', design_id, '--updates', str(a.updates),
-                   '--device', f'cuda:{a.gpu}', '--evaluation-profile', 'both',
+                   '--device', f'cuda:{a.gpu}', '--training-only',
                    '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
                    '--timeout-seconds', str(a.timeout)]
         tuning_manifest = tuning/'manifest.json'
@@ -609,7 +646,7 @@ def main(argv=None):
                                       require_horizontal_selection=formal and a.updates == DEFAULT_BO_UPDATES)
     if a.command == 'evaluate' and a.candidate not in plan['teachers']['stairs']['design_ids']:
         parser.error('Candidate must be an exact shared Rough structure ID')
-    if getattr(a, 'finetuned', None) and not (a.finetuned/'completed.json').is_file():
+    if getattr(a, 'finetuned', None) and not actor_receipt(a.finetuned).is_file():
         parser.error('--finetuned needs the completed candidate run directory')
     label = {'search':'search','initialize':'calibration50'}.get(a.command,getattr(a,'candidate',None))
     work = (a.output or a.root/'bo'/label).resolve()

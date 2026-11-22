@@ -284,8 +284,115 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collect
             assert summary['student']==sha(output/'shared_actor_finetuned.pt')
     joint.main(args+['--resume'])
     assert len(launches)==6 and len(evaluations)==6
+    if compact:
+        joint.main(args+['--resume', '--training-only'])
+        receipt=json.loads((output/'training_completed.json').read_text(encoding='utf8'))
+        assert receipt['ppo_updates']==updates and receipt['student_sha256']==sha(output/'shared_actor_finetuned.pt')
+        assert len(launches)==6 and len(evaluations)==6
     (output/'candidate_result.json').write_text('{}')
     with pytest.raises(ValueError,match='changed'): joint.main(args+['--resume'])
+
+
+def test_training_only_writes_checkpoint_receipt_without_diagnostics(tmp_path, monkeypatch):
+    plan_path, plan = fixture_plan(tmp_path)
+    model, _, _ = learning_state(plan['schema'])
+    initial, output = tmp_path/'actor.pt', tmp_path/'candidate'
+    save_student(initial, model)
+    gpu = ModuleType('robolab.rough_gpu')
+    gpu.query_gpus = lambda: []
+    gpu.candidates = lambda *args, **kwargs: []
+    gpu.gpu_lease = lambda *args: nullcontext('cpu')
+    gpu.child_environment = lambda *args: dict(os.environ)
+    monkeypatch.setitem(sys.modules, 'robolab.rough_gpu', gpu)
+    monkeypatch.setattr(joint, 'evaluate_candidate',
+                        lambda *args: pytest.fail('Standalone gait diagnostics ran for BO'))
+    runs = []
+
+    def train(a, root, plan, actor, critic, optimizer, completed, digest, protocol, env):
+        runs.append(completed)
+        with torch.no_grad():
+            next(actor.parameters()).add_(.125)
+        save_checkpoint(root, actor, critic, optimizer, a.updates, digest)
+
+    monkeypatch.setattr(joint, 'train_updates', train)
+    args = ['--plan', str(plan_path), '--student', str(initial), '--output', str(output),
+            '--design-id', 'stairs_1', '--updates', '1', '--training-only']
+    joint.main(args)
+    actor_path = output/'shared_actor_finetuned.pt'
+    commit = output/'checkpoints/update_000001.json'
+    manifest = output/'manifest.json'
+    receipt = output/'training_completed.json'
+    record = dict(result='CANDIDATE_FINETUNED', candidate=select_candidate(plan, design_id='stairs_1')[1],
+                  ppo_updates=1, manifest_sha256=sha(manifest), student=str(actor_path),
+                  student_sha256=sha(actor_path), checkpoint_sha256=sha(commit))
+    assert json.loads(receipt.read_text(encoding='utf8')) == record
+    assert not (output/'completed.json').exists() and not (output/'candidate_result.json').exists()
+    actor, _ = load_student(actor_path)
+    state_path = commit.parent/json.loads(commit.read_text(encoding='utf8'))['path']
+    committed = torch.load(state_path, weights_only=True)['actor']
+    assert all(torch.equal(param, committed[name]) for name, param in actor.state_dict().items())
+    assert not torch.equal(next(actor.parameters()), next(model.parameters()))
+
+    gpu.query_gpus = lambda: pytest.fail('Completed training requested a GPU')
+    joint.main(args+['--resume'])
+    assert runs == [0]
+    receipt.write_text('{}', encoding='utf8')
+    with pytest.raises(ValueError, match='training completion record changed'):
+        joint.main(args+['--resume'])
+    state_path.write_bytes(b'changed')
+    with pytest.raises(ValueError, match='Committed PPO checkpoint changed'):
+        joint.main(args+['--resume'])
+
+
+def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypatch):
+    plan_path, plan = fixture_plan(tmp_path)
+    model, _, _ = learning_state(plan['schema'])
+    initial, output = tmp_path/'actor.pt', tmp_path/'candidate'
+    save_student(initial, model)
+    gpu = ModuleType('robolab.rough_gpu')
+    gpu.query_gpus = lambda: []
+    gpu.candidates = lambda *args, **kwargs: []
+    gpu.gpu_lease = lambda *args: nullcontext('cpu')
+    gpu.child_environment = lambda *args: dict(os.environ)
+    monkeypatch.setitem(sys.modules, 'robolab.rough_gpu', gpu)
+    monkeypatch.setattr(joint, 'evaluate_candidate',
+                        lambda *args: pytest.fail('Legacy BO diagnostics ran again'))
+    # The unit fixture omits collection receipts and keeps only the learning state.
+    monkeypatch.setattr(joint, 'prune_training_artifacts', lambda *args, **kwargs: None)
+    legacy_source = '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c'
+
+    def train(a, root, plan, actor, critic, optimizer, completed, digest, protocol, env):
+        for index in range(1, a.updates):
+            write_new(root/f'checkpoints/update_{index:06d}.json',
+                      dict(completed_updates=index, manifest_sha256=digest))
+        save_checkpoint(root, actor, critic, optimizer, a.updates, digest)
+
+    args = ['--plan', str(plan_path), '--student', str(initial), '--output', str(output),
+            '--design-id', 'stairs_0', '--updates', '200', '--compact-training-artifacts']
+    with monkeypatch.context() as legacy:
+        legacy.setattr(joint, 'train_updates', train)
+        legacy.setattr(joint, 'sha',
+                       lambda path: legacy_source if path == joint.HERE/'joint_finetune.py' else sha(path))
+        joint.main(args+['--training-only'])
+    receipt = output/'training_completed.json'
+    receipt.unlink()
+    manifest = output/'manifest.json'
+    old_manifest = manifest.read_bytes()
+    commit = output/'checkpoints/update_000200.json'
+    old_commit = commit.read_bytes()
+    actor_path = output/'shared_actor_finetuned.pt'
+    old_actor = sha(actor_path)
+
+    gpu.query_gpus = lambda: pytest.fail('The existing 200 updates should be reused on CPU')
+    with pytest.raises(ValueError, match='changed'):
+        joint.main(args+['--resume'])
+    with pytest.raises(ValueError, match='changed'):
+        joint.main(args+['--resume', '--training-only', '--seed', '2'])
+    joint.main(args+['--resume', '--training-only'])
+    result = json.loads(receipt.read_text(encoding='utf8'))
+    assert result['ppo_updates'] == 200 and result['student_sha256'] == sha(actor_path) == old_actor
+    assert manifest.read_bytes() == old_manifest and result['manifest_sha256'] == sha(manifest)
+    assert commit.read_bytes() == old_commit and result['checkpoint_sha256'] == sha(commit)
 
 
 def test_launcher_selects_candidate_and_keeps_robust_finetuning(tmp_path,monkeypatch):

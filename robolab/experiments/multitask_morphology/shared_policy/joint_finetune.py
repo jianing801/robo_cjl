@@ -1,4 +1,4 @@
-"""Exact-candidate, resumable three-task PPO followed by independent evaluation."""
+"""Exact-candidate, resumable three-task PPO with optional independent evaluation."""
 import argparse
 import json
 import os
@@ -24,6 +24,8 @@ sys.path.insert(0, str(HERE.parents[2]))
 STEPS_PER_TASK = 24
 ENVS_PER_TASK = 8
 ACTION_STD = .05
+# The predecessor used by the compact 200-update Linux BO runs.
+PREVIOUS_BO_FINETUNE_SOURCE_SHA256 = '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c'
 
 
 def worker_command(plan, student, root, task, design_id, profile, strength, seed, full_body_torque=False):
@@ -174,6 +176,39 @@ def evaluate_candidate(a, plan, root, actor, candidate, environment):
         scalar_objective=None, requires_bo_objective_definition=True)
 
 
+def publish_finetuned_actor(a, root, model, manifest_sha256, protocol):
+    actor = root/'shared_actor_finetuned.pt'
+    expected = dict(ppo_updates=a.updates, initial_actor_sha256=sha(a.student),
+                    collection_protocol=protocol, manifest_sha256=manifest_sha256)
+    if actor.exists():
+        previous, metadata = load_student(actor)
+        previous_state = previous.state_dict()
+        if (any(metadata.get(key) != value for key, value in expected.items())
+                or previous.schema != model.schema or previous.architecture != model.architecture
+                or any(not torch.equal(value, previous_state[key]) for key, value in model.state_dict().items())):
+            raise ValueError('Published finetuned actor differs from the committed learning state')
+    else:
+        save_student(actor, model, **expected)
+    return actor
+
+
+def publish_training_completion(a, root, model, candidate, manifest_sha256, protocol):
+    check_pause(root)
+    assert_protocol_unchanged(protocol)
+    actor = publish_finetuned_actor(a, root, model, manifest_sha256, protocol)
+    commit = root/f'checkpoints/update_{a.updates:06d}.json'
+    record = dict(result='CANDIDATE_FINETUNED', candidate=candidate, ppo_updates=a.updates,
+                  manifest_sha256=manifest_sha256, student=str(actor), student_sha256=sha(actor),
+                  checkpoint_sha256=sha(commit))
+    receipt = root/'training_completed.json'
+    if receipt.exists():
+        if json.loads(receipt.read_text(encoding='utf8')) != record:
+            raise ValueError('Published training completion record changed')
+    else:
+        write_new(receipt, record)
+    print('CANDIDATE_FINETUNED', receipt, flush=True)
+
+
 def run(a):
     original = load_plan(a.plan)
     if original['schema']['tasks'] != ['stairs', 'backpack', 'run']:
@@ -200,8 +235,13 @@ def run(a):
     if a.compact_training_artifacts:
         manifest['compact_training_artifacts'] = True
     if a.resume:
-        if json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest:
-            raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
+        frozen_manifest = json.loads((root/'manifest.json').read_text(encoding='utf8'))
+        if frozen_manifest != manifest:
+            previous_sources = {**manifest['sources'], 'joint_finetune.py': PREVIOUS_BO_FINETUNE_SOURCE_SHA256}
+            previous_bo_manifest = dict(manifest, sources=previous_sources)
+            if not (a.training_only and a.compact_training_artifacts and a.updates == 200
+                    and frozen_manifest == previous_bo_manifest):
+                raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
     else:
         root.mkdir(parents=True, exist_ok=False)
         write_new(root/'manifest.json', manifest)
@@ -228,7 +268,7 @@ def run(a):
     if completed > a.updates:
         raise ValueError('Checkpoint exceeds the frozen PPO budget')
     resume_pause(root, a.resume_paused)
-    if (root/'completed.json').exists():
+    if not a.training_only and (root/'completed.json').exists():
         record = json.loads((root/'completed.json').read_text(encoding='utf8'))
         if (record['manifest_sha256'] != manifest_sha256 or record['ppo_updates'] != completed
                 or sha(record['student']) != record['student_sha256']
@@ -237,6 +277,9 @@ def run(a):
         print('CANDIDATE_ALREADY_COMPLETE', root); return
     if a.compact_training_artifacts and completed:
         prune_training_artifacts(root, manifest_sha256, completed, reconcile=True)
+    if a.training_only and completed == a.updates:
+        publish_training_completion(a, root, model, candidate, manifest_sha256, protocol)
+        return
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
     choices = candidates(query_gpus(), os.environ, min_free_mib=a.gpu_min_free_gb*1024,
                          max_utilization=a.gpu_max_utilization, requested=a.device)
@@ -244,16 +287,13 @@ def run(a):
         environment = child_environment(gpu, os.environ)
         if completed < a.updates:
             train_updates(a, root, plan, model, critic, optimizer, completed, manifest_sha256, protocol, environment)
+        if a.training_only:
+            if load_checkpoint(root, model, critic, optimizer, manifest_sha256) != a.updates:
+                raise ValueError('Training has no committed checkpoint at the frozen PPO budget')
+            publish_training_completion(a, root, model, candidate, manifest_sha256, protocol)
+            return
         check_pause(root); assert_protocol_unchanged(protocol)
-        actor = root/'shared_actor_finetuned.pt'
-        if actor.exists():
-            previous, metadata = load_student(actor)
-            if (metadata.get('manifest_sha256') != manifest_sha256 or metadata['ppo_updates'] != a.updates
-                    or any(not torch.equal(v, previous.state_dict()[k]) for k, v in model.state_dict().items())):
-                raise ValueError('Published finetuned actor differs from the committed learning state')
-        else:
-            save_student(actor, model, ppo_updates=a.updates, initial_actor_sha256=sha(a.student),
-                         collection_protocol=protocol, manifest_sha256=manifest_sha256)
+        actor = publish_finetuned_actor(a, root, model, manifest_sha256, protocol)
         result = evaluate_candidate(a, plan, root, actor, candidate, environment)
         assert_protocol_unchanged(protocol)
         result['manifest_sha256'] = manifest_sha256
@@ -279,6 +319,8 @@ def main(argv=None):
     parser.add_argument('--updates', type=int, default=100)
     parser.add_argument('--compact-training-artifacts', action='store_true',
                         help='After committed updates, retain only initial and latest two learning states and rollout receipts')
+    parser.add_argument('--training-only', action='store_true',
+                        help='Publish the committed PPO actor for formal scoring without standalone gait diagnostics')
     parser.add_argument('--full-body-torque', action='store_true')
     parser.add_argument('--profile', choices=['nominal', 'robust'], default='robust')
     parser.add_argument('--randomization-strength', type=float, default=1.)
