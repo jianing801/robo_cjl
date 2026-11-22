@@ -22,6 +22,13 @@ from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_
                         evaluation_criteria, teacher_comparison, SELECTION_RULE, GATE_VERSION,
                         COMPARISON_VERSION, EVALUATION_VELOCITY_FRAME)
 
+# The previous coordinator used the same training and evaluation protocol.
+# Git checkouts may use either LF or CRLF for its source.
+PRE_CONTINUATION_PIPELINE_SHA256 = {
+    'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
+    '4a6c0b5589d8faa30b402445db5f59dfcdab934a729b5fe04ea41e9350f36c20',
+}
+
 
 def stop_child(process):
     import psutil
@@ -120,7 +127,7 @@ def validate_evaluation_report(report, task, ids, spec, student_sha, protocol, *
 
 
 def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed,
-                   suite, environment, timeout, criteria=None):
+                   suite, environment, timeout, criteria=None, *, reuse_only=False):
     """Persist fixed-seed evaluation separately from training and from final tests."""
     policy = 'student' if student else 'teacher'
     evaluations = []
@@ -135,6 +142,8 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
         commit = root/'evaluation_commits'/suite/f'{index:04d}_{task}_{policy}{suffix}.json'
         new_commit = not commit.exists()
         if new_commit:
+            if reuse_only:
+                raise ValueError(f'Missing committed evaluation: {commit}')
             folder = root/'evaluation'/suite/f'{index:04d}_{task}_{policy}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
             command = [sys.executable, '-X', 'faulthandler', '-u',
                        str(HERE/('rollout_amp.py' if task == 'run' else 'rollout.py')),
@@ -168,11 +177,12 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
 
 
 def run_selection_suite(plan, plan_path, root, jobs, student, profile, strength, seeds,
-                        suite, environment, timeout, criteria=None):
+                        suite, environment, timeout, criteria=None, *, reuse_only=False):
     records, by_seed = [], {}
+    reuse = {'reuse_only': True} if reuse_only else {}
     for seed in seeds:
         current = run_evaluation(plan, plan_path, root, jobs, student, profile, strength,
-                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria)
+                                 seed, f'{suite}/seed_{seed}', environment, timeout, criteria, **reuse)
         records.extend(current)
         by_seed[str(seed)] = aggregate_evaluations(current, plan['schema']['tasks'])
     return dict(task_metrics=aggregate_evaluations(records, plan['schema']['tasks']),
@@ -203,9 +213,82 @@ def summarize_final_evaluations(records, tasks, profiles):
     return result
 
 
+def collect_round(a, root, collector, collection_metadata, collection_jobs,
+                  round_index, strength, student, environment):
+    paths = []
+    execution_sha = sha(student) if student else None
+    protocol = collection_metadata(a.collection_profile, strength)
+    for index,(task,ids) in enumerate(collection_jobs):
+        commit=root/'data_commits'/f'round_{round_index}'/f'{index:04d}_{task}.json'
+        if commit.exists():
+            saved=json.loads(commit.read_text());folder=Path(saved['folder'])
+            if (sha(folder/'data.pt')!=saved['sha256']
+                    or saved.get('protocol')!=protocol
+                    or saved.get('round_index')!=round_index
+                    or saved.get('execution_student_sha256')!=execution_sha):
+                raise ValueError('Committed data or collection protocol changed')
+            paths.append(str(folder/'data.pt'))
+            continue
+        folder=root/'data'/f'round_{round_index}'/f'{index:04d}_{task}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
+        attempt=root/'processes'/f'collect_{round_index}_{index:04d}_{datetime.now():%Y%m%d_%H%M%S_%f}'
+        command=[sys.executable,'-X','faulthandler','-u',str(collector/('rollout_amp.py' if task=='run' else 'rollout.py')),'--plan',str(Path(a.plan).resolve()),
+            '--task',task,'--design-ids',','.join(ids),'--output',str(folder),'--asset-cache-root',str(root),
+            '--num-envs','4096','--steps',str(a.collect_steps),'--stride',str(a.stride),'--seed',str(42+round_index*10000+index),
+            '--profile',a.collection_profile,'--randomization-strength',str(strength),
+            '--headless','--device','cuda:0']
+        if task=='run':
+            pos=command.index('--task');del command[pos:pos+2]
+            pos=command.index('--asset-cache-root');del command[pos:pos+2]
+        if student:command+=['--student',str(student)]
+        print('COLLECT_BEGIN',round_index,index+1,'/',len(collection_jobs),task,len(ids),flush=True)
+        child(command,attempt,environment,a.timeout_seconds,root)
+        if not (folder/'data.pt').exists() or (folder/'failure.json').exists():raise ValueError('Missing real teacher data')
+        commit.parent.mkdir(parents=True,exist_ok=True)
+        write_new(commit,dict(folder=str(folder),sha256=sha(folder/'data.pt'),
+            protocol=protocol,round_index=round_index,
+            execution_student_sha256=execution_sha))
+        paths.append(str(folder/'data.pt'))
+        print('COLLECT_COMPLETE',round_index,index+1,'/',len(collection_jobs),flush=True)
+    return paths
+
+
+def fit_round(a, root, collector, round_index, student, all_paths, environment):
+    data_list=root/f'data_round_{round_index}.json'
+    if not data_list.exists():write_new(data_list,all_paths)
+    elif json.loads(data_list.read_text())!=all_paths:raise ValueError('Committed round data list changed')
+    fit_commit=root/f'fit_round_{round_index}.json'
+    # Original runs recorded the current implementation even when using a frozen fit.
+    implementation = collector if getattr(a, 'continue_from', None) else HERE
+    fit_identity=dict(data_list_sha256=sha(data_list),init_student_sha256=sha(student) if student else None,
+        implementation_sha256=sha(implementation/'fit.py'))
+    if not fit_commit.exists():
+        fit=root/f'bc_round_{round_index}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
+        command=[sys.executable,'-u',str(collector/'fit.py'),'--plan',str(Path(a.plan).resolve()),
+            '--data-list',str(data_list),'--output',str(fit),'--architecture','mlp','--epochs',str(a.epochs),
+            '--steps-per-epoch',str(a.steps_per_epoch),
+            '--samples-per-design-per-epoch',str(a.samples_per_design_per_epoch),
+            '--validation-rows-per-design-shard',str(a.validation_rows_per_design_shard),
+            '--replay-cache-shards',str(a.replay_cache_shards),'--device','cuda:0']
+        command.append('--collection-grid')
+        if student:command+=['--init-student',str(student)]
+        child(command,root/'processes'/f'fit_{round_index}_{datetime.now():%Y%m%d_%H%M%S_%f}',
+              environment,max(a.timeout_seconds,7200),root)
+        report=json.loads((fit/'summary.json').read_text())
+        last_checkpoint(report,a.epochs)
+        write_new(fit_commit,dict(summary=str(fit/'summary.json'),summary_sha256=sha(fit/'summary.json'),identity=fit_identity))
+    saved=json.loads(fit_commit.read_text())
+    if saved['identity']!=fit_identity or sha(saved['summary'])!=saved['summary_sha256']:
+        raise ValueError('Committed fit input, initialization or summary changed')
+    report=json.loads(Path(saved['summary']).read_text())
+    last=last_checkpoint(report,a.epochs)
+    return dict(round_index=round_index,epoch=last['epoch'],student=last['student'],
+        student_sha256=last['student_sha256'],fit_summary=saved['summary'])
+
+
 def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--continue-from',help='Add one DAgger round using a completed parent run')
     p.add_argument('--collect-steps',type=int,default=250)
     p.add_argument('--stride',type=int,default=5)
     p.add_argument('--epochs',type=int,default=10);p.add_argument('--steps-per-epoch',type=int,default=0,
@@ -232,29 +315,42 @@ def main(argv=None):
     p.add_argument('--timeout-seconds',type=int,default=900)
     a=p.parse_args(argv)
     if a.resume_paused:a.resume=True
-    if a.tracking_abs_tolerance is not None:
-        raise ValueError('--tracking-abs-tolerance is retired; selection uses survival and forward progress.')
-    if a.standing_speed_tolerance is not None:
-        raise ValueError('--standing-speed-tolerance is retired; standing commands and their acceptance gate have been removed.')
-    if a.max_rows_per_design_shard is not None:
-        raise ValueError('--max-rows-per-design-shard is retired; use --samples-per-design-per-epoch for a compute budget without discarding training data')
-    if min(a.collect_steps,a.stride,a.epochs,a.timeout_seconds,a.samples_per_design_per_epoch,a.validation_rows_per_design_shard,a.replay_cache_shards)<1 or a.steps_per_epoch<0 or a.dagger_rounds<1:
-        raise ValueError('Positive finite collection/BC budgets required')
-    round_strength(0,a.dagger_rounds,a.initial_randomization_strength,a.randomization_strength,a.collection_profile)
-    seeds=[int(value.strip()) for value in a.selection_seeds.split(',')]
-    if len(seeds)!=3 or len(set(seeds))!=3 or any(not 0<=seed<2**32 for seed in seeds):
-        raise ValueError('Round comparison requires three distinct valid seeds')
     root=Path(a.output).resolve()
+    if a.continue_from:
+        parent=Path(a.continue_from).resolve()
+        if root.is_relative_to(parent) or parent.is_relative_to(root):
+            raise ValueError('Continuation output must be independent of the parent run directory')
+    else:
+        if a.tracking_abs_tolerance is not None:
+            raise ValueError('--tracking-abs-tolerance is retired; selection uses survival and forward progress.')
+        if a.standing_speed_tolerance is not None:
+            raise ValueError('--standing-speed-tolerance is retired; standing commands and their acceptance gate have been removed.')
+        if a.max_rows_per_design_shard is not None:
+            raise ValueError('--max-rows-per-design-shard is retired; use --samples-per-design-per-epoch for a compute budget without discarding training data')
+        if min(a.collect_steps,a.stride,a.epochs,a.timeout_seconds,a.samples_per_design_per_epoch,a.validation_rows_per_design_shard,a.replay_cache_shards)<1 or a.steps_per_epoch<0 or a.dagger_rounds<1:
+            raise ValueError('Positive finite collection/BC budgets required')
+        round_strength(0,a.dagger_rounds,a.initial_randomization_strength,a.randomization_strength,a.collection_profile)
+        seeds=[int(value.strip()) for value in a.selection_seeds.split(',')]
+        if len(seeds)!=3 or len(set(seeds))!=3 or any(not 0<=seed<2**32 for seed in seeds):
+            raise ValueError('Round comparison requires three distinct valid seeds')
     with run_lock(root):
         try:
+            if a.continue_from:
+                from dagger_continue import execute_continuation
+                return execute_continuation(a)
             return execute_pipeline(a,seeds)
         except KeyboardInterrupt:
             if root.is_dir():(root/'USER_PAUSED').touch(exist_ok=True)
             raise
 
 
+def _protocol_digest(protocol):
+    return hashlib.sha256(json.dumps(protocol,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
 def execute_pipeline(a,seeds):
     plan=load_plan(a.plan);root=Path(a.output).resolve()
+    arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused','continue_from')}
     previous=json.loads((root/'manifest.json').read_bytes()) if a.resume else None
     frozen=frozen_engine(root,HERE,previous,a.resume_paused) if previous else None
     collector,collection_metadata=frozen[:2] if frozen else (HERE,protocol_metadata)
@@ -287,10 +383,15 @@ def execute_pipeline(a,seeds):
         implementation_sha256=sha(__file__),fit_implementation_sha256=sha(HERE/'fit.py'),
         evaluation_implementation_sha256=sha(HERE/'evaluation.py'),
         rollout_implementation={p:sha(HERE/p) for p in ('rollout.py','rollout_amp.py','scenario_sampling.py','physical_audit.py','stair_course.py')})
-    protocol_sha256=hashlib.sha256(json.dumps(protocol,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    protocol_sha256=_protocol_digest(protocol)
     if a.resume:
-        expected={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused')}
-        if previous['arguments']!=expected or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
+        if previous['arguments']!=arguments or previous['plan_sha256']!=sha(a.plan):raise ValueError('Resume plan/budget changed')
+        previous_implementation = previous['protocol'].get('implementation_sha256')
+        if previous_implementation in PRE_CONTINUATION_PIPELINE_SHA256:
+            prior_protocol = dict(protocol, implementation_sha256=previous_implementation)
+            prior_digest = _protocol_digest(prior_protocol)
+            if prior_digest == previous.get('protocol_sha256') == _protocol_digest(previous['protocol']):
+                protocol, protocol_sha256 = prior_protocol, prior_digest
         if frozen and previous['protocol'].get('evaluation_velocity_frame') != EVALUATION_VELOCITY_FRAME:
             current=json.loads(json.dumps(dict(previous,protocol=protocol,protocol_sha256=protocol_sha256,
                                                selection_rule=SELECTION_RULE)))
@@ -303,7 +404,7 @@ def execute_pipeline(a,seeds):
             raise ValueError('Collection/selection protocol changed or this is a legacy run. Keep old data; use a new output directory.')
     else:
         root.mkdir(parents=True,exist_ok=False)
-        write_new(root/'manifest.json',dict(plan_sha256=sha(a.plan),arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused')},
+        write_new(root/'manifest.json',dict(plan_sha256=sha(a.plan),arguments=arguments,
             protocol=protocol,protocol_sha256=protocol_sha256,selection_rule=SELECTION_RULE,selection_budget=budget,
             teacher_updates=0,initial_collection='teacher actions',later_collection='student actions with frozen teacher labels'))
     resume_pause(root,a.resume_paused)
@@ -328,66 +429,10 @@ def execute_pipeline(a,seeds):
         for round_index in range(a.dagger_rounds+1):
             strength=round_strength(round_index,a.dagger_rounds,a.initial_randomization_strength,
                                     a.randomization_strength,a.collection_profile)
-            for index,(task,ids) in enumerate(collection_jobs):
-                commit=root/'data_commits'/f'round_{round_index}'/f'{index:04d}_{task}.json'
-                execution_sha=sha(student) if student else None
-                if commit.exists():
-                    saved=json.loads(commit.read_text());folder=Path(saved['folder'])
-                    if (sha(folder/'data.pt')!=saved['sha256']
-                            or saved.get('protocol')!=collection_metadata(a.collection_profile,strength)
-                            or saved.get('round_index')!=round_index
-                            or saved.get('execution_student_sha256')!=execution_sha):
-                        raise ValueError('Committed data or collection protocol changed')
-                    all_paths.append(str(folder/'data.pt'));continue
-                folder=root/'data'/f'round_{round_index}'/f'{index:04d}_{task}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
-                attempt=root/'processes'/f'collect_{round_index}_{index:04d}_{datetime.now():%Y%m%d_%H%M%S_%f}'
-                command=[sys.executable,'-X','faulthandler','-u',str(collector/('rollout_amp.py' if task=='run' else 'rollout.py')),'--plan',str(Path(a.plan).resolve()),
-                    '--task',task,'--design-ids',','.join(ids),'--output',str(folder),'--asset-cache-root',str(root),
-                    '--num-envs','4096','--steps',str(a.collect_steps),'--stride',str(a.stride),'--seed',str(42+round_index*10000+index),
-                    '--profile',a.collection_profile,'--randomization-strength',str(strength),
-                    '--headless','--device','cuda:0']
-                if task=='run':
-                    pos=command.index('--task');del command[pos:pos+2]
-                    pos=command.index('--asset-cache-root');del command[pos:pos+2]
-                if student:command+=['--student',student]
-                print('COLLECT_BEGIN',round_index,index+1,'/',len(collection_jobs),task,len(ids),flush=True)
-                child(command,attempt,environment,a.timeout_seconds,root)
-                if not (folder/'data.pt').exists() or (folder/'failure.json').exists():raise ValueError('Missing real teacher data')
-                commit.parent.mkdir(parents=True,exist_ok=True)
-                write_new(commit,dict(folder=str(folder),sha256=sha(folder/'data.pt'),
-                    protocol=collection_metadata(a.collection_profile,strength),round_index=round_index,
-                    execution_student_sha256=execution_sha))
-                all_paths.append(str(folder/'data.pt'))
-                print('COLLECT_COMPLETE',round_index,index+1,'/',len(collection_jobs),flush=True)
-            data_list=root/f'data_round_{round_index}.json'
-            if not data_list.exists():write_new(data_list,all_paths)
-            elif json.loads(data_list.read_text())!=all_paths:raise ValueError('Committed round data list changed')
-            fit_commit=root/f'fit_round_{round_index}.json'
-            fit_identity=dict(data_list_sha256=sha(data_list),init_student_sha256=sha(student) if student else None,
-                implementation_sha256=sha(HERE/'fit.py'))
-            if not fit_commit.exists():
-                fit=root/f'bc_round_{round_index}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
-                command=[sys.executable,'-u',str(collector/'fit.py'),'--plan',str(Path(a.plan).resolve()),
-                    '--data-list',str(data_list),'--output',str(fit),'--architecture','mlp','--epochs',str(a.epochs),
-                    '--steps-per-epoch',str(a.steps_per_epoch),
-                    '--samples-per-design-per-epoch',str(a.samples_per_design_per_epoch),
-                    '--validation-rows-per-design-shard',str(a.validation_rows_per_design_shard),
-                    '--replay-cache-shards',str(a.replay_cache_shards),'--device','cuda:0']
-                command.append('--collection-grid')
-                if student:command+=['--init-student',student]
-                child(command,root/'processes'/f'fit_{round_index}_{datetime.now():%Y%m%d_%H%M%S_%f}',
-                      environment,max(a.timeout_seconds,7200),root)
-                report=json.loads((fit/'summary.json').read_text())
-                last_checkpoint(report,a.epochs)
-                write_new(fit_commit,dict(summary=str(fit/'summary.json'),summary_sha256=sha(fit/'summary.json'),identity=fit_identity))
-            saved=json.loads(fit_commit.read_text())
-            if saved['identity']!=fit_identity or sha(saved['summary'])!=saved['summary_sha256']:
-                raise ValueError('Committed fit input, initialization or summary changed')
-            report=json.loads(Path(saved['summary']).read_text())
-            last=last_checkpoint(report,a.epochs)
-            student=last['student']
-            round_report=dict(round_index=round_index,epoch=last['epoch'],student=student,
-                student_sha256=last['student_sha256'],fit_summary=saved['summary'])
+            all_paths.extend(collect_round(a,root,collector,collection_metadata,collection_jobs,
+                                           round_index,strength,student,environment))
+            round_report=fit_round(a,root,collector,round_index,student,all_paths,environment)
+            student=round_report['student']
             round_reports.append(round_report)
             if round_index == 0:
                 continue
