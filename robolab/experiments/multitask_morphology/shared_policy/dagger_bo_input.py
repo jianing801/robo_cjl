@@ -8,12 +8,11 @@ from types import SimpleNamespace
 
 from contract import design_ids_for_keys
 from dagger_continue import selection_parameters, verify_selection_history
-from dagger_parent import CONTINUATION_KIND, ROLLOUT_SOURCES, SHARED_ENGINE, load_parent
+from dagger_parent import CONTINUATION_KIND, PRE_MIXED_REVISION, ROLLOUT_SOURCES, SHARED_ENGINE, load_parent
 from pipeline import jobs_for
 
 
 HERE = Path(__file__).resolve().parent
-PRE_MIXED_REVISION = '1b9cc2d15882817823cf899807de62046274240b'
 PRE_MIXED_CHANGES = ('rollout.py', 'rollout_amp.py', 'scenario_sampling.py')
 
 
@@ -59,6 +58,7 @@ def _continuation_actor(extension, base, plan_path, plan, base_actor, engine):
     jobs = jobs_for(plan, len(selection_keys), ids)
     recorded_criteria = source['previous_assessment'].get('evaluation_criteria')
     criteria = selection_parameters(recorded_criteria) if recorded_criteria is not None else None
+    validation = {} if engine == HERE else {'frozen_protocol': protocol['selection']}
     _, _, incumbent = verify_selection_history(settings, source, plan, ids, jobs,
-                                               protocol['selection_seeds'], criteria)
+                                               protocol['selection_seeds'], criteria, **validation)
     return Path(incumbent['student'])

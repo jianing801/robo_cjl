@@ -122,7 +122,8 @@ def selection_parameters(criteria):
     return parameters
 
 
-def verify_selection_history(a, source, plan, ids, jobs, seeds, criteria=None, *, rule=TASK_SUCCESS_SELECTION_RULE):
+def verify_selection_history(a, source, plan, ids, jobs, seeds, criteria=None, *,
+                             rule=TASK_SUCCESS_SELECTION_RULE, frozen_protocol=None):
     """Verify each frozen comparison, then rank all committed rounds under one criterion."""
     profile = a.selection_profile
     protocol = source['manifest']['protocol']
@@ -141,6 +142,8 @@ def verify_selection_history(a, source, plan, ids, jobs, seeds, criteria=None, *
             root, checkpoint, frozen = archives[index]
             suite = 'teacher' if index == 0 else f'round_{index}'
             rescore = {} if target == frozen else {'rescore': target}
+            if frozen_protocol is not None:
+                rescore['frozen_protocol'] = frozen_protocol
             assessment = run_selection_suite(plan, Path(a.plan), root, jobs,
                 checkpoint['student'] if checkpoint else None, profile, strength, seeds,
                 f'selection/{suite}', None, a.timeout_seconds, frozen, reuse_only=True, **rescore)

@@ -26,6 +26,7 @@ SHARED_ENGINE = Path('robolab/experiments/multitask_morphology/shared_policy')
 ROLLOUT_SOURCES = {'rollout.py', 'rollout_amp.py', 'scenario_sampling.py', 'physical_audit.py'}
 PRE_CONTINUATION_REVISION = '58fd4476d5694decbce288d61a7584a305d7cbee'
 PRE_TASK_SUCCESS_SELECTION_REVISION = '103bbd0be31ef7903d714cbd29326c6412653db5'
+PRE_MIXED_REVISION = '1b9cc2d15882817823cf899807de62046274240b'
 LONG_REPLAY_SOURCES = {'dagger_long_collect.py', 'dagger_long_fit.py', 'stair_course.py'}
 
 
@@ -72,7 +73,7 @@ def _verify_selection_coordinator(engine, expected):
         raise ValueError(f'Invalid DAgger coordinator source: {path}')
     if sha(path) == expected:
         return
-    for revision in (PRE_CONTINUATION_REVISION, PRE_TASK_SUCCESS_SELECTION_REVISION):
+    for revision in (PRE_CONTINUATION_REVISION, PRE_TASK_SUCCESS_SELECTION_REVISION, PRE_MIXED_REVISION):
         previous = subprocess.check_output([
             'git', '--no-optional-locks', '-C', str(engine), 'show',
             f'{revision}:{(SHARED_ENGINE/"pipeline.py").as_posix()}',

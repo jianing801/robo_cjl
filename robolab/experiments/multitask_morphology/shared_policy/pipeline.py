@@ -132,16 +132,20 @@ def validate_evaluation_report(report, task, ids, spec, student_sha, protocol, *
 
 
 def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed,
-                   suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None):
+                   suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None,
+                   frozen_protocol=None):
     """Persist fixed-seed evaluation separately from training and from final tests."""
     if rescore is not None and not reuse_only:
         raise ValueError('Rescoring requires committed evaluation evidence')
+    if frozen_protocol is not None and (not reuse_only or frozen_protocol.get('profile') != profile
+                                        or frozen_protocol.get('strength') != strength):
+        raise ValueError('Archived evaluation protocol requires matching committed evidence')
     policy = 'student' if student else 'teacher'
     evaluations = []
     criteria_parameters = criteria or {}
     declared_criteria = evaluation_criteria(**criteria_parameters)
     for index, (task, ids) in enumerate(jobs):
-        protocol = protocol_metadata(profile, strength)
+        protocol = protocol_metadata(profile, strength) if frozen_protocol is None else frozen_protocol
         expected = dict(profile=profile, protocol=protocol, seed=seed, design_ids=ids,evaluation_criteria=declared_criteria,
                         policy=policy, actor_sha256=sha(student) if student else plan['teachers'][task]['checkpoint_sha256'],
                         velocity_frame=EVALUATION_VELOCITY_FRAME)
@@ -185,11 +189,14 @@ def run_evaluation(plan, plan_path, root, jobs, student, profile, strength, seed
 
 
 def run_selection_suite(plan, plan_path, root, jobs, student, profile, strength, seeds,
-                        suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None):
+                        suite, environment, timeout, criteria=None, *, reuse_only=False, rescore=None,
+                        frozen_protocol=None):
     records, by_seed = [], {}
     reuse = {'reuse_only': True} if reuse_only else {}
     if rescore is not None:
         reuse['rescore'] = rescore
+    if frozen_protocol is not None:
+        reuse['frozen_protocol'] = frozen_protocol
     for seed in seeds:
         current = run_evaluation(plan, plan_path, root, jobs, student, profile, strength,
                                  seed, f'{suite}/seed_{seed}', environment, timeout, criteria, **reuse)

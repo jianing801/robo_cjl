@@ -206,9 +206,15 @@ def test_rescore_reuses_frozen_episodes_without_changing_the_receipt(tmp_path, m
     rescored, = pipeline.run_evaluation(**kwargs, reuse_only=True, rescore={'min_command_progress_ratio': .2})
     assert rescored['success_rate'] == pytest.approx(5/6)
     assert receipt.read_bytes() == original
+    archived = json.loads(original)['identity']['protocol']
+    monkeypatch.setattr(pipeline, 'protocol_metadata', lambda *_: pytest.fail('Live protocol was read'))
+    assert pipeline.run_evaluation(**kwargs, reuse_only=True, frozen_protocol=archived)[0]['success_rate'] == 0.
+    with pytest.raises(ValueError, match='matching committed evidence'):
+        pipeline.run_evaluation(**kwargs, frozen_protocol=archived)
     Path(rescored['summary']).write_text('{}')
     with pytest.raises(ValueError, match='changed'):
-        pipeline.run_evaluation(**kwargs, reuse_only=True, rescore={'min_command_progress_ratio': .2})
+        pipeline.run_evaluation(**kwargs, reuse_only=True, frozen_protocol=archived,
+                                rescore={'min_command_progress_ratio': .2})
 
 
 def test_final_test_suite_does_not_reuse_selection_cache(tmp_path, monkeypatch):
