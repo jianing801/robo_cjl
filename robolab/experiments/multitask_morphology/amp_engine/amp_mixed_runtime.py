@@ -7,7 +7,7 @@ from isaaclab.sim import MultiAssetSpawnerCfg
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from robolab.actuators.torque_speed_envelope import TorqueSpeedEnvelopeActuator, TorqueSpeedEnvelopeActuatorCfg
-from amp_layout import envelope_limit, interpolate_validated_envelope, balanced_indices
+from amp_layout import envelope_limit, interpolate_validated_envelope, balanced_indices, vectorized_balanced_indices
 from robolab.physical_snapshot import configure_robot
 from amp_checkpoint import AmpCheckpointMixin
 from rsl_rl.storage import RolloutStorage
@@ -143,6 +143,7 @@ def configure_spatial(options, bank, designs, output, configurator=None):
     cfg.spatial_compensations = [d["root_height_compensation_m"] for d in designs]
     cfg.spatial_contexts = [d["context"] for d in designs]
     cfg.spatial_design_ids = [d["id"] for d in designs]
+    cfg.spatial_minibatch_sampler = getattr(options, "spatial_minibatch_sampler", "group_balanced")
     if hasattr(cfg, "spatial_reference_designs"):
         cfg.spatial_reference_designs = designs
     contract.update(spatial_real_assets=True, single_actual_URDF_per_block=False,
@@ -151,10 +152,11 @@ def configure_spatial(options, bank, designs, output, configurator=None):
 
 
 class SpatialVecEnv(RslRlVecEnvWrapper):
-    def __init__(self, env, source_symmetry, clip_actions=None):
+    def __init__(self, env, source_symmetry, clip_actions=None, per_design_metrics=True):
         super().__init__(env, clip_actions=clip_actions)
         self.native_source_symmetry = source_symmetry
         self.unwrapped.native_source_symmetry = source_symmetry
+        self.per_design_metrics = per_design_metrics
 
     def _extend(self, obs):
         result = obs.clone() if isinstance(obs, TensorDict) else TensorDict(obs, batch_size=[self.num_envs])
@@ -167,13 +169,24 @@ class SpatialVecEnv(RslRlVecEnvWrapper):
 
     def step(self, actions):
         obs, rewards, dones, extras = super().step(actions)
-        # Every design contributes exactly its live environment count each step.
         extras.setdefault("log", {})
-        for i, name in enumerate(self.unwrapped.cfg.spatial_design_ids):
-            ids = self.unwrapped.spatial_groups == i
-            extras["log"][f"Spatial/{name}/reward"] = rewards[ids].mean()
-            extras["log"][f"Spatial/{name}/forward_velocity"] = self.unwrapped.robot.data.root_lin_vel_b[ids, 0].mean()
+        if self.per_design_metrics:
+            # Every design contributes exactly its live environment count each step.
+            add_spatial_metrics(extras["log"], rewards,
+                self.unwrapped.robot.data.root_lin_vel_b[:, 0], self.unwrapped.spatial_groups,
+                self.unwrapped.cfg.spatial_design_ids, enabled=True)
         return self._extend(obs), rewards, dones, extras
+
+
+def add_spatial_metrics(log, rewards, forward_velocity, spatial_groups, design_ids, *, enabled=True):
+    """Attach legacy per-design reward/speed values without touching global metrics."""
+    if not enabled:
+        return log
+    for index, name in enumerate(design_ids):
+        ids = spatial_groups == index
+        log[f"Spatial/{name}/reward"] = rewards[ids].mean()
+        log[f"Spatial/{name}/forward_velocity"] = forward_velocity[ids].mean()
+    return log
 
 
 class SpatialStorage(RolloutStorage):
@@ -182,9 +195,11 @@ class SpatialStorage(RolloutStorage):
             raise ValueError("spatial storage requires feedforward PPO")
         names = ("observations", "actions", "values", "advantages", "returns", "actions_log_prob", "mu", "sigma")
         arrays = [getattr(self, name).flatten(0, 1) for name in names]
+        sampler = (vectorized_balanced_indices if getattr(self, "sampler_mode", "group_balanced")
+                   == "vectorized_balanced" else balanced_indices)
         for _ in range(num_epochs):
-            for indices in balanced_indices(self.spatial_groups, self.num_transitions_per_env,
-                                            num_mini_batches, device=self.device):
+            for indices in sampler(self.spatial_groups, self.num_transitions_per_env,
+                                   num_mini_batches, device=self.device):
                 yield (*[x[indices] for x in arrays], (None, None), None)
 
 
@@ -197,4 +212,5 @@ class SpatialRunner(AmpCheckpointMixin, OnPolicyRunner):
             raise ValueError("recurrent policy not supported by this spatial sampler")
         alg.storage.__class__ = SpatialStorage
         alg.storage.spatial_groups = self.env.unwrapped.spatial_groups
+        alg.storage.sampler_mode = getattr(self.env.unwrapped.cfg, "spatial_minibatch_sampler", "group_balanced")
         return alg

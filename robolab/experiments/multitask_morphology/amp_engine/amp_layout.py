@@ -57,6 +57,59 @@ def balanced_indices(env_groups, steps, batches, *, device="cpu"):
     return [x[torch.randperm(len(x), device=device)] for x in result]
 
 
+def vectorized_balanced_indices(env_groups, steps, batches, *, device="cpu"):
+    """Vectorized equivalent of ``balanced_indices`` for large morphology banks.
+
+    Each rollout transition appears exactly once per epoch. Samples are shuffled
+    within their morphology and split across minibatches using the same rotating
+    offsets as the grouped reference implementation; only the per-morphology
+    Python loop is removed.
+    """
+    import torch
+    groups = torch.as_tensor(env_groups, device=device, dtype=torch.long)
+    if groups.ndim != 1 or groups.numel() == 0:
+        raise ValueError("env_groups must be a nonempty one-dimensional tensor")
+    n = groups.numel()
+    total = steps * n
+    if steps < 1 or batches < 1 or total % batches:
+        raise ValueError("rollout must divide exactly into source mini-batches")
+
+    unique_groups, group_index = torch.unique(groups, sorted=True, return_inverse=True)
+    group_count = unique_groups.numel()
+    env_counts = torch.bincount(group_index, minlength=group_count)
+    env_order = torch.argsort(group_index)
+    env_starts = torch.cumsum(env_counts, 0) - env_counts
+    env_rank = torch.empty_like(group_index)
+    env_rank[env_order] = torch.arange(n, device=device) - torch.repeat_interleave(env_starts, env_counts)
+
+    # make_layout assigns environments round-robin, so each morphology has
+    # floor(n/G) or ceil(n/G) environments. A padded [G, env, step] tensor
+    # lets us shuffle each morphology in parallel instead of looping over G.
+    max_envs = (n + group_count - 1) // group_count
+    env_slots = torch.full((group_count, max_envs), -1, device=device, dtype=torch.long)
+    env_slots[group_index, env_rank] = torch.arange(n, device=device)
+    valid_envs = env_slots >= 0
+    time = torch.arange(steps, device=device)
+    sample_matrix = (time[None, None, :] * n + env_slots[:, :, None]).reshape(group_count, -1)
+    valid_matrix = valid_envs[:, :, None].expand(-1, -1, steps).reshape(group_count, -1)
+
+    random_scores = torch.rand(sample_matrix.shape, device=device)
+    random_scores.masked_fill_(~valid_matrix, 2.)
+    order = torch.argsort(random_scores, dim=1)
+    ordered_samples = sample_matrix.gather(1, order)
+    valid_samples = valid_matrix.gather(1, order)
+
+    sample_counts = env_counts * steps
+    group_offsets = (torch.cumsum(sample_counts, 0) - sample_counts).remainder(batches)
+    positions = torch.arange(sample_matrix.shape[1], device=device)[None, :]
+    batch_ids = (positions + group_offsets[:, None]).remainder(batches)
+    flat_valid = valid_samples.reshape(-1)
+    flat_samples = ordered_samples.reshape(-1)
+    flat_batches = batch_ids.expand(group_count, -1).reshape(-1)
+    bins = [flat_samples[flat_valid & (flat_batches == batch)] for batch in range(batches)]
+    return [values[torch.randperm(values.numel(), device=device)] for values in bins]
+
+
 def envelope_limit(speed, table, peak):
     """Same symmetric piecewise-linear joint-side envelope as native actuator."""
     import torch
