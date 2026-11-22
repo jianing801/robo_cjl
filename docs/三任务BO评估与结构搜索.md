@@ -40,17 +40,17 @@ Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，�
 
 旧三种子协议保留在 `robolab/experiments/multitask_morphology/configs/bo_conditions.json`。复现该协议时显式传 `--conditions`，并使用原实验目录。新单种子定标默认写入 `bo/calibration50_single_seed`。
 
-### 归档的 100 次定标
+### 归档的每结构 100 次 PPO 更新定标
 
 续跑或复现历史 100 次实验时，在原冻结版本中显式传 `--updates 100`，并沿用原工况、起始模型和输出目录。旧公式定标的完整测量如需按锚定分位数重算，可用支持该定标版本的 `initialize --updates 100` 核验 50 份原始报告并生成 `percentile_scoring/scoring.json`，保留原报告和评分。200 次正式流程使用自身的定标测量、分位端点和搜索目录。
 
 ## 第二步　在冻结尺度下运行 BO
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 60 --gpu 0 --updates 200
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 100 --gpu 0 --updates 200
 ```
 
-示例总预算 60 个结构，包含已经测过的 50 个，只新增 10 个候选。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构；默认三任务之间等权。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
+正式总预算为 **100 个结构**。前 50 个是原第 21 组的定标结构，后 50 个由 BO 逐个提议。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构。默认三任务之间等权。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
 
 蒸馏选模的 200 个结构均已排除这 50 个定标结构。历史教师参考成绩保留在独立归档中；新的尺度来自本次学生微调后的测量。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
 
