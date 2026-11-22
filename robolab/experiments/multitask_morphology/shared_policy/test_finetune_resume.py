@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from contract import schema_for, structure_key, sha, write_new, load_plan
-from finetune_state import select_candidate, save_checkpoint, load_checkpoint, validate_batch
+from finetune_state import checkpoint_history, prune_mixed_checkpoints, select_candidate, save_checkpoint, load_checkpoint, validate_batch
 import joint_finetune as joint
 import pipeline
 from ppo_channel import validate_request
@@ -115,6 +115,21 @@ def test_learning_resume_restores_actor_critic_adam_and_all_coordinator_rng(tmp_
     with pytest.raises(ValueError,match='changed'): load_checkpoint(tmp_path,resumed,c2,o2,'identity')
 
 
+def test_mixed_compaction_keeps_receipts_and_the_resume_checkpoint(tmp_path):
+    _, plan = fixture_plan(tmp_path)
+    model, critic, optimizer = learning_state(plan['schema'])
+    root = tmp_path/'candidate'
+    root.mkdir()
+    for update in range(5):
+        save_checkpoint(root, model, critic, optimizer, update, 'mixed')
+    history = checkpoint_history(root, 'mixed')
+    prune_mixed_checkpoints(root, history, reconcile=True)
+    assert len(checkpoint_history(root, 'mixed')) == 5
+    assert {path.name for path in (root/'checkpoints').glob('*.pt')} == {
+        history[i]['path'] for i in (0, 3, 4)}
+    assert load_checkpoint(root, model, critic, optimizer, 'mixed') == 4
+
+
 @pytest.mark.parametrize('field,value', [('session_id','stale'),('index',3),('steps',0),('std',float('nan')),
     ('student_sha256','changed'),('manifest_sha256','wrong'),('collection_protocol',{})])
 def test_request_rejects_stale_or_corrupt_identity(tmp_path,field,value):
@@ -166,7 +181,7 @@ torch.set_num_threads(1)
 channel,task,actor,*options=sys.argv[2:]
 model,_=load_student(actor)
 obs=torch.zeros(8,model.width)
-raw=SimpleNamespace(device='cpu')
+raw=SimpleNamespace(device='cpu',episode_length_buf=torch.zeros(8,dtype=torch.long),max_episode_length=1000)
 if '--full-body-torque' in options:
  raw._full_body_torque_diagnostics=dict(cost=torch.full((8,),.25),
      hard_clip_excess_nm=torch.zeros(8,23),unavailable=torch.zeros(8,23),
@@ -266,6 +281,7 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,adapter,protocol=session[
         'mean_reward', 'stairs_mean_reward', 'backpack_mean_reward', 'run_mean_reward'}
     assert not (output/'USER_PAUSED').exists() and len(launches)==6
     sessions=[json.loads(p.read_text()) for p in (output/'attempts').glob('*/session.json')]
+    assert all(s['init_at_random_ep_len'] is True for s in sessions)
     assert sorted(s['start_update'] for s in sessions)==[0,1]
     resumed_session=next(s for s in sessions if s['start_update']==1)
     resumed_folder=output/'attempts'/resumed_session['session_id']
@@ -419,6 +435,7 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
             sources = dict(value['sources'])
             sources.pop('training_reward.py', None)
             sources.pop('finetune_settings.py')
+            sources.pop('mixed_batch.py')
             sources.update({
                 'joint_finetune.py': legacy_source,
                 'finetune_state.py': '7b958616ceb651b059a7fef4c40bf3356b134a3dfe56a82bf1f64448b703efad',
@@ -427,6 +444,7 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
             })
             value = dict(value, sources=sources)
             value.pop('ppo_schedule')
+            value.pop('init_at_random_ep_len')
         write_new(path, value)
 
     args = ['--plan', str(plan_path), '--student', str(initial), '--output', str(output),

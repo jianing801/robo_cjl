@@ -570,19 +570,21 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     p=official_panel
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50_single_seed_ppo100/manifest.json')
+    manifest = bo.read(p.root/'bo/calibration50_single_seed_ppo100_random/manifest.json')
     assert manifest['updates'] == 100 and manifest['selection_velocity_frame'] == 'horizontal_heading'
     assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
+    assert manifest['init_at_random_ep_len'] is True
+    assert manifest['envs_per_task'] == dict(stairs=1366, backpack=1365, run=1365)
     bo.main(['search','--migrated','--trials','50'])
     bo.main(['search','--migrated','--trials','51'])
     assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
-    saved=bo.read(p.root/'bo/search_single_seed_ppo100/budget_0051.json')
+    saved=bo.read(p.root/'bo/search_single_seed_ppo100_random/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
     assert saved['candidates'][0]['complete_objectives'] == 0
     assert saved['candidates'][0]['mean_objective'] is None
     assert saved['candidates'][-1]['complete_objectives'] == 1
     assert saved['best_observed']['design_id'] == p.next_id
-    assert not (p.root/'bo/search_single_seed_ppo100/trial_0000').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100_random/trial_0000').exists()
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
@@ -659,7 +661,7 @@ def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
 def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50_single_seed_ppo100'
+    calib=p.root/'bo/calibration50_single_seed_ppo100_random'
     args=['search','--root',str(p.root),'--trials','51']
     if change=='actor':
         p.student.write_bytes(b'changed')
@@ -681,7 +683,7 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     with pytest.raises(ValueError):
         bo.main(args)
     assert len(p.calls)==50
-    assert not (p.root/'bo/search_single_seed_ppo100/manifest.json').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100_random/manifest.json').exists()
 
 @pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
                                     'conditions','selection_hash','nominal','body_axis'])

@@ -110,6 +110,7 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
     session = dict(kind='shared_ppo_session_v2', session_id=attempt.name, control_root=str(root),
         start_update=completed, manifest_sha256=manifest_sha256, collection_protocol=protocol,
         tasks=list(plan['teachers']), steps_per_task=STEPS_PER_TASK, std=ACTION_STD,
+        init_at_random_ep_len=a.init_at_random_ep_len,
         worker_seed=worker_seed, simulator_state_restored=False,
         resume_scope='actor, critic, Adam, coordinator RNG and update count; fresh simulator episodes')
     write_new(attempt/'session.json', session)
@@ -249,7 +250,8 @@ def run(a):
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = Path(a.output).resolve()
     sources = ('joint_finetune.py', 'finetune_state.py', 'ppo_channel.py', 'persistence.py', 'contract.py',
-               'student.py', 'pipeline.py', 'evaluation.py', 'training_reward.py', 'finetune_settings.py')
+               'student.py', 'pipeline.py', 'evaluation.py', 'training_reward.py', 'finetune_settings.py',
+               'mixed_batch.py')
     manifest = dict(kind='shared_candidate_finetuning_v2', plan_sha256=sha(a.plan),
         initial_actor_sha256=sha(a.student), candidate=candidate, updates=a.updates,
         full_body_torque=a.full_body_torque, collection_protocol=protocol, seed=a.seed,
@@ -258,17 +260,21 @@ def run(a):
         min_command_progress_ratio=a.min_command_progress_ratio,
         sources={name: sha(HERE/name) for name in sources},
         steps_per_task=STEPS_PER_TASK, envs_per_task=ENVS_PER_TASK, std=ACTION_STD, ppo_schedule=PPO_SCHEDULE,
+        init_at_random_ep_len=True,
         actor_lr=3e-6, critic_lr=1e-3, teacher_actor_updates=0,
         method='joint clipped PPO; all three tasks collected before each shared update',
         resume_scope='Committed PPO update; all learning state restored, simulator episodes restarted')
     if a.compact_training_artifacts:
         manifest['compact_training_artifacts'] = True
     a.ppo_schedule = PPO_SCHEDULE
+    a.init_at_random_ep_len = True
     if a.resume:
         frozen_manifest = json.loads((root/'manifest.json').read_text(encoding='utf8'))
         if frozen_manifest != manifest:
-            previous = {key: value for key, value in manifest.items() if key != 'ppo_schedule'}
-            previous_sources = {name: manifest['sources'][name] for name in sources if name != 'finetune_settings.py'}
+            previous = {key: value for key, value in manifest.items()
+                        if key not in ('ppo_schedule', 'init_at_random_ep_len')}
+            previous_sources = {name: manifest['sources'][name] for name in sources
+                                if name not in ('finetune_settings.py', 'mixed_batch.py')}
             previous_sources['training_reward.py'] = PRE_SCHEDULE_REWARD
             source = frozen_manifest.get('sources', {}).get('joint_finetune.py')
             if source in LEGACY_BO_COORDINATORS and a.training_only and a.compact_training_artifacts and a.updates == 200:
@@ -280,6 +286,7 @@ def run(a):
             if frozen_manifest != dict(previous, sources=previous_sources):
                 raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
             a.ppo_schedule = LEGACY_PPO_SCHEDULE
+            a.init_at_random_ep_len = False
     else:
         root.mkdir(parents=True, exist_ok=False)
         write_new(root/'manifest.json', manifest)

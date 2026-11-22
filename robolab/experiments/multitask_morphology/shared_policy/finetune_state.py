@@ -147,6 +147,17 @@ def _checkpoint_blob(folder, record):
     return path
 
 
+def prune_mixed_checkpoints(root, history, *, reconcile=False):
+    """Keep the initial and latest two learning states for the in-process sampler."""
+    folder = root/'checkpoints'
+    if folder.resolve() != folder:
+        raise ValueError('Mixed PPO checkpoint directory must be inside its run')
+    obsolete = history[1:-2] if reconcile else history[-3:-2] if len(history) >= 4 else []
+    _sync_directory(folder)
+    for receipt in obsolete:
+        _checkpoint_blob(folder, receipt).unlink(missing_ok=True)
+
+
 def _consumed_rollout_paths(attempts, record):
     tasks = ('stairs', 'backpack', 'run')
     rollout = record.get('rollout', {})

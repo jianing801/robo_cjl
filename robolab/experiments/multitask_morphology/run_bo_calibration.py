@@ -13,7 +13,8 @@ import psutil
 
 from bo import (HERE, REPO, FORMAL_CONDITIONS, TASKS, calibration_keys, check_panel_receipt,
                 checked_report, completed_actor, digest, freeze, official_conditions_path, panel_scoring, paired_trials,
-                read, read_conditions, run_lock, sha, shared_input)
+                read, read_conditions, run_lock, sha, shared_input, uses_current_schedule)
+from finetune_settings import MIXED_BO_LAYOUT, PPO_SCHEDULE
 
 
 def own_distillation(command, root):
@@ -94,11 +95,16 @@ def summarize(root, work, updates, *, conditions_path=None, continuation=None):
     conditions_sha256 = digest(conditions)
     keys = calibration_keys()
     benchmark = scoring['benchmark']
+    mixed = uses_current_schedule(updates, conditions)
     if (benchmark['updates'] != updates or benchmark['initial_actor_sha256'] != sha(initial)
             or benchmark['source_plan_sha256'] != sha(source) or len(benchmark['reports']) != len(keys)
             or scoring['conditions_sha256'] != conditions_sha256
             or read(work/'manifest.json').get('conditions_sha256') != conditions_sha256):
         raise ValueError('Calibration receipt has a different budget, policy, plan or conditions')
+    if mixed and (benchmark.get('init_at_random_ep_len') is not True
+                  or benchmark.get('envs_per_task') != MIXED_BO_LAYOUT
+                  or benchmark.get('ppo_schedule') != PPO_SCHEDULE):
+        raise ValueError('Calibration receipt uses a different mixed PPO training configuration')
     tasks = {task: [] for task in TASKS}
     reports = []
     for index, entry in enumerate(benchmark['reports'], 1):
@@ -107,7 +113,8 @@ def summarize(root, work, updates, *, conditions_path=None, continuation=None):
         if path != (folder/'bo_evaluation.json').resolve() or sha(path) != entry['sha256']:
             raise ValueError(f'Calibration report identity differs at structure {index}')
         report = checked_report(path)
-        actor = completed_actor(folder/'tuning', source, initial, report['candidate'], updates)
+        actor = completed_actor(folder/'tuning', source, initial, report['candidate'], updates,
+                                ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed)
         if (sha(actor) != report['student_sha256'] or actor != Path(report['student']).resolve()
                 or report['evaluation_manifest_sha256'] != sha(folder/'manifest.json')
                 or report['conditions'] != conditions):

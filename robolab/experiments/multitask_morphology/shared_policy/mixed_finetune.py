@@ -1,21 +1,24 @@
 """Single-structure pilot with one Isaac Lab app and one shared GPU PPO learner."""
 import argparse
 from contextlib import ExitStack
+import json
 from pathlib import Path
 import os
 import random
 import sys
 import time
 import traceback
+from uuid import uuid4
 
 import numpy as np
 import torch
 
 from contract import load_plan, sha, write_new
-from finetune_settings import PPO_SCHEDULE
-from finetune_state import select_candidate, save_checkpoint
+from finetune_settings import MIXED_BO_ENVS, PPO_SCHEDULE
+from finetune_state import checkpoint_history, load_checkpoint, prune_mixed_checkpoints, select_candidate, save_checkpoint
 from joint_finetune import ACTION_STD, STEPS_PER_TASK, check_pause, ppo_update, publish_training_completion
 from mixed_batch import advance, initialize_episode_length, task_counts
+from persistence import resume_pause, run_lock
 from randomization import protocol_metadata, assert_protocol_unchanged
 from student import load_student
 from training_reward import RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv, write_training_reward_csv
@@ -70,7 +73,7 @@ class NativeTask:
         return dict(reward=step_reward, environment_reward=reward, done=done, timeout=timeout)
 
 
-def prepare_tasks(a, plan, root, protocol, counts):
+def prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed):
     # Load the pilot's native step hooks before the frozen teacher runtime paths
     # are placed on sys.path by the per-task rollout builders.
     import robolab.tasks
@@ -85,9 +88,9 @@ def prepare_tasks(a, plan, root, protocol, counts):
         for task, count in zip(TASKS, counts, strict=True):
             definition = plan['teachers'][task]
             args = ['--plan', str(root/'plan.json'), '--design-ids', definition['design_ids'][0],
-                    '--output', str(root/task), '--mode', 'evaluate', '--ppo-channel', str(root),
+                    '--output', str(attempt/task), '--mode', 'evaluate', '--ppo-channel', str(root),
                     '--profile', a.profile, '--randomization-strength', str(a.randomization_strength),
-                    '--seed', str(a.seed), '--headless', '--device', a.device]
+                    '--seed', str(worker_seed), '--headless', '--device', a.device]
             entry = prepare_amp_rollout
             if task != 'run':
                 args.extend(('--task', task))
@@ -136,8 +139,7 @@ def collect(a, sim, tasks, counts, model, root):
     return batches
 
 
-def train(a, root, plan, candidate, protocol, counts):
-    sim, tasks = prepare_tasks(a, plan, root, protocol, counts)
+def train(a, root, attempt, plan, candidate, protocol, counts):
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
     model, _ = load_student(a.student, a.device)
     if model.schema != plan['schema']:
@@ -146,32 +148,56 @@ def train(a, root, plan, candidate, protocol, counts):
         torch.nn.Linear(256, 128), torch.nn.ELU(), torch.nn.Linear(128, 1)).to(a.device)
     optimizer = torch.optim.Adam([{'params': model.parameters(), 'lr': 3e-6},
                                   {'params': critic.parameters(), 'lr': 1e-3}])
+    digest = sha(root/'manifest.json')
+    completed = load_checkpoint(root, model, critic, optimizer, digest)
+    if completed is None:
+        completed = 0
+        save_checkpoint(root, model, critic, optimizer, 0, digest)
+    history = checkpoint_history(root, digest)
+    if completed > a.updates:
+        raise ValueError('Mixed PPO checkpoint exceeds its frozen update budget')
+    if a.compact_training_artifacts and completed:
+        prune_mixed_checkpoints(root, history, reconcile=True)
+    step_history = reward_history_rows(history, TASKS)
+    mean_history = list(mean_reward_rows(history, TASKS))
+    if completed:
+        write_training_reward_csv(root, step_history)
+        write_mean_reward_csv(root, TASKS, mean_history)
+    if completed == a.updates:
+        publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
+        return
+    worker_seed = (a.seed + completed*1009) % 2**32
+    python_rng, numpy_rng, torch_rng = random.getstate(), np.random.get_state(), torch.get_rng_state()
+    sim, tasks = prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed)
+    # Native scene creation seeds its sampling. Protect the coordinator's RNG,
+    # and use a deterministic CUDA stream for each fresh physical session.
+    random.setstate(python_rng)
+    np.random.set_state(numpy_rng)
+    torch.set_rng_state(torch_rng)
+    torch.cuda.manual_seed_all(worker_seed)
     if a.init_at_random_ep_len:
         for task in tasks:
             initialize_episode_length(task.raw.episode_length_buf, task.raw.max_episode_length)
-    write_new(root/'episode_start.json', {
+    write_new(attempt/'episode_start.json', {
         task.name: dict(min_step=int(task.raw.episode_length_buf.min()),
                         max_step=int(task.raw.episode_length_buf.max()),
                         distinct_steps=task.raw.episode_length_buf.unique().numel(),
                         max_episode_steps=int(task.raw.max_episode_length))
         for task in tasks})
-    digest = sha(root/'manifest.json')
-    write_new(root/'mixed_scene.json', dict(physics_scenes=1, pid=os.getpid(),
+    write_new(attempt/'mixed_scene.json', dict(physics_scenes=1, pid=os.getpid(),
               tasks={task.name: dict(envs=task.raw.num_envs, scope=task.raw.scene.scope,
                                     joints=task.wrapper.num_actions) for task in tasks},
               physics_dt=sim.get_physics_dt(), control_dt=tasks[0].raw.step_dt))
     print('MIXED_SCENE_READY', counts, flush=True)
-    save_checkpoint(root, model, critic, optimizer, 0, digest)
-    rewards = RolloutRewards()
-    step_history, mean_history = [], []
-    for update in range(1, a.updates+1):
+    rewards = RolloutRewards(history[-1].get('training_reward', {}).get('mean_reward_windows'))
+    for update in range(completed+1, a.updates+1):
         assert_protocol_unchanged(protocol)
         torch.cuda.reset_peak_memory_stats(a.device)
         begin = time.monotonic()
         batches = collect(a, sim, tasks, counts, model, root)
         torch.cuda.synchronize(a.device)
         collected = time.monotonic()
-        reward_summary = rewards.summarize(batches, 'mixed')
+        reward_summary = rewards.summarize(batches, attempt.name)
         metrics = ppo_update(model, critic, optimizer, batches)
         torch.cuda.synchronize(a.device)
         metrics.update(collection_seconds=collected-begin, update_seconds=time.monotonic()-collected,
@@ -180,12 +206,15 @@ def train(a, root, plan, candidate, protocol, counts):
         check_pause(root)
         receipt = save_checkpoint(root, model, critic, optimizer, update, digest, metrics,
                                   training_reward=reward_summary)
+        history.append(receipt)
+        if a.compact_training_artifacts:
+            prune_mixed_checkpoints(root, history)
         step_history.extend(reward_history_rows([receipt], TASKS))
         mean_history.extend(mean_reward_rows([receipt], TASKS))
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
         print('MIXED_PPO_UPDATE', update, '/', a.updates, metrics, flush=True)
-    publish_training_completion(a, root, model, candidate, digest, protocol)
+    publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
 
 
 def main():
@@ -196,13 +225,16 @@ def main():
     parser.add_argument('--student', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--design-id', required=True)
-    parser.add_argument('--num-envs', type=int, default=4096)
+    parser.add_argument('--num-envs', type=int, default=MIXED_BO_ENVS)
     parser.add_argument('--updates', type=int, default=100)
-    parser.add_argument('--init-at-random-ep-len', action='store_true',
+    parser.add_argument('--init-at-random-ep-len', action=argparse.BooleanOptionalAction, default=True,
                         help='Use ordinary RSL-RL episode counter initialization before the first update')
     parser.add_argument('--seed', type=int, default=20261104)
     parser.add_argument('--profile', choices=('nominal', 'robust'), default='robust')
     parser.add_argument('--randomization-strength', type=float, default=1.)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--resume-paused', action='store_true')
+    parser.add_argument('--compact-training-artifacts', action='store_true')
     AppLauncher.add_app_launcher_args(parser)
     a = parser.parse_args()
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
@@ -213,25 +245,45 @@ def main():
         raise ValueError('Mixed pilot requires the three-task student')
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = a.output.resolve()
-    root.mkdir(parents=True, exist_ok=False)
     files = ['mixed_finetune.py', 'mixed_scene.py', 'mixed_batch.py', 'joint_finetune.py',
-             'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py']
-    write_new(root/'manifest.json', dict(kind='shared_candidate_finetuning_mixed_pilot',
+             'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py']
+    manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
               init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
-              sources={name: sha(HERE/name) for name in files}))
-    write_new(root/'plan.json', plan)
-    a.kit_args = (a.kit_args or '') + f' --/renderer/multiGpu/enabled=false --portable-root {root/"portable"} --portable'
-    app = AppLauncher(a).app
-    try:
-        train(a, root, plan, candidate, protocol, counts)
-    except BaseException:
-        write_new(root/'failure.json', dict(traceback=traceback.format_exc()))
-        traceback.print_exc()
-        sys.stdout.flush(); sys.stderr.flush()
-        os._exit(1)
+              compact_training_artifacts=a.compact_training_artifacts,
+              sources={name: sha(HERE/name) for name in files})
+    with run_lock(root):
+        if a.resume or a.resume_paused:
+            if (json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest
+                    or load_plan(root/'plan.json') != plan):
+                raise ValueError('Mixed PPO candidate, budget, episode timing or sources changed')
+        else:
+            root.mkdir(parents=True, exist_ok=True)
+            frozen_plan = root/'plan.json'
+            if any(path != frozen_plan for path in root.iterdir()):
+                raise ValueError('Mixed PPO output already exists; resume the frozen run')
+            if frozen_plan.is_file():
+                if load_plan(frozen_plan) != plan:
+                    raise ValueError('Mixed PPO preparation belongs to a different candidate')
+            else:
+                write_new(frozen_plan, plan)
+            write_new(root/'manifest.json', manifest)
+        resume_pause(root, a.resume_paused)
+        attempt = root/'attempts'/uuid4().hex
+        attempt.mkdir(parents=True, exist_ok=False)
+        a.kit_args = (a.kit_args or '') + f' --/renderer/multiGpu/enabled=false --portable-root {attempt/"portable"} --portable'
+        app = AppLauncher(a).app
+        try:
+            train(a, root, attempt, plan, candidate, protocol, counts)
+        except BaseException as error:
+            if isinstance(error, KeyboardInterrupt):
+                (root/'USER_PAUSED').touch()
+            write_new(attempt/'failure.json', dict(traceback=traceback.format_exc()))
+            traceback.print_exc()
+            sys.stdout.flush(); sys.stderr.flush()
+            os._exit(1)
     # All artifacts are committed before exit. The three subscenes share one
     # context, so running the native per-environment Kit teardown would clear
     # the context repeatedly and the global close can hang.

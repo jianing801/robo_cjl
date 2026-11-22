@@ -2,6 +2,7 @@
 import json,time,math
 from pathlib import Path
 import torch
+from mixed_batch import initialize_episode_length
 from student import load_student
 from contract import sha
 from persistence import atomic_publish
@@ -33,6 +34,8 @@ def serve(channel,task,env,raw,obs,canonical,clip,reward_adapter=None,*,protocol
     control=Path(session['control_root'])
     def stopped():return (root/'STOP').exists() or (control/'USER_PAUSED').exists()
     index=session['start_update'];reset=None
+    if session.get('init_at_random_ep_len'):
+        initialize_episode_length(raw.episode_length_buf, raw.max_episode_length)
     base=canonical(obs,reset)
     while True:
         request=root/f'request_{index:03d}.json';started=time.monotonic()

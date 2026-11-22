@@ -42,7 +42,7 @@ from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from evaluation import EVALUATION_VELOCITY_FRAME
-from finetune_settings import PPO_SCHEDULE
+from finetune_settings import MIXED_BO_ENVS, MIXED_BO_LAYOUT, PPO_SCHEDULE
 from persistence import resume_pause, run_lock
 from stair_course import COURSE, evaluation_flight, outside_flight
 
@@ -90,7 +90,7 @@ def uses_current_schedule(updates, conditions):
 def calibration_label(conditions, updates=DEFAULT_BO_UPDATES):
     if conditions.get('reset_mode') != 'fixed':
         return 'calibration50'
-    return 'calibration50_single_seed_ppo100' if uses_current_schedule(updates, conditions) else 'calibration50_single_seed'
+    return 'calibration50_single_seed_ppo100_random' if uses_current_schedule(updates, conditions) else 'calibration50_single_seed'
 
 
 def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
@@ -169,7 +169,7 @@ def actor_receipt(root):
     return training if training.is_file() else root/'completed.json'
 
 
-def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_schedule=None):
+def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_schedule=None, mixed_bo=False):
     manifest_path = root/'manifest.json'
     receipt = actor_receipt(root)
     complete = read(receipt)
@@ -192,6 +192,9 @@ def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_sched
         raise ValueError('Fine-tuned candidate/actor identity or PPO budget does not match')
     if ppo_schedule is not None and manifest.get('ppo_schedule') != ppo_schedule:
         raise ValueError('Fine-tuned candidate uses a different PPO optimizer schedule')
+    if mixed_bo and (manifest.get('init_at_random_ep_len') is not True
+                     or manifest.get('envs_per_task') != MIXED_BO_LAYOUT):
+        raise ValueError('Formal BO requires mixed 4096-environment training with random initial episode counters')
     if training_only:
         folder = root/'checkpoints'
         receipt = folder/f'update_{updates:06d}.json'
@@ -283,12 +286,17 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
     freeze_candidate_manifest(work/'manifest.json', identity, fixed_reset=conditions.get('reset_mode') == 'fixed')
     resume_pause(work, a.resume_paused)
     tuning = (a.finetuned if getattr(a, 'finetuned', None) else work/'tuning').resolve()
+    mixed = uses_current_schedule(a.updates, conditions)
     if not actor_receipt(tuning).is_file():
-        command = [sys.executable, '-u', HERE/'finetune.py', '--plan', source, '--student', initial,
-                   '--output', tuning, '--design-id', design_id, '--updates', str(a.updates),
-                   '--device', f'cuda:{a.gpu}', '--training-only',
-                   '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
-                   '--timeout-seconds', str(a.timeout)]
+        entry = SHARED/'mixed_finetune.py' if mixed else HERE/'finetune.py'
+        command = [sys.executable, '-u', entry, '--plan', source, '--student', initial,
+                   '--output', tuning, '--design-id', design_id, '--updates', str(a.updates)]
+        if mixed:
+            command += ['--device', 'cuda:0', '--headless', '--num-envs', str(MIXED_BO_ENVS)]
+        else:
+            command += ['--device', f'cuda:{a.gpu}', '--training-only',
+                        '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
+                        '--timeout-seconds', str(a.timeout)]
         tuning_manifest = tuning/'manifest.json'
         if tuning_manifest.is_file():
             command.append('--resume')
@@ -301,10 +309,17 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
             command.append('--compact-training-artifacts')
         logs = work/'tuning_logs'/uuid4().hex[:8]
         print('BO_FINETUNING', design_id, candidate['structure_key'], logs, flush=True)
-        # The native fine-tune coordinator owns GPU leases and per-worker timeouts.
-        run_worker(command, logs, os.environ, (a.updates + 18) * a.timeout, work)
-    expected_schedule = PPO_SCHEDULE if uses_current_schedule(a.updates, conditions) else None
-    actor = completed_actor(tuning, source, initial, candidate, a.updates, ppo_schedule=expected_schedule)
+        timeout = (a.updates + 18) * a.timeout
+        if mixed:
+            from robolab.rough_gpu import candidates, child_environment, gpu_lease, query_gpus
+            choices = candidates(query_gpus(), os.environ, min_free_mib=12800,
+                                 max_utilization=100, requested=f'cuda:{a.gpu}')
+            with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as gpu:
+                run_worker(command, logs, child_environment(gpu, os.environ), timeout, work)
+        else:
+            run_worker(command, logs, os.environ, timeout, work)
+    actor = completed_actor(tuning, source, initial, candidate, a.updates,
+                            ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed)
     plan_path = tuning/'plan.json'
     if load_plan(plan_path) != plan:
         raise ValueError('Fine-tuned physical plan differs from BO candidate')
@@ -502,6 +517,8 @@ def initialize(a, work, source, plan, actor, conditions):
         benchmark['selection_velocity_frame'] = EVALUATION_VELOCITY_FRAME
     if uses_current_schedule(a.updates, conditions):
         benchmark['ppo_schedule'] = PPO_SCHEDULE
+        benchmark['init_at_random_ep_len'] = True
+        benchmark['envs_per_task'] = MIXED_BO_LAYOUT
     manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
     freeze(work/'manifest.json', manifest)
     resume_pause(work,a.resume_paused)
@@ -611,8 +628,10 @@ def search(a, work, source, plan, actor, conditions):
         if (a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)) and (
                 benchmark.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME):
             raise ValueError('Initial observations must come from horizontal heading checkpoint selection')
-        if uses_current_schedule(a.updates, conditions) and benchmark.get('ppo_schedule') != PPO_SCHEDULE:
-            raise ValueError('Initial observations use a different PPO optimizer schedule')
+        if uses_current_schedule(a.updates, conditions) and (
+                benchmark.get('ppo_schedule') != PPO_SCHEDULE or benchmark.get('init_at_random_ep_len') is not True
+                or benchmark.get('envs_per_task') != MIXED_BO_LAYOUT):
+            raise ValueError('Initial observations use a different PPO schedule, episode timing or environment layout')
         if a.trials < len(keys):
             raise ValueError('The total BO budget must include the 50 initial observations')
         lookup = {tuple(row['key']): row for row in pool}
@@ -769,7 +788,7 @@ def main(argv=None):
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
-        label += '_ppo100'
+        label += '_ppo100_random'
     work = (a.output or a.root/'bo'/label).resolve()
     with run_lock(work):
         work.mkdir(parents=True, exist_ok=True)
