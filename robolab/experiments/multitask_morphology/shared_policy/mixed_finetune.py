@@ -26,6 +26,7 @@ TASKS = ('stairs', 'backpack', 'run')
 
 
 class NativeTask:
+    @torch.inference_mode()
     def __init__(self, name, backend, protocol):
         self.name = name
         self.wrapper, self.raw, obs, self.canonical, self.clip, self.reward_adapter, policy = backend
@@ -107,7 +108,7 @@ def prepare_tasks(a, plan, root, protocol, counts):
     return sim, backends
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def collect(a, sim, tasks, counts, model, root):
     for task in tasks:
         task.records.clear()
