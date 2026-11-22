@@ -325,8 +325,7 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     monkeypatch.setattr(bo, 'run_worker', worker)
     args = ['evaluate', '--root', str(tmp_path), '--output', str(out), '--candidate', 'stairsid',
             '--conditions', str(conditions_path), '--gpu', '3', '--timeout', '15']
-    if updates != 200:
-        args += ['--updates', str(updates)]
+    args += ['--updates', str(updates)]
     if resume_paused:
         args.append('--resume-paused')
     bo.main(args)
@@ -570,19 +569,20 @@ def official_panel(tmp_path, monkeypatch):
 def test_official_panel_initializes_once_and_proposes_candidate_51(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
-    assert p.calls == [(k,bo.sha(p.student),200) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50_single_seed/manifest.json')
-    assert manifest['updates'] == 200 and manifest['selection_velocity_frame'] == 'horizontal_heading'
+    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
+    manifest = bo.read(p.root/'bo/calibration50_single_seed_ppo100/manifest.json')
+    assert manifest['updates'] == 100 and manifest['selection_velocity_frame'] == 'horizontal_heading'
+    assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
     bo.main(['search','--migrated','--trials','50'])
     bo.main(['search','--migrated','--trials','51'])
-    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),200)]
-    saved=bo.read(p.root/'bo/search_single_seed/budget_0051.json')
+    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
+    saved=bo.read(p.root/'bo/search_single_seed_ppo100/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
     assert saved['candidates'][0]['complete_objectives'] == 0
     assert saved['candidates'][0]['mean_objective'] is None
     assert saved['candidates'][-1]['complete_objectives'] == 1
     assert saved['best_observed']['design_id'] == p.next_id
-    assert not (p.root/'bo/search_single_seed/trial_0000').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100/trial_0000').exists()
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
@@ -635,7 +635,7 @@ def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
     assert len(p.calls) == 50
     assert manifest.read_bytes() == original_manifest
     with pytest.raises(ValueError, match='Frozen BO identity differs'):
-        bo.main(['initialize', '--migrated', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)])
+        bo.main(['initialize', '--migrated', '--updates', '200', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)])
     assert len(p.calls) == 50
     assert manifest.read_bytes() == original_manifest
 
@@ -659,12 +659,12 @@ def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
 def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50_single_seed'
+    calib=p.root/'bo/calibration50_single_seed_ppo100'
     args=['search','--root',str(p.root),'--trials','51']
     if change=='actor':
         p.student.write_bytes(b'changed')
     elif change=='budget':
-        args+=['--updates','99']
+        args+=['--updates','99','--scoring',str(calib/'scoring.json')]
     elif change=='report':
         with (calib/'design_01/bo_evaluation.json').open('a') as f: f.write(' ')
     elif change=='substituted_manifest':
@@ -681,7 +681,7 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     with pytest.raises(ValueError):
         bo.main(args)
     assert len(p.calls)==50
-    assert not (p.root/'bo/search_single_seed/manifest.json').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100/manifest.json').exists()
 
 @pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
                                     'conditions','selection_hash','nominal','body_axis'])

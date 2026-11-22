@@ -13,7 +13,8 @@ REPO = HERE.parents[2]
 SHARED = HERE/'shared_policy'
 DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
-DEFAULT_BO_UPDATES = 200
+DEFAULT_BO_UPDATES = 100
+PREVIOUS_BO_UPDATES = 200
 PRE_TRAINING_ONLY_BO_SHA256 = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
 # LF and CRLF coordinator hashes before the measurement-import default changed.
 PRE_INGEST_ALIGNMENT_BO_SHA256 = {
@@ -41,6 +42,7 @@ from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from evaluation import EVALUATION_VELOCITY_FRAME
+from finetune_settings import PPO_SCHEDULE
 from persistence import resume_pause, run_lock
 from stair_course import COURSE, evaluation_flight, outside_flight
 
@@ -81,8 +83,14 @@ def official_conditions_path(conditions_sha256):
     raise ValueError('Official BO requires the fixed three-task conditions or the archived three-seed conditions')
 
 
-def calibration_label(conditions):
-    return 'calibration50_single_seed' if conditions.get('reset_mode') == 'fixed' else 'calibration50'
+def uses_current_schedule(updates, conditions):
+    return updates == DEFAULT_BO_UPDATES and conditions.get('reset_mode') == 'fixed'
+
+
+def calibration_label(conditions, updates=DEFAULT_BO_UPDATES):
+    if conditions.get('reset_mode') != 'fixed':
+        return 'calibration50'
+    return 'calibration50_single_seed_ppo100' if uses_current_schedule(updates, conditions) else 'calibration50_single_seed'
 
 
 def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
@@ -94,7 +102,7 @@ def check_formal_selection(root, plan, manifest, complete, student, *, require_h
     if protocol.get('stair_evaluation') != COURSE:
         raise ValueError('Formal BO requires round selection on the timed ascending stair flight')
     if require_horizontal_selection and protocol.get('evaluation_velocity_frame') != EVALUATION_VELOCITY_FRAME:
-        raise ValueError('Formal 200-update BO requires selection in the horizontal heading frame')
+        raise ValueError('Formal BO requires selection in the horizontal heading frame')
     if (digest(protocol) != manifest.get('protocol_sha256') or complete.get('protocol') != protocol
             or complete.get('result') != 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
             or complete.get('full_bank_evaluated') is not False or protocol.get('dagger_rounds') != 3
@@ -161,7 +169,7 @@ def actor_receipt(root):
     return training if training.is_file() else root/'completed.json'
 
 
-def completed_actor(root, source_plan, initial, candidate, updates):
+def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_schedule=None):
     manifest_path = root/'manifest.json'
     receipt = actor_receipt(root)
     complete = read(receipt)
@@ -182,6 +190,8 @@ def completed_actor(root, source_plan, initial, candidate, updates):
             or complete['ppo_updates'] != updates or manifest['updates'] != updates
             or sha(actor) != complete['student_sha256']):
         raise ValueError('Fine-tuned candidate/actor identity or PPO budget does not match')
+    if ppo_schedule is not None and manifest.get('ppo_schedule') != ppo_schedule:
+        raise ValueError('Fine-tuned candidate uses a different PPO optimizer schedule')
     if training_only:
         folder = root/'checkpoints'
         receipt = folder/f'update_{updates:06d}.json'
@@ -286,14 +296,15 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
                 command.append('--resume-paused')
             compact = read(tuning_manifest).get('compact_training_artifacts') is True
         else:
-            compact = a.updates == DEFAULT_BO_UPDATES
+            compact = a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)
         if compact:
             command.append('--compact-training-artifacts')
         logs = work/'tuning_logs'/uuid4().hex[:8]
         print('BO_FINETUNING', design_id, candidate['structure_key'], logs, flush=True)
         # The native fine-tune coordinator owns GPU leases and per-worker timeouts.
         run_worker(command, logs, os.environ, (a.updates + 18) * a.timeout, work)
-    actor = completed_actor(tuning, source, initial, candidate, a.updates)
+    expected_schedule = PPO_SCHEDULE if uses_current_schedule(a.updates, conditions) else None
+    actor = completed_actor(tuning, source, initial, candidate, a.updates, ppo_schedule=expected_schedule)
     plan_path = tuning/'plan.json'
     if load_plan(plan_path) != plan:
         raise ValueError('Fine-tuned physical plan differs from BO candidate')
@@ -487,8 +498,10 @@ def initialize(a, work, source, plan, actor, conditions):
     if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
         raise ValueError('Missing fixed calibration structures in shared plan')
     benchmark = dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates)
-    if a.updates == DEFAULT_BO_UPDATES:
+    if a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions):
         benchmark['selection_velocity_frame'] = EVALUATION_VELOCITY_FRAME
+    if uses_current_schedule(a.updates, conditions):
+        benchmark['ppo_schedule'] = PPO_SCHEDULE
     manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
     freeze(work/'manifest.json', manifest)
     resume_pause(work,a.resume_paused)
@@ -595,9 +608,11 @@ def search(a, work, source, plan, actor, conditions):
         if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
                 or benchmark['updates'] != a.updates or len(benchmark['reports']) != len(keys)):
             raise ValueError('Initial observations must share the selected actor, source plan and PPO budget')
-        if (a.updates == DEFAULT_BO_UPDATES
-                and benchmark.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME):
+        if (a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)) and (
+                benchmark.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME):
             raise ValueError('Initial observations must come from horizontal heading checkpoint selection')
+        if uses_current_schedule(a.updates, conditions) and benchmark.get('ppo_schedule') != PPO_SCHEDULE:
+            raise ValueError('Initial observations use a different PPO optimizer schedule')
         if a.trials < len(keys):
             raise ValueError('The total BO budget must include the 50 initial observations')
         lookup = {tuple(row['key']): row for row in pool}
@@ -713,7 +728,7 @@ def main(argv=None):
     conditions_path = a.conditions or FORMAL_CONDITIONS
     conditions = read_conditions(conditions_path)
     if a.command == 'search':
-        default_scoring = a.root/'bo'/calibration_label(conditions)/'scoring.json'
+        default_scoring = a.root/'bo'/calibration_label(conditions, a.updates)/'scoring.json'
         anchored_scoring = default_scoring.parent/'percentile_scoring/scoring.json'
         if (anchored_scoring.parent/'completed.json').is_file():
             default_scoring = anchored_scoring
@@ -733,7 +748,7 @@ def main(argv=None):
     a.conditions = conditions_path.resolve()
     continuation = {}
     if a.shared_continuation is not None:
-        if (conditions.get('reset_mode') != 'fixed' or a.updates != DEFAULT_BO_UPDATES
+        if (conditions.get('reset_mode') != 'fixed' or a.updates not in (DEFAULT_BO_UPDATES, PREVIOUS_BO_UPDATES)
                 or (a.command == 'search' and not formal)):
             parser.error('A continuation actor requires formal single-seed conditions and the default PPO budget')
         formal = True
@@ -741,17 +756,20 @@ def main(argv=None):
     if formal:
         official_conditions_path(digest(conditions))
     source, plan, actor = shared_input(a.root, formal=formal, **continuation,
-                                      require_horizontal_selection=formal and a.updates == DEFAULT_BO_UPDATES)
+                                      require_horizontal_selection=formal and (
+                                          a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)))
     if a.command == 'evaluate' and a.candidate not in plan['teachers']['stairs']['design_ids']:
         parser.error('Candidate must be an exact shared Rough structure ID')
     if getattr(a, 'finetuned', None) and not actor_receipt(a.finetuned).is_file():
         parser.error('--finetuned needs the completed candidate run directory')
     if a.command == 'initialize':
-        label = calibration_label(conditions)
+        label = calibration_label(conditions, a.updates)
     elif a.command == 'search':
         label = 'search_single_seed' if formal and conditions.get('reset_mode') == 'fixed' else 'search'
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
+    if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
+        label += '_ppo100'
     work = (a.output or a.root/'bo'/label).resolve()
     with run_lock(work):
         work.mkdir(parents=True, exist_ok=True)

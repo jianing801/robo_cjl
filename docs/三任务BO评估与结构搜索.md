@@ -5,10 +5,10 @@
 ## 第一步　运行固定的 50 个结构并冻结尺度
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0 --updates 200
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0
 ```
 
-程序按原第 21 组的既定顺序评估 50 个结构。每个结构从同一胜出共享模型独立开始，做 200 次三任务联合 PPO 更新。确认最后一次更新和冻结模型的身份后，直接进入固定工况评估。`initialize`、`search` 和 `evaluate` 的默认微调预算均为 200 次。所有正式候选使用相同预算。
+程序按原第 21 组的既定顺序评估 50 个结构。每个结构从同一胜出共享模型独立开始，默认做 100 次三任务联合 PPO 更新。每次更新用同一批数据训练 5 个 epoch，每个 epoch 分为 4 个小批。确认最后一次更新和冻结模型的身份后，直接进入固定工况评估。前 50 个定标结构和后 50 个搜索候选使用同一预算和优化配置。
 
 每个结构做 3 条正式试次。三项任务统一使用固定种子 `20261118`，每项任务跑 20 秒。初始机身位置、姿态和关节状态固定，关闭观测噪声、推力、动力学随机化和动作采样。50 个结构共 150 条正式试次。名义和鲁棒步态诊断可通过独立微调入口运行。[独立跟踪评价](候选结构微调与续训.md#独立跟踪评价与固定工况-bo)
 
@@ -28,26 +28,26 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 
 定标按任务分别进行。每个结构在某项任务上成功时，用该项正式试次的指标参与该任务定标。在该任务的合格结构中，按结构等权，通过线性插值计算每项指标的 P10 和 P90。某任务的有效结构不足两种，或某项指标的分位差为零时，程序中止定标。
 
-先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。综合代价默认对三个任务等权。定标产物 `bo/calibration50_single_seed/scoring.json` 冻结九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
+先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。综合代价默认对三个任务等权。定标产物 `bo/calibration50_single_seed_ppo100/scoring.json` 冻结九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
 
 Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，并保留区间外数值。《综合指标构建手册》第 5.3 节说明如何使用固定参照尺度，第 6.10 节式（31）给出了线性加权。历史专家图的原始权重和分数见[专家评估记录](Rough与AMP专家评估及评分记录.md#归一化方法与文献)。[Moharir 等，AIAA AVIATION 2026](https://doi.org/10.2514/6.2026-4497) · [作者公开全文](https://www.researchgate.net/publication/406033991_A_Unified_Objective_Layer_for_Multidisciplinary_Optimization_of_Aircraft_Arrival_Trajectories) · [OECD/JRC 手册](https://doi.org/10.1787/9789264043466-en)
 
 ### 暂停、恢复与保存产物
 
-同一轮定标中断后重复原命令，人工暂停后加 `--resume-paused`。正式 BO 启动的 200 次微调启用精简留存。每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的 JSON 提交与指标、最终模型及原始评估数据。各任务的 PPO 微调 reward 位于候选的 `tuning/training_reward.csv`，包括每步均值、完成回合数及回合累计回报。`tuning/training_completed.json` 记录最终 PPO 更新、训练清单和冻结模型的身份。正式结果保存在 `bo_evaluation.json`，逐条保留已提交的正式试次，恢复时继续未完成的试次。训练更新提交后释放当次的采样批次张量和临时 actor，保留扭矩审计摘要。指定 `--output` 时，恢复须使用相同目录，后续搜索用 `--scoring` 指向该目录的 `scoring.json`。
+同一轮定标中断后重复原命令，人工暂停后加 `--resume-paused`。正式 BO 使用精简留存。每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的 JSON 提交与指标、最终模型及原始评估数据。`tuning/mean_reward.csv` 每代保存总体和三个任务各自的 Mean reward，`tuning/training_reward.csv` 还保存每步均值、完成回合数及回合累计回报。`tuning/training_completed.json` 记录最终 PPO 更新、训练清单和冻结模型的身份。正式结果保存在 `bo_evaluation.json`，逐条保留已提交的正式试次，恢复时继续未完成的试次。训练更新提交后释放当次的采样批次张量和临时 actor，保留扭矩审计摘要。指定 `--output` 时，恢复须使用相同目录，后续搜索用 `--scoring` 指向该目录的 `scoring.json`。
 
 选用已完成追加蒸馏后的胜出模型时，给 `initialize`、`search` 和 `evaluate` 加同一个 `--shared-continuation <追加轮目录>`。程序核验历史回合，并按任务成功率选择共享模型。切换起始模型时，为定标和搜索各指定新的 `--output`，搜索通过 `--scoring` 指向该定标目录。已有清单只接受其绑定的模型与工况。
 
-旧三种子协议保留在 `robolab/experiments/multitask_morphology/configs/bo_conditions.json`。复现该协议时显式传 `--conditions`，并使用原实验目录。新单种子定标默认写入 `bo/calibration50_single_seed`。
+旧三种子协议保留在 `robolab/experiments/multitask_morphology/configs/bo_conditions.json`。复现该协议时显式传 `--conditions`，并使用原实验目录。新单种子定标默认写入 `bo/calibration50_single_seed_ppo100`。
 
 ### 归档的每结构 100 次 PPO 更新定标
 
-续跑或复现历史 100 次实验时，在原冻结版本中显式传 `--updates 100`，并沿用原工况、起始模型和输出目录。旧公式定标的完整测量如需按锚定分位数重算，可用支持该定标版本的 `initialize --updates 100` 核验 50 份原始报告并生成 `percentile_scoring/scoring.json`，保留原报告和评分。200 次正式流程使用自身的定标测量、分位端点和搜索目录。
+历史实验用原冻结版本、预算、工况、起始模型和输出目录续跑。新的 100 次配置使用独立的定标测量、分位端点和搜索目录。旧公式定标的完整测量如需按锚定分位数重算，可用支持该定标版本的 `initialize` 核验 50 份原始报告并生成 `percentile_scoring/scoring.json`。
 
 ## 第二步　在冻结尺度下运行 BO
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 100 --gpu 0 --updates 200
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 100 --gpu 0
 ```
 
 正式总预算为 **100 个结构**。前 50 个是原第 21 组的定标结构，后 50 个由 BO 逐个提议。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构。默认三任务之间等权。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
@@ -59,7 +59,7 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 把 `真实结构ID` 换成共同结构库里该候选的 `stairs` ID。
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py evaluate --migrated --gpu 0 --updates 200 --candidate 真实结构ID
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py evaluate --migrated --gpu 0 --candidate 真实结构ID
 ```
 
 `evaluate` 输出单结构的固定工况测量。已有预算、初始模型和结构身份均匹配的完整微调时，可以用 `--finetuned` 复用其输出目录。使用同预算的冻结定标文件计算分数时，运行 `bo.py score <评估目录>/bo_evaluation.json --scoring <定标目录>/scoring.json`。

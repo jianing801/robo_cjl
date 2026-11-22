@@ -13,18 +13,26 @@ import numpy as np
 import torch
 
 from contract import load_plan, sha, write_new
+from finetune_settings import LEGACY_PPO_SCHEDULE, PPO_SCHEDULE
 from finetune_state import (select_candidate, save_checkpoint, load_checkpoint, checkpoint_history,
                             prune_training_artifacts, validate_batch)
 from persistence import run_lock, resume_pause
 from randomization import protocol_metadata, assert_protocol_unchanged
 from student import load_student, save_student
-from training_reward import RolloutRewards, reward_history_rows, write_training_reward_csv
+from training_reward import (RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv,
+                             write_training_reward_csv)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 STEPS_PER_TASK = 24
 ENVS_PER_TASK = 8
 ACTION_STD = .05
+# Frozen 4-by-3 coordinator and reward logger immediately preceding the new schedule.
+PRE_SCHEDULE_COORDINATORS = {
+    'dc0dd00027c3ae079789fd9add29b12c8b052775a7c66a9809031268bbfc0eb1',
+    '876489489175f832a1dd9c9ab2e99bd63a7ee0ae1792d838aaf0bc6c4b3b861d',
+}
+PRE_SCHEDULE_REWARD = 'e82926c554a9e4380e1eb36bfccc565c68b209b52beacb1ada6b4d37d708e7fc'
 # Exact predecessors used by the compact 200-update Linux BO runs.
 LEGACY_BO_COORDINATORS = (
     '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c',
@@ -59,7 +67,7 @@ def returns(reward, done, timeout, value, last, gamma=.99, lam=.95):
     return result
 
 
-def ppo_update(model, critic, optimizer, batches):
+def ppo_update(model, critic, optimizer, batches, *, schedule=PPO_SCHEDULE):
     prepared = []
     for data in batches:
         x = data['obs']; shape = x.shape[:2]
@@ -73,8 +81,8 @@ def ppo_update(model, critic, optimizer, batches):
                          target.flatten(), advantage.flatten()))
     x, actions, oldlog, target, advantage = [torch.cat(parts) for parts in zip(*prepared)]
     losses = []; model.train(); critic.train()
-    for _ in range(4):
-        for ids in torch.randperm(len(x)).split(192):
+    for _ in range(schedule['epochs']):
+        for ids in torch.randperm(len(x)).tensor_split(min(schedule['minibatches'], len(x))):
             distribution = torch.distributions.Normal(model(x[ids]), ACTION_STD)
             ratio = (distribution.log_prob(actions[ids]).sum(-1)-oldlog[ids]).exp()
             policy = -torch.minimum(ratio*advantage[ids], ratio.clamp(.8, 1.2)*advantage[ids]).mean()
@@ -105,8 +113,12 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
         worker_seed=worker_seed, simulator_state_restored=False,
         resume_scope='actor, critic, Adam, coordinator RNG and update count; fresh simulator episodes')
     write_new(attempt/'session.json', session)
-    rewards = RolloutRewards()
-    reward_rows = reward_history_rows(checkpoint_history(root, manifest_sha256), session['tasks'])
+    history = checkpoint_history(root, manifest_sha256)
+    tasks = session['tasks']
+    latest_rewards = history[-1].get('training_reward', {})
+    rewards = RolloutRewards(latest_rewards.get('mean_reward_windows'))
+    reward_rows = reward_history_rows(history, tasks)
+    mean_rows = list(mean_reward_rows(history, tasks))
     workers = []; handles = []
     try:
         for task, spec in plan['teachers'].items():
@@ -144,7 +156,7 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
                 for task in plan['teachers']]
             check_pause(root)
             training_reward = rewards.summarize(batches, session['session_id'])
-            metrics = ppo_update(model, critic, optimizer, batches)
+            metrics = ppo_update(model, critic, optimizer, batches, schedule=a.ppo_schedule)
             check_pause(root); assert_protocol_unchanged(protocol)
             rollout = None
             if a.compact_training_artifacts:
@@ -154,6 +166,8 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
                                       rollout=rollout, training_reward=training_reward)
             reward_rows.extend(reward_history_rows([receipt], session['tasks']))
             write_training_reward_csv(root, reward_rows)
+            mean_rows.extend(mean_reward_rows([receipt], tasks))
+            write_mean_reward_csv(root, tasks, mean_rows)
             if rollout is not None:
                 prune_training_artifacts(root, manifest_sha256, index+1)
             print('JOINT_PPO_UPDATE', index+1, '/', a.updates, flush=True)
@@ -235,7 +249,7 @@ def run(a):
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = Path(a.output).resolve()
     sources = ('joint_finetune.py', 'finetune_state.py', 'ppo_channel.py', 'persistence.py', 'contract.py',
-               'student.py', 'pipeline.py', 'evaluation.py', 'training_reward.py')
+               'student.py', 'pipeline.py', 'evaluation.py', 'training_reward.py', 'finetune_settings.py')
     manifest = dict(kind='shared_candidate_finetuning_v2', plan_sha256=sha(a.plan),
         initial_actor_sha256=sha(a.student), candidate=candidate, updates=a.updates,
         full_body_torque=a.full_body_torque, collection_protocol=protocol, seed=a.seed,
@@ -243,21 +257,29 @@ def run(a):
         robust_evaluation_strength=1.,
         min_command_progress_ratio=a.min_command_progress_ratio,
         sources={name: sha(HERE/name) for name in sources},
-        steps_per_task=STEPS_PER_TASK, envs_per_task=ENVS_PER_TASK, std=ACTION_STD,
+        steps_per_task=STEPS_PER_TASK, envs_per_task=ENVS_PER_TASK, std=ACTION_STD, ppo_schedule=PPO_SCHEDULE,
         actor_lr=3e-6, critic_lr=1e-3, teacher_actor_updates=0,
         method='joint clipped PPO; all three tasks collected before each shared update',
         resume_scope='Committed PPO update; all learning state restored, simulator episodes restarted')
     if a.compact_training_artifacts:
         manifest['compact_training_artifacts'] = True
+    a.ppo_schedule = PPO_SCHEDULE
     if a.resume:
         frozen_manifest = json.loads((root/'manifest.json').read_text(encoding='utf8'))
         if frozen_manifest != manifest:
-            previous_sources = {name: manifest['sources'][name] for name in sources if name != 'training_reward.py'}
-            previous_sources.update(LEGACY_BO_SOURCES)
-            if not (a.training_only and a.compact_training_artifacts and a.updates == 200
-                    and any(frozen_manifest == dict(manifest, sources={**previous_sources, 'joint_finetune.py': old})
-                            for old in LEGACY_BO_COORDINATORS)):
+            previous = {key: value for key, value in manifest.items() if key != 'ppo_schedule'}
+            previous_sources = {name: manifest['sources'][name] for name in sources if name != 'finetune_settings.py'}
+            previous_sources['training_reward.py'] = PRE_SCHEDULE_REWARD
+            source = frozen_manifest.get('sources', {}).get('joint_finetune.py')
+            if source in LEGACY_BO_COORDINATORS and a.training_only and a.compact_training_artifacts and a.updates == 200:
+                previous_sources.pop('training_reward.py')
+                previous_sources.update(LEGACY_BO_SOURCES)
+            elif source not in PRE_SCHEDULE_COORDINATORS:
                 raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
+            previous_sources['joint_finetune.py'] = source
+            if frozen_manifest != dict(previous, sources=previous_sources):
+                raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
+            a.ppo_schedule = LEGACY_PPO_SCHEDULE
     else:
         root.mkdir(parents=True, exist_ok=False)
         write_new(root/'manifest.json', manifest)
@@ -287,6 +309,7 @@ def run(a):
     if completed:
         history = checkpoint_history(root, manifest_sha256)
         write_training_reward_csv(root, reward_history_rows(history, plan['teachers']))
+        write_mean_reward_csv(root, plan['teachers'], mean_reward_rows(history, plan['teachers']))
     if not a.training_only and (root/'completed.json').exists():
         record = json.loads((root/'completed.json').read_text(encoding='utf8'))
         if (record['manifest_sha256'] != manifest_sha256 or record['ppo_updates'] != completed

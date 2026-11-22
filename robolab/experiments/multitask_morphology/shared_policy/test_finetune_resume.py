@@ -255,7 +255,15 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,adapter,protocol=session[
     assert (output/'shared_actor_finetuned.pt').exists() and not (output/'completed.json').exists()
     reward_csv=output/'training_reward.csv'
     reward_csv.unlink()  # Restore the derived view from checkpoint receipts on resume.
+    mean_csv = output/'mean_reward.csv'
+    expected_mean_rows = mean_csv.read_bytes()
+    mean_csv.unlink()
     joint.main(args+['--resume-paused'])
+    assert mean_csv.read_bytes() == expected_mean_rows
+    with mean_csv.open(newline='', encoding='utf8') as stream:
+        mean_rows = list(csv.DictReader(stream))
+    assert len(mean_rows) == updates and set(mean_rows[0]) >= {
+        'mean_reward', 'stairs_mean_reward', 'backpack_mean_reward', 'run_mean_reward'}
     assert not (output/'USER_PAUSED').exists() and len(launches)==6
     sessions=[json.loads(p.read_text()) for p in (output/'attempts').glob('*/session.json')]
     assert sorted(s['start_update'] for s in sessions)==[0,1]
@@ -410,6 +418,7 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
         if path == output/'manifest.json':
             sources = dict(value['sources'])
             sources.pop('training_reward.py', None)
+            sources.pop('finetune_settings.py')
             sources.update({
                 'joint_finetune.py': legacy_source,
                 'finetune_state.py': '7b958616ceb651b059a7fef4c40bf3356b134a3dfe56a82bf1f64448b703efad',
@@ -417,6 +426,7 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
                 'pipeline.py': 'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
             })
             value = dict(value, sources=sources)
+            value.pop('ppo_schedule')
         write_new(path, value)
 
     args = ['--plan', str(plan_path), '--student', str(initial), '--output', str(output),
