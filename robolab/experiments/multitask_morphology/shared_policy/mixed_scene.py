@@ -1,5 +1,5 @@
 """Create native task subscenes on a shared Isaac Lab stage."""
-from dataclasses import fields, is_dataclass
+from dataclasses import is_dataclass
 import torch
 from isaaclab.managers import EventManager
 from isaaclab.scene import InteractiveScene
@@ -18,8 +18,9 @@ def scoped_paths(value, scope):
     if isinstance(value, dict):
         return {key: scoped_paths(item, scope) for key, item in value.items()}
     if is_dataclass(value) and not isinstance(value, type):
-        for field in fields(value):
-            setattr(value, field.name, scoped_paths(getattr(value, field.name), scope))
+        # Isaac Lab attaches terrain and robot configs after scene creation.
+        for name, item in vars(value).items():
+            setattr(value, name, scoped_paths(item, scope))
     return value
 
 
