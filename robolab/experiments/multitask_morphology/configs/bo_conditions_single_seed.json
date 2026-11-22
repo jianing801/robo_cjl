@@ -4,6 +4,7 @@
   "seeds": [20261118],
   "reset_mode": "fixed",
   "copies": 1,
+  "min_forward_progress_ratio": 0.20,
   "tasks": {
     "stairs": {
       "speed_mps": 0.5,

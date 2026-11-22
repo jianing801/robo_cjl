@@ -351,7 +351,8 @@ def ingest_measurements(spec_path, conditions_path):
                 mass=trial['total_mass_kg'], forward=forward, vx=samples['vx'], omega=samples['omega'],
                 torque=samples['torque'], joint_vel=samples['joint_vel'], motors=motors, fell=trial['fell'],
                 reached_top=trial.get('reached_top'), route_completed=trial.get('route_completed'),
-                protection_stop=trial.get('protection_stop', False), payload=payload, outside_stairs=outside)
+                protection_stop=trial.get('protection_stop', False), payload=payload, outside_stairs=outside,
+                min_forward_progress_ratio=conditions.get('min_forward_progress_ratio'))
         grouped.setdefault((task, seed), []).append(dict(replica=replica, **score))
     return dict(kind=REPORT_VERSION, domain=specification['domain'], candidate=specification['candidate'],
         conditions=conditions, conditions_sha256=digest(conditions), source_sha256=sha(spec_path),

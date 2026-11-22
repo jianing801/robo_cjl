@@ -249,7 +249,8 @@ class TrialCapture:
             rows.append(dict(replica=i, **score_trial(self.task, speed=self.spec['speed_mps'], dt=DT,
                 expected_steps=self.steps, mass=float(self.mass[i]), forward=forward,
                 motors=self.motors, fell=self.fell[i], timeout=self.timeout[i], reached_top=reached_top,
-                route_completed=route_completed, payload=payload, outside_stairs=outside, **samples)))
+                route_completed=route_completed, payload=payload, outside_stairs=outside,
+                min_forward_progress_ratio=self.conditions.get('min_forward_progress_ratio'), **samples)))
         write_new(Path(output)/'bo_trials.json', dict(kind=TRIAL_VERSION, task=self.task, seed=self.seed,
             conditions_sha256=digest(self.conditions), trace=str(trace), trace_sha256=sha(trace),
             motors=self.motors, trials=rows, **identity))

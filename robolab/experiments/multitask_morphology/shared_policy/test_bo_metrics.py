@@ -13,13 +13,13 @@ import bo
 from shared_bo_metrics import DT, KNEE_ANKLE, TRIAL_VERSION, digest, objective, paired_trials, score_trial
 
 
-def trial(task, speed=.5, steps=4, actual=.25, fell=False, **options):
+def trial(task, speed=.5, steps=4, expected_steps=4, actual=.25, forward=.08, fell=False, **options):
     motors = [dict(joint=j, rated_torque_nm=4.) for j in sorted(KNEE_ANKLE)]
     motors.append(dict(joint='hip', rated_torque_nm=.5))
     torque = np.column_stack([np.full(steps, 2.) for _ in motors])
     velocity = np.tile([-1., 2., 2., 2., 2., 2., 2.], (steps, 1))
-    return score_trial(task, speed=speed, dt=DT, expected_steps=4, mass=20.,
-        forward=.08, vx=np.full(steps, actual), omega=np.tile([3., 4.], (steps, 1)),
+    return score_trial(task, speed=speed, dt=DT, expected_steps=expected_steps, mass=20.,
+        forward=forward, vx=np.full(steps, actual), omega=np.tile([3., 4.], (steps, 1)),
         torque=torque, joint_vel=velocity, motors=motors, fell=fell, **options)
 
 
@@ -49,6 +49,22 @@ def test_fall_strict_10_percent_boundary_and_invalid_data():
     assert fall['status'] == 'failure' and fall['metrics'] is None and fall['observed']
     assert trial('run', steps=2, timeout=True)['status'] == 'invalid'
     assert trial('run', actual=np.nan)['status'] == 'invalid'
+
+
+@pytest.mark.parametrize(('task', 'minimum'), [('stairs', 2.), ('backpack', 2.), ('run', 6.)])
+def test_formal_bo_enforces_twenty_percent_of_commanded_distance(task, minimum):
+    conditions = bo.read_conditions(bo.FORMAL_CONDITIONS)
+    steps = round(conditions['duration_s'] / DT)
+    inputs = dict(speed=conditions['tasks'][task]['speed_mps'], steps=steps, expected_steps=steps)
+    if 'min_forward_progress_ratio' in conditions:
+        inputs['min_forward_progress_ratio'] = conditions['min_forward_progress_ratio']
+    short = trial(task, actual=1.5, forward=minimum - .001, **inputs)
+    assert short['status'] == 'failure'
+    assert short['reason'] == 'below_minimum_forward_progress' and short['metrics'] is None
+    assert trial(task, actual=.01, forward=minimum, **inputs)['status'] == 'success'
+    assert trial(task, actual=1.5, forward=minimum, fell=True, **inputs)['reason'] == 'fell'
+    assert digest(conditions) != digest({k: v for k, v in conditions.items()
+                                        if k != 'min_forward_progress_ratio'})
 
 
 @pytest.mark.parametrize('task', bo.TASKS)
@@ -164,8 +180,8 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
     motors = [dict(joint=j, motor_id='test', rated_torque_nm=2., torque_side='joint_output',
                    source='fixture') for j in sorted(KNEE_ANKLE) + [f'j{i}' for i in range(17)]]
     trace = tmp_path/'trace.npz'
-    np.savez(trace, position=np.full((4, 3), .25), initial_position=np.zeros(3),
-             vx=np.full(4, .25), omega=np.ones((4, 2)), torque=np.ones((4, 23)),
+    np.savez(trace, position=np.full((4, 3), .025), initial_position=np.zeros(3),
+             vx=np.full(4, .45), omega=np.ones((4, 2)), torque=np.ones((4, 23)),
              joint_vel=np.ones((4, 23)))
     spec = tmp_path/'measurements.json'
     trials = [dict(task=task, seed=10, replica=i, trace=trace.name, motors=motors,
@@ -177,6 +193,14 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
     report = bo.ingest_measurements(spec, condition_path)
     assert report['domain'] == 'hardware'
     assert objective(report, bo.calibrate(report, dict(name='fixture')))['mean_objective'] == pytest.approx(1)
+
+    condition_path.write_text(json.dumps(dict(conditions, min_forward_progress_ratio=.20)))
+    stricter = bo.ingest_measurements(spec, condition_path)
+    with pytest.raises(ValueError, match='conditions'):
+        objective(stricter, bo.calibrate(report, dict(name='fixture')))
+    for pair in stricter['pairs']:
+        assert pair['tasks']['run']['reason'] == 'below_minimum_forward_progress'
+        assert pair['feasible'] is False
 
 
 @pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused', 'old_bo'), [

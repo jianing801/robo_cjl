@@ -1,4 +1,5 @@
 """Three-task performance metrics, independent of training and simulator APIs."""
+from decimal import Decimal
 from hashlib import sha256
 import json
 import math
@@ -32,10 +33,14 @@ def positive(value):
 def read_conditions(path):
     value = json.loads(Path(path).read_text(encoding='utf8'))
     fields = {'kind', 'duration_s', 'seeds', 'copies', 'tasks'}
-    if (not fields <= value.keys() <= fields | {'reset_mode'}
+    if (not fields <= value.keys() <= fields | {'reset_mode', 'min_forward_progress_ratio'}
             or ('reset_mode' in value and value['reset_mode'] != 'fixed')
             or value['kind'] != TRIAL_VERSION or set(value['tasks']) != set(TASKS)):
         raise ValueError('Invalid three-task conditions')
+    if 'min_forward_progress_ratio' in value:
+        ratio = value['min_forward_progress_ratio']
+        if not positive(ratio) or ratio > 1:
+            raise ValueError('Minimum forward progress ratio must be in (0, 1]')
     seconds, seeds, copies = value['duration_s'], value['seeds'], value['copies']
     if (not positive(seconds) or not 0 < seconds <= 20 or abs(seconds / DT - round(seconds / DT)) > 1e-8
             or type(copies) is not int or not 1 <= copies <= 32
@@ -60,7 +65,7 @@ def read_conditions(path):
 
 def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, torque,
                 joint_vel, motors, fell, timeout=False, reached_top=None, route_completed=None,
-                protection_stop=False, payload=None, outside_stairs=False):
+                protection_stop=False, payload=None, outside_stairs=False, min_forward_progress_ratio=None):
     """Samples use world +X velocity/displacement and joint-output torque/velocity."""
     count = len(vx)
     torque, joint_vel = (np.asarray(x, dtype=float) for x in (torque, joint_vel))
@@ -86,9 +91,15 @@ def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, to
             return dict(row, status='failure', reason='fell')
         return dict(row, reason='nonfinite_or_malformed_measurement')
     mean_v = fmean(vx)
-    threshold = .10 * speed
-    too_slow = mean_v < threshold
-    status = 'failure' if fell or too_slow else 'success'
+    if min_forward_progress_ratio is None:
+        progress_failure = 'below_minimum_forward_speed' if mean_v < .10 * speed else None
+    else:
+        # Compute the cutoff from the full window, keeping exact boundaries such as 6 m.
+        commanded_m = Decimal(str(speed)) * Decimal(str(dt)) * expected_steps
+        minimum_m = float(commanded_m * Decimal(str(min_forward_progress_ratio)))
+        progress_failure = 'below_minimum_forward_progress' if forward < minimum_m else None
+    reason = 'fell' if fell else progress_failure
+    status = 'failure' if reason else 'success'
     energy = float(np.maximum(torque * joint_vel, 0).sum() * dt)
     rmse = float(np.sqrt(np.mean((vx - speed) ** 2)))
     sway = float(np.sqrt(np.mean(np.sum(omega ** 2, axis=1))))
@@ -102,7 +113,7 @@ def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, to
             rated_ratio=float(joint_rms / rated) if positive(rated) else None)
     six = [loads[j]['rated_ratio'] for j in KNEE_ANKLE if j in loads]
     motor_cost = max(six) if len(six) == 6 and all(x is not None for x in six) else None
-    row.update(status=status, reason='fell' if fell else 'below_minimum_forward_speed' if too_slow else None,
+    row.update(status=status, reason=reason,
                forward_m=forward, mean_forward_mps=mean_v, motors=loads)
     observed = dict(cot=energy / (mass * 9.81 * forward) if positive(mass) and forward > 0 else None,
         forward_rmse_mps=rmse, roll_pitch_rms_rad_s=sway, knee_ankle_max_rated_ratio=motor_cost,
