@@ -115,13 +115,16 @@ def test_payload_partial_final_copy_keeps_its_design_and_physical_conditions():
             assert bins == {(.1, 5.), (5., 10.), (10., 15.)}
 
 
-def test_verify_native_layout_checks_actual_articulation_order_and_teacher_context():
+@pytest.mark.parametrize('namespace', ['/World/envs', '/World/Mixed_stairs/envs'])
+def test_verify_native_layout_checks_actual_articulation_order_and_teacher_context(namespace):
     designs = [dict(id='a', urdf='a.urdf', context=[.2, .3]), dict(id='b', urdf='b.urdf', context=[.4, .5])]
     spawn = SimpleNamespace(random_choice=False, spatial_design_ids=['a', 'b'],
         assets_cfg=[SimpleNamespace(asset_path='a.urdf'), SimpleNamespace(asset_path='b.urdf')])
-    paths = [f'/World/envs/env_{i}/Robot/torso' for i in range(5)]
+    env_paths = [f'{namespace}/env_{i}' for i in range(5)]
+    paths = [f'{path}/Robot/torso' for path in env_paths]
     view = SimpleNamespace(prim_paths=paths)
     raw = SimpleNamespace(num_envs=5, robot=SimpleNamespace(root_physx_view=view),
+        scene=SimpleNamespace(env_prim_paths=env_paths),
         cfg=SimpleNamespace(scene=SimpleNamespace(robot=SimpleNamespace(spawn=spawn))),
         spatial_groups=torch.tensor([0, 1, 0, 1, 0]),
         spatial_context=torch.tensor([[.2,.3],[.4,.5],[.2,.3],[.4,.5],[.2,.3]]))
