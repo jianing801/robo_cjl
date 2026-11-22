@@ -220,7 +220,11 @@ def main():
         traceback.print_exc()
         sys.stdout.flush(); sys.stderr.flush()
         os._exit(1)
-    app.close()
+    # All artifacts are committed before exit. The three subscenes share one
+    # context, so running the native per-environment Kit teardown would clear
+    # the context repeatedly and the global close can hang.
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == '__main__':
