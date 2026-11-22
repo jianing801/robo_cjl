@@ -19,6 +19,11 @@ from task_timer import start_task_timer
 
 KIND = 'shared_dagger_continuation_v1'
 RESULT = 'DISTILLATION_EVALUATED_REQUIRES_CANDIDATE_FINETUNING'
+# The initial continuation used 12 mmap slots even after adding more archives.
+PRE_CACHE_FIX_SOURCES = {
+    '361280a2887272284db59072aa3c961bb62371b59865146013798844eb884822',
+    'ea271341b9f48f0bfd3f33e35b6411517f2fbd8672e4a2ccae422e99b0106845',
+}
 
 
 def read(path):
@@ -110,7 +115,11 @@ def execute_continuation(args):
                  ('dagger_continue.py', 'dagger_parent.py', 'dagger_comparison.py', 'pipeline.py')})
     manifest = root / 'manifest.json'
     if a.resume:
-        if not manifest.is_file() or read(manifest) != identity:
+        saved = read(manifest) if manifest.is_file() else {}
+        previous_source = saved.get('sources', {}).get('dagger_continue.py')
+        if previous_source in PRE_CACHE_FIX_SOURCES:
+            identity['sources']['dagger_continue.py'] = previous_source
+        if saved != identity:
             raise ValueError('Continuation source, protocol or code differs from its frozen identity')
     else:
         root.mkdir(parents=True, exist_ok=False)
@@ -143,8 +152,11 @@ def execute_continuation(args):
     with lease_environment(a) as environment:
         collected = collect_round(a, root, source['collector'], source['collection_metadata'],
                                   collection_jobs, index, 1., start_student, environment)
-        report = fit_round(a, root, source['collector'], index, start_student,
-                           [*source['data_paths'], *collected], environment)
+        replay = [*source['data_paths'], *collected]
+        # Retain each verified archive's read-only mapping across balanced batches.
+        a.replay_cache_shards = max(a.replay_cache_shards, len(replay))
+        print('DAGGER_REPLAY_READY', len(replay), 'archives', a.replay_cache_shards, 'cache slots', flush=True)
+        report = fit_round(a, root, source['collector'], index, start_student, replay, environment)
         assessment = run_selection_suite(plan, path, root, selection_jobs, report['student'],
             a.selection_profile, protocol['selection']['strength'], seeds, f'selection/round_{index}',
             environment, a.timeout_seconds, criteria)

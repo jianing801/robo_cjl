@@ -24,7 +24,7 @@ def extension_fixture(tmp_path, monkeypatch):
     lineage = [dict(round_index=3, root=parent, student=str(actor),
                     student_sha256=continuation.sha(actor))]
     candidate = {**lineage[0], **report}
-    arguments = dict(epochs=10, collect_steps=250, stride=5, timeout_seconds=1800,
+    arguments = dict(epochs=10, collect_steps=250, stride=5, timeout_seconds=1800, replay_cache_shards=1,
                      selection_profile="robust", randomization_strength=1.,
                      min_command_progress_ratio=.5, device="cuda:0")
     protocol = dict(collection_scope={"structure_keys": [key]}, selection_keys=[key],
@@ -54,7 +54,7 @@ def extension_fixture(tmp_path, monkeypatch):
         return [str(root / "new/data.pt")]
 
     def fit(a, root, collector, index, student, data, env):
-        calls.append(("fit", index, student, a.epochs, data))
+        calls.append(("fit", index, student, a.epochs, data, a.replay_cache_shards))
         (root / f"data_round_{index}.json").write_text(json.dumps(data), encoding="utf8")
         actor = root / "new.pt"
         actor.write_bytes(b"new")
@@ -86,7 +86,7 @@ def test_runs_only_next_round_at_full_strength_and_reuses_previous_data(tmp_path
     assert completed["comparison_sha256"] == module.sha(output / "comparison.json")
     assert calls[0][0] == "timer"
     assert calls[1] == ("collect", 4, 1., source["student"], 250, 3)
-    assert calls[2] == ("fit", 4, source["student"], 10, [old_replay, str(output / "new/data.pt")])
+    assert calls[2] == ("fit", 4, source["student"], 10, [old_replay, str(output / "new/data.pt")], 2)
     assert len(calls) == 4
     assert not (Path(args.continue_from) / "completed.json").exists()
 
@@ -114,3 +114,21 @@ def test_existing_parent_cannot_be_used_as_output(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="separate"):
         module.execute_continuation(args)
     assert calls == []
+
+def test_resume_accepts_only_the_known_cache_predecessor(tmp_path, monkeypatch):
+    module, args, _, calls, _ = extension_fixture(tmp_path, monkeypatch)
+    module.execute_continuation(args)
+    manifest = Path(args.output) / "manifest.json"
+    frozen = json.loads(manifest.read_bytes())
+    frozen['sources']['dagger_continue.py'] = min(module.PRE_CACHE_FIX_SOURCES)
+    manifest.write_text(json.dumps(frozen))
+    original_bytes = manifest.read_bytes()
+    args.resume = True
+    module.execute_continuation(args)
+    assert manifest.read_bytes() == original_bytes
+    assert len(calls) == 4
+
+    frozen['sources']['dagger_parent.py'] = '0' * 64
+    manifest.write_text(json.dumps(frozen))
+    with pytest.raises(ValueError, match="frozen identity"):
+        module.execute_continuation(args)
