@@ -132,3 +132,72 @@ def test_resume_accepts_only_the_known_cache_predecessor(tmp_path, monkeypatch):
     manifest.write_text(json.dumps(frozen))
     with pytest.raises(ValueError, match="frozen identity"):
         module.execute_continuation(args)
+
+def test_long_replay_adds_one_twenty_second_batch_per_task_and_marks_priority(tmp_path, monkeypatch):
+    module, args, _, calls, _ = extension_fixture(tmp_path, monkeypatch)
+    args.long_replay = True
+    steps = dict(steps=1000, stride=5, tasks=['stairs', 'backpack', 'run'],
+                 priority_probability=1/3, sources={})
+    monkeypatch.setattr(module, "long_replay_spec", lambda: steps)
+
+    def collect(a, root, collector, metadata, jobs, index, strength, student, env, *, long_replay):
+        calls.append(("long_capture", [task for task, _ in jobs], long_replay, strength))
+        return [str(root / f"source_{i}") for i in range(len(jobs))]
+
+    def fit(a, root, collector, index, student, data, env, *, long_replay):
+        calls.append(("long_fit", data, long_replay, a.replay_cache_shards))
+        (root / f"data_round_{index}.json").write_text(json.dumps(data), encoding="utf8")
+        actor = root/"new.pt"
+        actor.write_bytes(b"new")
+        fit_summary = root/"fit.json"
+        fit_summary.write_bytes(b"{}")
+        return dict(round_index=index, student=str(actor), student_sha256=module.sha(actor),
+                    fit_summary=str(fit_summary), epoch=9)
+
+    monkeypatch.setattr(module, "collect_round", collect)
+    monkeypatch.setattr(module, "fit_round", fit)
+    module.execute_continuation(args)
+    output = Path(args.output)
+    assert calls[1] == ("long_capture", steps['tasks'] * 2, steps, 1.)
+    assert calls[2][0] == "long_fit" and calls[2][2:] == (steps, 7)
+    assert calls[2][1][-3:] == [str(output/f"source_{i}") for i in (3, 4, 5)]
+    assert json.loads((output/"manifest.json").read_bytes())['long_replay'] == steps
+
+def test_collection_dispatch_preserves_positional_jobs_and_reuses_verified_long_batches(tmp_path, monkeypatch):
+    import pipeline
+    a = SimpleNamespace(plan=str(tmp_path/'plan.json'), collection_profile='robust',
+                        collect_steps=250, stride=5, timeout_seconds=1800)
+    actor = tmp_path/'actor.pt'
+    actor.write_bytes(b'fixed actor')
+    tasks = ['stairs', 'backpack', 'run']
+    spec = dict(steps=1000, stride=5, tasks=tasks, priority_probability=1/3, sources={'recorder':'exact'})
+    jobs = [(task,['original']) for task in tasks] * 2
+    calls = []
+
+    def child(command, *unused):
+        calls.append(command)
+        folder = Path(command[command.index('--output')+1])
+        folder.mkdir(parents=True)
+        (folder/'data.pt').write_bytes(b'exact data')
+        if any(command_item.endswith('dagger_long_collect.py') for command_item in command):
+            (folder/'summary.json').write_bytes(b'{}')
+            (folder/'long_replay_collection.json').write_bytes(b'{}')
+
+    monkeypatch.setattr(pipeline, 'child', child)
+    replay = pipeline.collect_round(a,tmp_path,tmp_path,lambda *_: {'strength':1.},
+                                    jobs,5,1.,str(actor),{},long_replay=spec)
+    assert len(replay) == 6
+    assert [c[c.index('--steps')+1] for c in calls] == ['250']*3 + ['1000']*3
+    assert [c[c.index('--seed')+1] for c in calls] == [str(i) for i in range(50042,50048)]
+    assert all(c[c.index('--design-ids')+1]=='original' for c in calls)
+    assert all(c[c.index('--student')+1]==str(actor) for c in calls)
+    assert [Path(replay[i]).parent.parent.name for i in range(3,6)] == [
+        '0003_stairs','0004_backpack','0005_run']
+    new_replay = pipeline.collect_round(a,tmp_path,tmp_path,lambda *_: {'strength':1.},
+                                       jobs,5,1.,str(actor),{},long_replay=spec)
+    assert new_replay == replay and len(calls) == 6
+
+    (Path(replay[3]).parent/'long_replay_collection.json').write_bytes(b'changed')
+    with pytest.raises(ValueError, match='long replay collection evidence changed'):
+        pipeline.collect_round(a,tmp_path,tmp_path,lambda *_: {'strength':1.},
+                               jobs,5,1.,str(actor),{},long_replay=spec)

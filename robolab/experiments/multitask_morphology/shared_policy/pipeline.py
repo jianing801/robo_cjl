@@ -25,6 +25,8 @@ from evaluation import (evaluation_statistics, aggregate_evaluations, candidate_
 # The previous coordinator used the same training and evaluation protocol.
 # Git checkouts may use either LF or CRLF for its source.
 PRE_CONTINUATION_PIPELINE_SHA256 = {
+    'a5c2160468e01a8399fd2884f94f4f5c98daa1054a363819e52d5741b90c5000',
+    'd86aef6775f2677da2c409149748e8dc09a38ae58f4388fda2f6c9b327a7eb7f',
     'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
     '4a6c0b5589d8faa30b402445db5f59dfcdab934a729b5fe04ea41e9350f36c20',
 }
@@ -214,45 +216,64 @@ def summarize_final_evaluations(records, tasks, profiles):
 
 
 def collect_round(a, root, collector, collection_metadata, collection_jobs,
-                  round_index, strength, student, environment):
+                  round_index, strength, student, environment, *, long_replay=None):
     paths = []
     execution_sha = sha(student) if student else None
     protocol = collection_metadata(a.collection_profile, strength)
     for index,(task,ids) in enumerate(collection_jobs):
         commit=root/'data_commits'/f'round_{round_index}'/f'{index:04d}_{task}.json'
+        seed = 42 + round_index * 10000 + index
+        extra = long_replay and index >= len(long_replay['tasks'])
+        variant = (dict(kind='long_replay', steps=long_replay['steps'], seed=seed,
+                        sources=long_replay['sources']) if extra else None)
         if commit.exists():
             saved=json.loads(commit.read_text());folder=Path(saved['folder'])
             if (sha(folder/'data.pt')!=saved['sha256']
                     or saved.get('protocol')!=protocol
                     or saved.get('round_index')!=round_index
-                    or saved.get('execution_student_sha256')!=execution_sha):
+                    or saved.get('execution_student_sha256')!=execution_sha
+                    or saved.get('variant')!=variant):
                 raise ValueError('Committed data or collection protocol changed')
+            if extra and (sha(folder/'summary.json') != saved['summary_sha256']
+                          or sha(folder/'long_replay_collection.json') != saved['collection_audit_sha256']):
+                raise ValueError('Committed long replay collection evidence changed')
             paths.append(str(folder/'data.pt'))
             continue
         folder=root/'data'/f'round_{round_index}'/f'{index:04d}_{task}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
         attempt=root/'processes'/f'collect_{round_index}_{index:04d}_{datetime.now():%Y%m%d_%H%M%S_%f}'
-        command=[sys.executable,'-X','faulthandler','-u',str(collector/('rollout_amp.py' if task=='run' else 'rollout.py')),'--plan',str(Path(a.plan).resolve()),
-            '--task',task,'--design-ids',','.join(ids),'--output',str(folder),'--asset-cache-root',str(root),
-            '--num-envs','4096','--steps',str(a.collect_steps),'--stride',str(a.stride),'--seed',str(42+round_index*10000+index),
+        steps = variant['steps'] if extra else a.collect_steps
+        native = ['--plan',str(Path(a.plan).resolve()),'--design-ids',','.join(ids),'--output',str(folder),
+            '--num-envs','4096','--steps',str(steps),'--stride',str(long_replay['stride'] if extra else a.stride),'--seed',str(seed),
             '--profile',a.collection_profile,'--randomization-strength',str(strength),
             '--headless','--device','cuda:0']
-        if task=='run':
-            pos=command.index('--task');del command[pos:pos+2]
-            pos=command.index('--asset-cache-root');del command[pos:pos+2]
-        if student:command+=['--student',str(student)]
-        print('COLLECT_BEGIN',round_index,index+1,'/',len(collection_jobs),task,len(ids),flush=True)
-        child(command,attempt,environment,a.timeout_seconds,root)
+        if task != 'run':
+            native.extend(['--asset-cache-root',str(root)])
+        if student:
+            native.extend(['--student',str(student)])
+        if extra:
+            command = [sys.executable,'-X','faulthandler','-u',str(HERE/'dagger_long_collect.py'),
+                       '--collector',str(collector),'--task',task,'--',*native]
+        else:
+            worker = collector/('rollout_amp.py' if task == 'run' else 'rollout.py')
+            if task != 'run':
+                native.extend(['--task',task])
+            command = [sys.executable,'-X','faulthandler','-u',str(worker),*native]
+        print('COLLECT_BEGIN',round_index,index+1,'/',len(collection_jobs),task,len(ids),steps,'steps',flush=True)
+        child(command,attempt,environment,max(a.timeout_seconds,3600) if extra else a.timeout_seconds,root)
         if not (folder/'data.pt').exists() or (folder/'failure.json').exists():raise ValueError('Missing real teacher data')
         commit.parent.mkdir(parents=True,exist_ok=True)
-        write_new(commit,dict(folder=str(folder),sha256=sha(folder/'data.pt'),
-            protocol=protocol,round_index=round_index,
-            execution_student_sha256=execution_sha))
+        receipt = dict(folder=str(folder),sha256=sha(folder/'data.pt'),protocol=protocol,
+                       round_index=round_index,execution_student_sha256=execution_sha)
+        if extra:
+            receipt.update(variant=variant, summary_sha256=sha(folder/'summary.json'),
+                           collection_audit_sha256=sha(folder/'long_replay_collection.json'))
+        write_new(commit,receipt)
         paths.append(str(folder/'data.pt'))
         print('COLLECT_COMPLETE',round_index,index+1,'/',len(collection_jobs),flush=True)
     return paths
 
 
-def fit_round(a, root, collector, round_index, student, all_paths, environment):
+def fit_round(a, root, collector, round_index, student, all_paths, environment, *, long_replay=None):
     data_list=root/f'data_round_{round_index}.json'
     if not data_list.exists():write_new(data_list,all_paths)
     elif json.loads(data_list.read_text())!=all_paths:raise ValueError('Committed round data list changed')
@@ -261,24 +282,41 @@ def fit_round(a, root, collector, round_index, student, all_paths, environment):
     implementation = collector if getattr(a, 'continue_from', None) else HERE
     fit_identity=dict(data_list_sha256=sha(data_list),init_student_sha256=sha(student) if student else None,
         implementation_sha256=sha(implementation/'fit.py'))
+    if long_replay:
+        priority = all_paths[-len(long_replay['tasks']):]
+        priority_list = root/f'long_replay_round_{round_index}.json'
+        if not priority_list.exists():
+            write_new(priority_list,priority)
+        elif json.loads(priority_list.read_bytes()) != priority:
+            raise ValueError('Committed priority replay list changed')
+        fit_identity['long_replay'] = dict(priority_data_sha256=sha(priority_list),sources=long_replay['sources'])
     if not fit_commit.exists():
         fit=root/f'bc_round_{round_index}'/f'attempt_{datetime.now():%Y%m%d_%H%M%S_%f}'
-        command=[sys.executable,'-u',str(collector/'fit.py'),'--plan',str(Path(a.plan).resolve()),
-            '--data-list',str(data_list),'--output',str(fit),'--architecture','mlp','--epochs',str(a.epochs),
-            '--steps-per-epoch',str(a.steps_per_epoch),
+        native = ['--plan',str(Path(a.plan).resolve()),'--data-list',str(data_list),'--output',str(fit),
+            '--architecture','mlp','--epochs',str(a.epochs),'--steps-per-epoch',str(a.steps_per_epoch),
             '--samples-per-design-per-epoch',str(a.samples_per_design_per_epoch),
             '--validation-rows-per-design-shard',str(a.validation_rows_per_design_shard),
-            '--replay-cache-shards',str(a.replay_cache_shards),'--device','cuda:0']
-        command.append('--collection-grid')
-        if student:command+=['--init-student',str(student)]
+            '--replay-cache-shards',str(a.replay_cache_shards),'--device','cuda:0','--collection-grid']
+        if student:
+            native.extend(['--init-student',str(student)])
+        if long_replay:
+            command = [sys.executable,'-u',str(HERE/'dagger_long_fit.py'),'--fit',str(collector/'fit.py'),
+                       '--priority-data',str(priority_list),'--',*native]
+        else:
+            command = [sys.executable,'-u',str(collector/'fit.py'),*native]
         child(command,root/'processes'/f'fit_{round_index}_{datetime.now():%Y%m%d_%H%M%S_%f}',
               environment,max(a.timeout_seconds,7200),root)
         report=json.loads((fit/'summary.json').read_text())
         last_checkpoint(report,a.epochs)
-        write_new(fit_commit,dict(summary=str(fit/'summary.json'),summary_sha256=sha(fit/'summary.json'),identity=fit_identity))
+        receipt = dict(summary=str(fit/'summary.json'),summary_sha256=sha(fit/'summary.json'),identity=fit_identity)
+        if long_replay:
+            receipt['sampling_audit_sha256'] = sha(fit/'long_replay_sampling.json')
+        write_new(fit_commit,receipt)
     saved=json.loads(fit_commit.read_text())
     if saved['identity']!=fit_identity or sha(saved['summary'])!=saved['summary_sha256']:
         raise ValueError('Committed fit input, initialization or summary changed')
+    if long_replay and sha(Path(saved['summary']).parent/'long_replay_sampling.json') != saved['sampling_audit_sha256']:
+        raise ValueError('Committed long replay sampling evidence changed')
     report=json.loads(Path(saved['summary']).read_text())
     last=last_checkpoint(report,a.epochs)
     return dict(round_index=round_index,epoch=last['epoch'],student=last['student'],
@@ -289,6 +327,8 @@ def main(argv=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',required=True);p.add_argument('--output',required=True)
     p.add_argument('--continue-from',help='Add one DAgger round using a completed parent run')
+    p.add_argument('--long-replay',action='store_true',
+                   help='With --continue-from, add one 20-second priority replay batch per task')
     p.add_argument('--collect-steps',type=int,default=250)
     p.add_argument('--stride',type=int,default=5)
     p.add_argument('--epochs',type=int,default=10);p.add_argument('--steps-per-epoch',type=int,default=0,
@@ -314,6 +354,8 @@ def main(argv=None):
     p.add_argument('--gpu-max-utilization',type=int,default=30)
     p.add_argument('--timeout-seconds',type=int,default=900)
     a=p.parse_args(argv)
+    if a.long_replay and not a.continue_from:
+        p.error('--long-replay requires --continue-from')
     if a.resume_paused:a.resume=True
     root=Path(a.output).resolve()
     if a.continue_from:
@@ -350,7 +392,7 @@ def _protocol_digest(protocol):
 
 def execute_pipeline(a,seeds):
     plan=load_plan(a.plan);root=Path(a.output).resolve()
-    arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused','continue_from')}
+    arguments={k:v for k,v in vars(a).items() if k not in ('resume','resume_paused','continue_from','long_replay')}
     previous=json.loads((root/'manifest.json').read_bytes()) if a.resume else None
     frozen=frozen_engine(root,HERE,previous,a.resume_paused) if previous else None
     collector,collection_metadata=frozen[:2] if frozen else (HERE,protocol_metadata)

@@ -40,22 +40,36 @@ def read(path):
     return json.loads(path.read_bytes())
 
 
-def collect(root, index, protocol, previous_actor):
+def collect(root, index, protocol, previous_actor, *, long_replay=None):
     data_paths = []
-    for job, task in enumerate(TASKS):
+    tasks = TASKS * (2 if long_replay else 1)
+    for job, task in enumerate(tasks):
         name = f'{job:04d}_{task}'
         folder = root/'data'/f'round_{index}'/name/'attempt_fixture'
         folder.mkdir(parents=True)
         blob = folder/'data.pt'
         blob.write_bytes(f'{index}-{task}'.encode())
         data_paths.append(str(blob))
-        write(root/'data_commits'/f'round_{index}'/f'{name}.json',
-              dict(folder=str(folder), sha256=sha(blob), protocol=protocol,
-                   round_index=index, execution_student_sha256=previous_actor))
+        commit = dict(folder=str(folder), sha256=sha(blob), protocol=protocol,
+                      round_index=index, execution_student_sha256=previous_actor)
+        if job >= len(TASKS):
+            seed = 42 + index*10000 + job
+            result = 'REAL_AMP_ROLLOUT_COMPLETE' if task == 'run' else 'REAL_ROLLOUT_COMPLETE'
+            summary = write(folder/'summary.json', dict(result=result, task=task, steps=1000,
+                            seed=seed, collection_protocol=protocol, student=previous_actor,
+                            teacher_updates=0, design_ids=[task]))
+            audit = write(folder/'long_replay_collection.json',
+                          dict(kind='dagger_long_collection_v1', task=task, steps=1000, stride=5, seed=seed,
+                               terrain='continuous_bottom_start' if task == 'stairs' else 'native',
+                               summary_sha256=sha(summary)))
+            commit.update(variant=dict(kind='long_replay', steps=1000, seed=seed,
+                                       sources=long_replay['sources']),
+                          summary_sha256=sha(summary), collection_audit_sha256=sha(audit))
+        write(root/'data_commits'/f'round_{index}'/f'{name}.json', commit)
     return data_paths
 
 
-def fit(root, index, paths, previous_actor, implementation):
+def fit(root, index, paths, previous_actor, implementation, *, long_replay=None):
     data_list = write(root/f'data_round_{index}.json', paths)
     output = root/f'bc_round_{index}'/'attempt_fixture'
     output.mkdir(parents=True)
@@ -67,10 +81,19 @@ def fit(root, index, paths, previous_actor, implementation):
     summary = write(output/'summary.json',
                     dict(result='BC_COMPLETE_NOT_GAIT_VALIDATED', checkpoints=checkpoints,
                          closed_loop_required=True, student=str(actor), student_sha256=sha(actor)))
-    write(root/f'fit_round_{index}.json',
-          dict(summary=str(summary), summary_sha256=sha(summary),
-               identity=dict(data_list_sha256=sha(data_list), init_student_sha256=previous_actor,
-                             implementation_sha256=implementation)))
+    receipt = dict(summary=str(summary), summary_sha256=sha(summary),
+                   identity=dict(data_list_sha256=sha(data_list), init_student_sha256=previous_actor,
+                                 implementation_sha256=implementation))
+    if long_replay:
+        priority = write(root/f'long_replay_round_{index}.json', paths[-3:])
+        receipt['identity']['long_replay'] = dict(priority_data_sha256=sha(priority),
+                                                 sources=long_replay['sources'])
+        audit = write(output/'long_replay_sampling.json',
+                      dict(kind='dagger_long_sampling_v1', priority_data_sha256=sha(priority),
+                           priority_probability=1/3,
+                           tasks={task: dict(priority_rows=1500, total_rows=2000) for task in TASKS}))
+        receipt['sampling_audit_sha256'] = sha(audit)
+    write(root/f'fit_round_{index}.json', receipt)
     return dict(round_index=index, epoch=9, student=str(actor), student_sha256=sha(actor),
                 fit_summary=str(summary))
 
@@ -160,6 +183,8 @@ def test_resolves_the_pinned_frozen_checkout_without_writing_to_it(parent):
 
     checkout_eol = 'true' if b'\r\n' in (HERE/'fit.py').read_bytes() else 'false'
     git('config', 'core.autocrlf', checkout_eol)
+    if sys.platform == 'win32':
+        git('config', 'core.longpaths', 'true')
     git('sparse-checkout', 'set', relative_engine.as_posix())
     git('checkout', '--detach', 'cd348ef7436b5f6e254eb3e34aaedd281a0b804a')
     collector = checkout/relative_engine
@@ -243,18 +268,20 @@ def test_rejects_changed_base_evidence(parent, corruption):
         load_parent(root, plan)
 
 
-def extension(root, plan, previous):
+def extension(root, plan, previous, *, long_replay=None):
     index = previous['round_index'] + 1
     protocol = previous['collection_protocol']
     parent_actor = previous['lineage'][-1]['student_sha256']
-    paths = previous['data_paths'] + collect(root, index, protocol, parent_actor)
-    candidate = fit(root, index, paths, parent_actor, sha(previous['collector']/'fit.py'))
+    paths = previous['data_paths'] + collect(root, index, protocol, parent_actor, long_replay=long_replay)
+    candidate = fit(root, index, paths, parent_actor, sha(previous['collector']/'fit.py'), long_replay=long_replay)
     identity = dict(kind=KIND, round_index=index, parent=str(previous['lineage'][-1]['root']),
                     base=str(previous['base']), plan_sha256=sha(plan))
-    manifest = write(root/'manifest.json',
-                     dict(identity, parent_provenance=previous['provenance'], collection_protocol=protocol,
-                          selection_protocol=previous['manifest']['protocol']['selection'],
-                          sources={'dagger_parent.py': '1' * 64}))
+    fields = dict(identity, parent_provenance=previous['provenance'], collection_protocol=protocol,
+                  selection_protocol=previous['manifest']['protocol']['selection'],
+                  sources={'dagger_parent.py': '1' * 64})
+    if long_replay:
+        fields['long_replay'] = long_replay
+    manifest = write(root/'manifest.json', fields)
     data_list = root/f'data_round_{index}.json'
     comparison = write(root/'comparison.json', {'round_index': index})
     return write(root/'completed.json',
@@ -288,4 +315,86 @@ def test_extension_manifest_cannot_rebind_previous_round(parent):
     write(manifest, dict(read(manifest), parent_provenance={}))
     write(receipt, dict(read(receipt), manifest_sha256=sha(manifest)))
     with pytest.raises(ValueError, match='parent provenance'):
+        load_parent(root, plan)
+
+
+@pytest.fixture
+def long_round(parent):
+    base, plan = parent
+    r4_root = base.parent/'round_four'
+    extension(r4_root, plan, load_parent(base, plan))
+    r4 = load_parent(r4_root, plan)
+    r5_root = base.parent/'round_five'
+    extension(r5_root, plan, r4, long_replay=dict(
+        steps=1000, stride=5, tasks=['stairs', 'backpack', 'run'], priority_probability=1/3,
+        sources={'dagger_long_collect.py': '2' * 64, 'dagger_long_fit.py': '3' * 64,
+                 'stair_course.py': '4' * 64},
+    ))
+    return r4, r5_root, plan
+
+
+def test_next_round_inherits_all_six_collection_batches_and_epoch_nine(long_round):
+    r4, r5_root, plan = long_round
+    r5 = load_parent(r5_root, plan)
+    assert r5['data_paths'][:15] == r4['data_paths']
+    assert [Path(path).parents[1].name for path in r5['data_paths'][15:]] == [
+        '0000_stairs', '0001_backpack', '0002_run', '0003_stairs', '0004_backpack', '0005_run',
+    ]
+    assert len(r5['provenance']['data_commits_sha256']) == 21
+    assert r5['provenance']['fit_commit_sha256'] == sha(r5_root/'fit_round_5.json')
+    r6_root = r5_root.parent/'round_six'
+    extension(r6_root, plan, r5)
+    r6 = load_parent(r6_root, plan)
+    assert r6['data_paths'][:21] == r5['data_paths']
+    assert r6['completion']['previous_student_sha256'] == r5['completion']['student_sha256']
+    assert r6['selection'] == r4['selection']
+
+
+@pytest.mark.parametrize('field,value', [('steps', 250), ('student', '0' * 64), ('design_ids', ['wrong'])])
+def test_long_collection_rejects_inconsistent_native_summary(long_round, field, value):
+    _, root, plan = long_round
+    commit_path = root/'data_commits/round_5/0003_stairs.json'
+    commit = read(commit_path)
+    folder = Path(commit['folder'])
+    summary = folder/'summary.json'
+    audit = folder/'long_replay_collection.json'
+    write(summary, dict(read(summary), **{field: value}))
+    write(audit, dict(read(audit), summary_sha256=sha(summary)))
+    write(commit_path, dict(commit, summary_sha256=sha(summary), collection_audit_sha256=sha(audit)))
+    with pytest.raises(ValueError, match='long collection summary'):
+        load_parent(root, plan)
+
+
+def test_long_collection_rejects_native_terrain_for_stairs(long_round):
+    _, root, plan = long_round
+    commit_path = root/'data_commits/round_5/0003_stairs.json'
+    commit = read(commit_path)
+    audit = Path(commit['folder'])/'long_replay_collection.json'
+    write(audit, dict(read(audit), terrain='native'))
+    write(commit_path, dict(commit, collection_audit_sha256=sha(audit)))
+    with pytest.raises(ValueError, match='long collection audit'):
+        load_parent(root, plan)
+
+
+def test_long_fit_rejects_priority_paths_from_ordinary_replay_even_if_hash_matches(long_round):
+    _, root, plan = long_round
+    priority = write(root/'long_replay_round_5.json', read(root/'data_round_5.json')[15:18])
+    path = root/'fit_round_5.json'
+    fit_receipt = read(path)
+    fit_receipt['identity']['long_replay']['priority_data_sha256'] = sha(priority)
+    write(path, fit_receipt)
+    with pytest.raises(ValueError, match='long priority replay list'):
+        load_parent(root, plan)
+
+
+def test_long_fit_rejects_missing_priority_rows_even_if_hash_matches(long_round):
+    _, root, plan = long_round
+    path = root/'fit_round_5.json'
+    fit_receipt = read(path)
+    audit = Path(fit_receipt['summary']).with_name('long_replay_sampling.json')
+    record = read(audit)
+    record['tasks']['stairs']['priority_rows'] = 0
+    write(audit, record)
+    write(path, dict(fit_receipt, sampling_audit_sha256=sha(audit)))
+    with pytest.raises(ValueError, match='long sampling audit'):
         load_parent(root, plan)

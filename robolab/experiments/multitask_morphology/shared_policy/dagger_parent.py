@@ -25,6 +25,7 @@ ANCHOR_SEEDS = [20261117, 20261119, 20261120]
 SHARED_ENGINE = Path('robolab/experiments/multitask_morphology/shared_policy')
 ROLLOUT_SOURCES = {'rollout.py', 'rollout_amp.py', 'scenario_sampling.py', 'physical_audit.py'}
 PRE_CONTINUATION_REVISION = '58fd4476d5694decbce288d61a7584a305d7cbee'
+LONG_REPLAY_SOURCES = {'dagger_long_collect.py', 'dagger_long_fit.py', 'stair_course.py'}
 
 
 def _read(path):
@@ -148,17 +149,58 @@ def _collection_runtime(parent, engine, manifest):
     }
 
 
-def _replay(root, index, inherited, previous_actor, collection_protocol):
+def _long_replay_spec(manifest):
+    if 'long_replay' not in manifest:
+        return None
+    spec = manifest['long_replay']
+    settings = dict(steps=1000, stride=5, tasks=list(TASKS), priority_probability=1/3)
+    if (not isinstance(spec, dict) or set(spec) != set(settings) | {'sources'}
+            or any(spec.get(key) != value for key, value in settings.items())):
+        raise ValueError('Invalid DAgger long replay settings')
+    sources = spec['sources']
+    if (not isinstance(sources, dict) or set(sources) != LONG_REPLAY_SOURCES
+            or any(not _identity(value) for value in sources.values())):
+        raise ValueError('Incomplete DAgger long replay source identities')
+    return spec
+
+
+def _long_collection(folder, commit, task, seed, design_ids, spec):
+    variant = dict(kind='long_replay', steps=spec['steps'], seed=seed, sources=spec['sources'])
+    if commit.get('variant') != variant:
+        raise ValueError(f'DAgger long collection variant changed at {folder}')
+    summary_path = folder/'summary.json'
+    summary_sha = _verified(summary_path, commit['summary_sha256'])
+    summary = _object(summary_path)
+    result = 'REAL_AMP_ROLLOUT_COMPLETE' if task == 'run' else 'REAL_ROLLOUT_COMPLETE'
+    expected = dict(result=result, task=task, steps=spec['steps'], seed=seed, design_ids=design_ids,
+                    student=commit['execution_student_sha256'], collection_protocol=commit['protocol'],
+                    teacher_updates=0)
+    if (any(summary.get(key) != value for key, value in expected.items())
+            or ('data' in summary and _path(summary['data']) != folder/'data.pt')):
+        raise ValueError(f'DAgger long collection summary differs at {folder}')
+    audit_path = folder/'long_replay_collection.json'
+    _verified(audit_path, commit['collection_audit_sha256'])
+    audit = _object(audit_path)
+    expected = dict(kind='dagger_long_collection_v1', task=task, steps=spec['steps'], stride=spec['stride'],
+                    seed=seed, terrain='continuous_bottom_start' if task == 'stairs' else 'native',
+                    summary_sha256=summary_sha)
+    if any(audit.get(key) != value for key, value in expected.items()):
+        raise ValueError(f'DAgger long collection audit differs at {folder}')
+
+
+def _replay(root, index, inherited, previous_actor, collection_protocol, *, long_replay=None, design_ids=None):
     directory = root/'data_commits'/f'round_{index}'
-    jobs = [f'{job:04d}_{task}' for job, task in enumerate(TASKS)]
-    if sorted(path.name for path in directory.glob('*.json')) != [f'{job}.json' for job in jobs]:
-        raise ValueError(f'Expected one collection commit per task for DAgger round {index}')
+    tasks = (*TASKS, *long_replay['tasks']) if long_replay else TASKS
+    jobs = [f'{job:04d}_{task}.json' for job, task in enumerate(tasks)]
+    if sorted(path.name for path in directory.glob('*.json')) != jobs:
+        raise ValueError(f'Collection commits differ from the declared jobs for DAgger round {index}')
     paths = inherited.copy()
     commits = []
-    for job in jobs:
-        commit_path = directory/f'{job}.json'
+    for job_index, (task, filename) in enumerate(zip(tasks, jobs)):
+        commit_path = directory/filename
         commit = _object(commit_path)
         folder = _path(commit['folder'])
+        job = commit_path.stem
         task_output = root/'data'/f'round_{index}'/job
         if (folder.parent != task_output or not folder.name.startswith('attempt_')
                 or (folder/'failure.json').exists()
@@ -168,6 +210,11 @@ def _replay(root, index, inherited, previous_actor, collection_protocol):
             raise ValueError(f'DAgger collection commit does not match round {index}, task {job}')
         data = folder/'data.pt'
         _verified(data, commit['sha256'])
+        if job_index >= len(TASKS):
+            _long_collection(folder, commit, task, 42 + index*10000 + job_index,
+                             design_ids[task], long_replay)
+        elif 'variant' in commit:
+            raise ValueError(f'Unexpected DAgger collection variant in round {index}, job {job}')
         paths.append(str(data))
         commits.append(sha(commit_path))
     data_list = root/f'data_round_{index}.json'
@@ -176,17 +223,45 @@ def _replay(root, index, inherited, previous_actor, collection_protocol):
     return paths, sha(data_list), commits
 
 
-def _fit(root, index, previous_actor, data_list_sha, implementation):
+def _long_fit_identity(root, index, paths, spec):
+    priority_data = root/f'long_replay_round_{index}.json'
+    if _read(priority_data) != paths[-len(spec['tasks']):]:
+        raise ValueError(f'DAgger round {index} long priority replay list differs from its long collection jobs')
+    return dict(priority_data_sha256=sha(priority_data), sources=spec['sources'])
+
+
+def _long_sampling(summary_path, receipt, spec):
+    audit_path = summary_path.with_name('long_replay_sampling.json')
+    _verified(audit_path, receipt['sampling_audit_sha256'])
+    audit = _object(audit_path)
+    tasks = audit.get('tasks')
+    if (audit.get('kind') != 'dagger_long_sampling_v1'
+            or audit.get('priority_data_sha256') != receipt['identity']['long_replay']['priority_data_sha256']
+            or audit.get('priority_probability') != spec['priority_probability']
+            or not isinstance(tasks, dict) or set(tasks) != set(spec['tasks'])):
+        raise ValueError(f'DAgger long sampling audit differs at {audit_path}')
+    for counts in tasks.values():
+        if (not isinstance(counts, dict) or type(counts.get('priority_rows')) is not int
+                or type(counts.get('total_rows')) is not int
+                or not 0 < counts['priority_rows'] < counts['total_rows']):
+            raise ValueError(f'DAgger long sampling audit is missing priority or ordinary rows at {audit_path}')
+
+
+def _fit(root, index, previous_actor, data_list_sha, implementation, *, long_replay=None, paths=None):
     path = root/f'fit_round_{index}.json'
     receipt = _object(path)
     identity = dict(data_list_sha256=data_list_sha, init_student_sha256=previous_actor,
                     implementation_sha256=implementation)
+    if long_replay:
+        identity['long_replay'] = _long_fit_identity(root, index, paths, long_replay)
     summary_path = _path(receipt['summary'])
     if (receipt.get('identity') != identity or summary_path.name != 'summary.json'
             or summary_path.parent.parent != root/f'bc_round_{index}'
             or not summary_path.parent.name.startswith('attempt_')):
         raise ValueError(f'DAgger round {index} fit inputs or runtime differ')
     _verified(summary_path, receipt['summary_sha256'])
+    if long_replay:
+        _long_sampling(summary_path, receipt, long_replay)
     summary = _object(summary_path)
     checkpoints = summary['checkpoints']
     if (summary.get('result') != 'BC_COMPLETE_NOT_GAIT_VALIDATED'
@@ -238,7 +313,7 @@ def _base(parent, plan_sha, engine, manifest, completion, provenance):
     protocol = _protocol(manifest)
     arguments = manifest['arguments']
     scope = protocol['collection_scope']
-    if (manifest.get('plan_sha256') != plan_sha or completion.get('protocol') != protocol
+    if ('long_replay' in manifest or manifest.get('plan_sha256') != plan_sha or completion.get('protocol') != protocol
             or completion.get('protocol_sha256') != manifest['protocol_sha256']
             or any(completion.get(field) is not value for field, value in {
                 'full_bank_evaluated': False, 'critic_trained': False,
@@ -308,10 +383,16 @@ def _extension(parent, ancestor, manifest, completion, provenance):
     if manifest.get('parent_provenance') != ancestor['provenance']:
         raise ValueError(f'DAgger parent provenance changed at {parent}')
 
-    paths, data_list_sha, commits = _replay(parent, index, ancestor['data_paths'], previous['student_sha256'], collection)
+    long_replay = _long_replay_spec(manifest)
+    design_ids = ancestor['manifest']['protocol']['collection_scope']['design_ids_by_task']
+    paths, data_list_sha, commits = _replay(
+        parent, index, ancestor['data_paths'], previous['student_sha256'], collection,
+        long_replay=long_replay, design_ids=design_ids,
+    )
     inherited = ancestor['provenance']
     fit, fit_commit_sha, fit_summary_sha = _fit(
         parent, index, previous['student_sha256'], data_list_sha, inherited['collector_sources']['fit.py'],
+        long_replay=long_replay, paths=paths,
     )
     comparison = parent/'comparison.json'
     if (completion.get('data_list_sha256') != data_list_sha
