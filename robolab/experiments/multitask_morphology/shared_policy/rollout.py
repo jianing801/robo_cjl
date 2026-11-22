@@ -152,7 +152,7 @@ def canonical_input(base,task,indices,static_context,task_count=2):
     return torch.cat((base,ids,static_context[indices]),-1)
 
 
-def main():
+def prepare_rollout(argv=None, *, mixed_count=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',required=True);p.add_argument('--task',choices=['stairs','backpack'],required=True)
     p.add_argument('--design-ids',required=True);p.add_argument('--output',required=True)
@@ -173,7 +173,7 @@ def main():
         help='Explicit initial yaw coverage for real demonstrations; nominal evaluation remains .05 rad')
     from isaaclab.app import AppLauncher
     AppLauncher.add_app_launcher_args(p)
-    args=p.parse_args()
+    args=p.parse_args(argv)
     if args.video:args.enable_cameras=True
     if min(args.steps,args.stride)<1 or not 0<=args.reset_yaw_range<=.5:raise ValueError('Positive finite sampling budget and bounded reset distribution required')
     plan=load_plan(args.plan);spec=plan['teachers'][args.task]
@@ -187,7 +187,7 @@ def main():
         args.payload_kg=bo_conditions['tasks']['backpack']['payload_kg']
     paired_stairs=args.task=='stairs' and args.profile=='robust' and args.mode=='collect' and not args.ppo_channel
     if args.task=='stairs' and args.profile=='robust':copies=max(copies,12 if paired_stairs else 6)
-    n=rollout_env_count(args,count,copies,training_strata=6 if paired_stairs else 1)
+    n=mixed_count if mixed_count is not None else rollout_env_count(args,count,copies,training_strata=6 if paired_stairs else 1)
     code=Path(spec['code_root'])
     sys.path[:0]=[str(HERE),str(code/'scripts/tools'),str(Path(spec['runtime_dir'])),
                   str(code),str(code.parent/'rsl_rl')]
@@ -201,7 +201,7 @@ def main():
         args.kit_args=(args.kit_args or '')+' --vulkan'
     args.kit_args=(args.kit_args or '')+' --/renderer/multiGpu/enabled=false'
     args.kit_args=(args.kit_args or '')+f' --portable-root {output/"portable"} --portable'
-    app=AppLauncher(args).app
+    app=AppLauncher(args).app if mixed_count is None else None
     raw=None;exit_code=1
     try:
         import torch
@@ -272,7 +272,10 @@ def main():
         class Capture(CaptureReset, Env):
             def update_terrain_levels(self,env_ids):return {}
         if args.video:cfg.viewer.resolution=(960,540)
-        raw=Capture(cfg,render_mode='rgb_array' if args.video else None)
+        if mixed_count is None:
+            raw=Capture(cfg,render_mode='rgb_array' if args.video else None)
+        else:
+            raw=yield Capture,cfg
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
         class SamplingVecEnv(SpatialVecEnv):
             def step(self,actions):
@@ -291,9 +294,10 @@ def main():
         import omni.usd
         import xml.etree.ElementTree as ET
         stage=omni.usd.get_context().get_stage()
-        actual_ids=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
+        actual_ids=[stage.GetPrimAtPath(f'{path}/Robot').GetAttribute('spatial:design_id').Get()
+                    for path in raw.scene.env_prim_paths]
         if actual_ids!=[designs[i%count]['id'] for i in range(n)]:raise ValueError('Physical design/context routing mismatch')
-        if args.num_envs is not None:
+        if args.num_envs is not None or mixed_count is not None:
             verify_collection_layout(raw,designs,n)
         geometry=[]
         write_new(output/'physics_audit.json',audit_physics(raw,cfg,designs,profile=args.profile))
@@ -402,11 +406,13 @@ def main():
             clipped=torch.zeros(n,device=raw.device)
             if args.ppo_channel:
                 from ppo_channel import serve
-                serve(args.ppo_channel,args.task,env,raw,obs,
-                    lambda o,r:canonical_input(student_base(o,r),plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks'])),action_clip,
-                    protocol=metadata['collection_protocol'])
+                def canonical(o,r):
+                    return canonical_input(student_base(o,r),plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks']))
+                if mixed_count is not None:
+                    return env,raw,obs,canonical,action_clip,None,metadata['collection_protocol']
+                serve(args.ppo_channel,args.task,env,raw,obs,canonical,action_clip,protocol=metadata['collection_protocol'])
                 exit_code=0
-                return
+                return exit_code
             trace=[]
             recorder=None
             if args.video:
@@ -525,24 +531,35 @@ def main():
             exit_code=0
     except BaseException:
         write_new(output/'failure.json',dict(traceback=traceback.format_exc()))
+        if mixed_count is not None:
+            raise
         traceback.print_exc();exit_code=1
     finally:
-        timer=threading.Timer(120,lambda:os._exit(1));timer.daemon=True;timer.start()
-        try:
-            if raw is not None:raw.close()
-            if exit_code:
-                # Kit close can terminate the interpreter with status 0. On a
-                # recorded failure exit explicitly before that shutdown path.
+        if app is not None:
+            timer=threading.Timer(120,lambda:os._exit(1));timer.daemon=True;timer.start()
+            try:
+                if raw is not None:raw.close()
+                if exit_code:
+                    # Kit close can terminate the interpreter with status 0. On a
+                    # recorded failure exit explicitly before that shutdown path.
+                    sys.stdout.flush();sys.stderr.flush();os._exit(1)
+                app.close()
+            except SystemExit as error:
+                if error.code not in (None,0):exit_code=1
+            except BaseException:
+                traceback.print_exc();exit_code=1
                 sys.stdout.flush();sys.stderr.flush();os._exit(1)
-            app.close()
-        except SystemExit as error:
-            if error.code not in (None,0):exit_code=1
-        except BaseException:
-            traceback.print_exc();exit_code=1
-            sys.stdout.flush();sys.stderr.flush();os._exit(1)
-        timer.cancel()
+            timer.cancel()
     sys.stdout.flush();sys.stderr.flush()
     return exit_code
+
+
+def main():
+    try:
+        next(prepare_rollout())
+    except StopIteration as result:
+        return result.value
+    raise RuntimeError('Unexpected deferred rollout')
 
 
 if __name__=='__main__':os._exit(main())

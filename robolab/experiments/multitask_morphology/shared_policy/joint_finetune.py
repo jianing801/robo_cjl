@@ -82,7 +82,7 @@ def ppo_update(model, critic, optimizer, batches, *, schedule=PPO_SCHEDULE):
     x, actions, oldlog, target, advantage = [torch.cat(parts) for parts in zip(*prepared)]
     losses = []; model.train(); critic.train()
     for _ in range(schedule['epochs']):
-        for ids in torch.randperm(len(x)).tensor_split(min(schedule['minibatches'], len(x))):
+        for ids in torch.randperm(len(x), device=x.device).tensor_split(min(schedule['minibatches'], len(x))):
             distribution = torch.distributions.Normal(model(x[ids]), ACTION_STD)
             ratio = (distribution.log_prob(actions[ids]).sum(-1)-oldlog[ids]).exp()
             policy = -torch.minimum(ratio*advantage[ids], ratio.clamp(.8, 1.2)*advantage[ids]).mean()

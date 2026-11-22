@@ -30,7 +30,7 @@ def verify_collection_layout(raw, designs, num_envs):
     if raw.num_envs != num_envs or len(paths) != num_envs:
         raise ValueError('Physical articulation count differs from requested collection size')
     for index, path in enumerate(paths):
-        robot_path = f'/World/envs/env_{index}/Robot'
+        robot_path = f'{raw.scene.env_prim_paths[index]}/Robot'
         if path != robot_path and not path.startswith(robot_path + '/'):
             raise ValueError(f'Physical articulation row {index} points to {path}, expected {robot_path}')
     groups = torch.arange(num_envs, device=raw.spatial_groups.device) % len(designs)

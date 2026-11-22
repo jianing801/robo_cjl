@@ -14,7 +14,7 @@ from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
 from scenario_sampling import last_design_copy, rollout_env_count, verify_collection_layout
 
-def main():
+def prepare_rollout(argv=None, *, mixed_count=None):
     from isaaclab.app import AppLauncher
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('plan','design-ids','output'):p.add_argument('--'+name,required=True)
@@ -29,7 +29,7 @@ def main():
     p.add_argument('--full-body-torque',action='store_true')
     p.add_argument('--video',action='store_true')
     p.add_argument('--bo-conditions', help='Collect independent fixed-condition BO measurements')
-    AppLauncher.add_app_launcher_args(p);a=p.parse_args()
+    AppLauncher.add_app_launcher_args(p);a=p.parse_args(argv)
     if a.video:a.enable_cameras=True
     if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
     plan=load_plan(a.plan);spec=plan['teachers']['run'];code=Path(spec['code_root'])
@@ -42,14 +42,15 @@ def main():
         velocity_frame=FIXED_COURSE_VELOCITY_FRAME if bo_conditions else EVALUATION_VELOCITY_FRAME
     if bo_conditions:
         a.speed = bo_conditions['tasks']['run']['speed_mps']
-    n=rollout_env_count(a,len(ids),bo_conditions['copies'] if bo_conditions else spec['copies'])
+    n=mixed_count if mixed_count is not None else rollout_env_count(a,len(ids),bo_conditions['copies'] if bo_conditions else spec['copies'])
     sys.path[:0]=[str(Path(spec['runtime_dir'])),str(code),str(code.parent/'rsl_rl')]
     out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=False)
     if a.video:
         from shared_video import reuse_shader_cache
         reuse_shader_cache(out)
     a.kit_args=(a.kit_args or '')+f' --vulkan --/renderer/multiGpu/enabled=false --portable-root {out/"portable"} --portable'
-    app=AppLauncher(a).app;raw=None;status=1
+    app=AppLauncher(a).app if mixed_count is None else None
+    raw=None;status=1
     try:
         import torch
         torch.set_num_threads(2)
@@ -97,7 +98,10 @@ def main():
         if a.video:cfg.viewer.resolution=(960,540)
         class CaptureAmp(CaptureReset, SpatialAmpEnv):
             pass
-        raw=CaptureAmp(cfg,render_mode='rgb_array' if a.video else None)
+        if mixed_count is None:
+            raw=CaptureAmp(cfg,render_mode='rgb_array' if a.video else None)
+        else:
+            raw=yield CaptureAmp,cfg
         class SamplingVecEnv(SpatialVecEnv):
             def step(self,actions):
                 obs,rewards,dones,extras=RslRlVecEnvWrapper.step(self,actions)
@@ -112,9 +116,10 @@ def main():
             raise ValueError('AMP default pose differs')
         import omni.usd
         stage=omni.usd.get_context().get_stage()
-        routed=[stage.GetPrimAtPath(f'/World/envs/env_{i}/Robot').GetAttribute('spatial:design_id').Get() for i in range(n)]
+        routed=[stage.GetPrimAtPath(f'{path}/Robot').GetAttribute('spatial:design_id').Get()
+                for path in raw.scene.env_prim_paths]
         if routed!=[ids[i%len(ids)] for i in range(n)]:raise ValueError('AMP physical/context routing differs')
-        if a.num_envs is not None:
+        if a.num_envs is not None or mixed_count is not None:
             verify_collection_layout(raw,designs,n)
         motion=raw.motion_data_manager.get_term('motion_dataset')
         actual_libraries=[motion.terms[i].cfg.motion_data_dir for i in motion.env_library.cpu().tolist()]
@@ -197,10 +202,12 @@ def main():
                 def amp_reward(o,reward):
                     style,_=discriminator.predict_style_reward(discriminator.get_disc_obs(o),dt=raw.step_dt)
                     return discriminator.lerp_reward(task_reward=reward,style_reward=style)
+                if mixed_count is not None:
+                    return env,raw,obs,canonical,STUDENT_ACTION_CLIP,amp_reward,metadata['collection_protocol']
                 serve(a.ppo_channel,'run',env,raw,obs,canonical,STUDENT_ACTION_CLIP,amp_reward,
                     protocol=metadata['collection_protocol'])
                 status=0
-                return
+                return status
             recorder=None
             if a.video:
                 from shared_video import Recorder
@@ -272,17 +279,29 @@ def main():
             write_new(out/'reference_cache_stats.json',dict(hits=routing.hits,misses=routing.misses))
             status=0
     except BaseException:
-        write_new(out/'failure.json',dict(traceback=traceback.format_exc()));traceback.print_exc()
+        write_new(out/'failure.json',dict(traceback=traceback.format_exc()))
+        if mixed_count is not None:
+            raise
+        traceback.print_exc()
     finally:
-        timer=threading.Timer(120,lambda:os._exit(1));timer.daemon=True;timer.start()
-        if status:sys.stdout.flush();sys.stderr.flush();os._exit(1)
-        try:
-            if raw is not None:raw.close()
-            app.close()
-        except SystemExit as error:
-            if error.code not in (None,0):status=1
-        except BaseException:traceback.print_exc();status=1
-        timer.cancel()
+        if app is not None:
+            timer=threading.Timer(120,lambda:os._exit(1));timer.daemon=True;timer.start()
+            if status:sys.stdout.flush();sys.stderr.flush();os._exit(1)
+            try:
+                if raw is not None:raw.close()
+                app.close()
+            except SystemExit as error:
+                if error.code not in (None,0):status=1
+            except BaseException:traceback.print_exc();status=1
+            timer.cancel()
     sys.stdout.flush();sys.stderr.flush();return status
+
+def main():
+    try:
+        next(prepare_rollout())
+    except StopIteration as result:
+        return result.value
+    raise RuntimeError('Unexpected deferred AMP rollout')
+
 
 if __name__=='__main__':os._exit(main())
