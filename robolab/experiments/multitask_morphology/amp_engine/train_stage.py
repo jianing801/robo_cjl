@@ -56,6 +56,9 @@ def main(argv=None, session=None):
     from amp_contract import load_plan, stage_spec
     frozen = load_plan(a.hybrid_plan, bank_path)
     stage = stage_spec(bank, frozen["configuration"], a.stage_index)
+    runtime = frozen["configuration"].get("runtime", {})
+    a.per_design_metrics = runtime.get("per_design_metrics", True)
+    a.spatial_minibatch_sampler = runtime.get("minibatch_sampler", "group_balanced")
     if Path(a.reference_library).resolve() != Path(frozen["reference_library"]).resolve():
         raise ValueError("reference library differs from frozen plan")
     from amp_references import validate_library
@@ -169,7 +172,7 @@ def main(argv=None, session=None):
         write_new(output / "geometry_audit.json", lengths)
         symmetry = source["algorithm"].get("symmetry_cfg")
         fn = resolve_callable(symmetry["data_augmentation_func"]) if symmetry else None
-        env = SpatialVecEnv(raw, fn, source.get("clip_actions"))
+        env = SpatialVecEnv(raw, fn, source.get("clip_actions"), per_design_metrics=a.per_design_metrics)
         agent = extend_agent(source, bank_sha=file_sha(bank_path), context_width=layout["context_width"], task=task)
         agent["policy"]["class_name"] = "amp_policy:SpatialActorCritic"
         if agent["algorithm"].get("symmetry_cfg") is not None:
@@ -235,7 +238,7 @@ def main(argv=None, session=None):
             if len(runner.alg.optimizer.state):
                 raise RuntimeError("zero-update smoke changed optimizer")
         else:
-            runner.learn(remaining)
+            runner.learn(remaining, init_at_random_ep_len=runtime.get("init_at_random_ep_len", False))
         capture_rng(session)
         audit = {}
         audit_groups=tuple(raw.robot.actuators) if a.full_body_torque else ('knees','feet')

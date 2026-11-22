@@ -9,6 +9,12 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
 KIND='amp_hybrid_rotating_v1'
+LEGACY_HYBRID_SOURCE_HASHES={
+    'amp_layout.py':'c52419784de1fb6759de5783a5c5bb86855e9b521529ea0a00cba4a733ee10be',
+    'amp_mixed_runtime.py':'9df29380ae7a43a0e55c8ba00b97f876c5930126d72d89118104844b6db3dad7',
+    'amp_contract.py':'5074a5092e172684143face4aa8ee21716a6c3787b3b65b1aba4d8d1ea4e3511',
+    'train_stage.py':'618ff97a912a44a9239f6c597b833033fab946cbfb56c10b8cc0b8db4fa66213',
+}
 
 def sha(path):
     h=hashlib.sha256()
@@ -21,8 +27,15 @@ def positive(x,name):
     return x
 
 def validate_config(config, bank):
-    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque','group_schedule','context_schema'}:raise ValueError('expected grid, rotation and recognized optional settings')
+    if not {'grid','rotation'}.issubset(config) or set(config)-{'grid','rotation','full_body_torque','group_schedule','context_schema','runtime'}:raise ValueError('expected grid, rotation and recognized optional settings')
     if 'full_body_torque' in config and type(config['full_body_torque']) is not bool:raise ValueError('full_body_torque must be boolean')
+    if 'runtime' in config:
+        runtime=config['runtime']
+        if (not isinstance(runtime,dict) or set(runtime)!={'per_design_metrics','minibatch_sampler','init_at_random_ep_len'}
+                or type(runtime['per_design_metrics']) is not bool
+                or type(runtime['init_at_random_ep_len']) is not bool
+                or runtime['minibatch_sampler'] not in ('group_balanced','vectorized_balanced')):
+            raise ValueError('runtime must define Boolean per_design_metrics and init_at_random_ep_len, and a supported minibatch_sampler')
     g,r=config['grid'],config['rotation']
     if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
     e=positive(g['num_envs'],'grid.num_envs')
@@ -99,11 +112,19 @@ def stage_spec(bank,config,index):
         end_update=min(first+r['updates_per_stage'],r['total_updates']),
         design_ids=cycle_groups(bank,config,cycle)[within])
 
+def hybrid_source_identity(config):
+    sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')}
+    # Older frozen expert plans were created before the isolated large-bank
+    # runtime existed. Keep their source identity stable for safe resumption.
+    if 'runtime' not in config:
+        sources.update(LEGACY_HYBRID_SOURCE_HASHES)
+    return sources
+
 def experiment_identity(bank_path,config,reference_library):
     from amp_support import source_identity
     from amp_rough_alignment import shared_runtime_sources
     result = dict(kind=KIND,task='run',bank_sha256=sha(bank_path),configuration=config,
-        native_sources=source_identity('run'),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
+        native_sources=source_identity('run'),hybrid_sources=hybrid_source_identity(config),
         full_bank_context_is_stable=True,no_forgetting_metrics=True,reference_library_sha256=sha(reference_library),
         local_assets={'native_ground.usda':sha(HERE/'native_ground.usda')},
         shared_rough_runtime_helpers=shared_runtime_sources())

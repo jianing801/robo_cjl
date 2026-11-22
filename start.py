@@ -136,6 +136,51 @@ def expert_command(root, task, gpu, output, resume):
     return command
 
 
+def spatial_amp_command(root, gpu, output):
+    """Launch the isolated all-2500 AMP timing experiment from existing assets."""
+    config_path = ENTRY/'configs'/'amp_spatial_all2500.json'
+    bank_file = bank_path(root, 'amp')
+    library = root/'references'/'library.json'
+    if not config_path.is_file() or not bank_file.is_file():
+        raise FileNotFoundError('缺少2500结构库或空间域AMP专用配置；不自动生成结构、USD或参考动作。')
+    config, bank = read(config_path), read(bank_file)
+    expected_count = (config['grid']['length_count'] ** 2
+                      * config['grid']['knee_motor_count'] * config['grid']['ankle_motor_count'])
+    train_designs = [row for row in bank.get('designs', []) if row.get('split') == 'train']
+    if (bank.get('task_key') != 'run' or bank.get('configuration') != config['grid']
+            or bank.get('context_schema') != config.get('context_schema')
+            or len(train_designs) != expected_count or expected_count != 2500):
+        raise ValueError('AMP结构库与本次2500结构实验配置不完全一致；拒绝训练。')
+    if root.resolve() == MIGRATED_ROOT.resolve() and not (root/'migration_completed.json').is_file():
+        raise RuntimeError('2500结构迁移库尚未完成。')
+    if not library.is_file():
+        raise FileNotFoundError('缺少已生成的AMP参考动作库；本入口不会生成参考动作。')
+    cache = prepared_cache(root, 'amp')
+    if cache is None:
+        raise FileNotFoundError('缺少AMP现有USD缓存登记；本入口不会转换USD。')
+    if not cache.resolve().is_relative_to(root.resolve()):
+        raise ValueError('AMP USD缓存不在本次迁移库内；拒绝使用外部缓存。')
+    return [sys.executable, '-u', ENTRY/'amp_engine'/'train.py',
+            '--config', config_path, '--bank', bank_file,
+            '--reference-library', library, '--output-root', output,
+            '--asset-cache', cache, '--device', f'cuda:{gpu}',
+            '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
+            '--execution-mode', 'persistent', '--execute']
+
+
+def launch_spatial_amp(root, gpu, preview=False, started_wall=None, started_monotonic=None):
+    output = root/'experts'/f'spatial_amp_all2500_{datetime.now():%Y%m%d_%H%M%S_%f}'
+    command = spatial_amp_command(root, gpu, output)
+    print('空间域 AMP 对照：4096环境、2500种结构、5000次更新。', flush=True)
+    print('复用参考动作和USD缓存：', bank_path(root, 'amp'), flush=True)
+    print('本次独立输出目录：', output, flush=True)
+    if preview:
+        run(command, preview=True)
+        return
+    start_task_timer(root, 'amp-spatial', output, 5000, started_wall, started_monotonic)
+    run(command)
+
+
 def record_run(root, task, output):
     folder = root/'启动记录'; folder.mkdir(exist_ok=True)
     value = dict(output=str(output.resolve()), bank=str(bank_path(root, task).resolve()))
@@ -663,7 +708,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -704,7 +749,7 @@ def main(argv=None):
     action = ALIASES.get(args.操作, args.操作)
     if args.root and args.migrated:
         parser.error('--root 与 --migrated 只选一个')
-    root = (args.root or (MIGRATED_ROOT if args.migrated or action == 'migrate' else DEFAULT_ROOT)).resolve()
+    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial') else DEFAULT_ROOT)).resolve()
     if args.source_root is not None and action != 'migrate':
         parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
@@ -722,6 +767,9 @@ def main(argv=None):
         return
     if (args.migrated or (root/'migration_in_progress.json').is_file()) and not (root/'migration_completed.json').is_file():
         parser.error('该迁移库尚未完成。先运行 start.py 迁移。')
+    if action == 'amp-spatial':
+        launch_spatial_amp(root,args.gpu,args.dry_run,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
+        return
     if action == 'status':
         print('实验目录：', root)
         for task in ('rough','backpack','amp'):

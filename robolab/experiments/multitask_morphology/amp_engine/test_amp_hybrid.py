@@ -1,6 +1,7 @@
 """CPU-only AMP hybrid tests; no Isaac, GPU, reference generation or long training."""
 import ast
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -13,17 +14,19 @@ from tensordict import TensorDict
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
+REPO=HERE.parents[3]
 sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl')]
 from amp_bank import select_grid
-from amp_contract import cycle_groups,stage_spec,validate_checkpoint,validate_config
-from amp_layout import identity,balanced_indices,make_layout
+from amp_contract import cycle_groups,stage_spec,validate_checkpoint,validate_config,hybrid_source_identity
+from amp_layout import identity,balanced_indices,make_layout,vectorized_balanced_indices
 from amp_checkpoint import AmpCheckpointMixin
 from amp_policy import SpatialActorCritic
 from reference_router import ReferenceRouter
 
 
 def extracted(path,name,namespace):
-    node=next(n for n in ast.parse((HERE/path).read_text()).body if isinstance(n,ast.ClassDef) and n.name==name)
+    node=next(n for n in ast.parse((HERE/path).read_text()).body
+              if isinstance(n,(ast.ClassDef,ast.FunctionDef)) and n.name==name)
     exec(compile(ast.Module(body=[node],type_ignores=[]),str(HERE/path),'exec'),namespace)
     return namespace[name]
 
@@ -52,6 +55,109 @@ def test_full900_schedule_balance_and_native_amp_budget():
             layout=make_layout(bank,4096,ids)
             assert set(layout['counts'].values())=={136,137}
     assert stage_spec(bank,cfg,99)['end_update']==5000
+
+
+def test_all2500_spatial_config_preserves_amp_training_contract():
+    config_dir = HERE.parent / 'configs'
+    baseline = json.loads((config_dir / 'amp.json').read_text(encoding='utf8'))
+    spatial = json.loads((config_dir / 'amp_spatial_all2500.json').read_text(encoding='utf8'))
+    assert spatial['grid'] == baseline['grid']
+    assert spatial['rotation'] == dict(active_designs=2500, updates_per_stage=5000,
+                                       total_updates=5000, seed=baseline['rotation']['seed'])
+    assert 'group_schedule' not in spatial
+    assert spatial['runtime'] == dict(per_design_metrics=False,
+                                      minibatch_sampler='vectorized_balanced',
+                                      init_at_random_ep_len=True)
+
+
+def test_legacy_amp_source_identity_remains_resumable():
+    config_dir = HERE.parent / 'configs'
+    baseline = json.loads((config_dir / 'amp.json').read_text(encoding='utf8'))
+    spatial = json.loads((config_dir / 'amp_spatial_all2500.json').read_text(encoding='utf8'))
+    old_sources = hybrid_source_identity(baseline)
+    new_sources = hybrid_source_identity(spatial)
+    assert old_sources['amp_layout.py'] == 'c52419784de1fb6759de5783a5c5bb86855e9b521529ea0a00cba4a733ee10be'
+    assert old_sources['amp_mixed_runtime.py'] == '9df29380ae7a43a0e55c8ba00b97f876c5930126d72d89118104844b6db3dad7'
+    assert new_sources['amp_layout.py'] != old_sources['amp_layout.py']
+    assert new_sources['amp_mixed_runtime.py'] != old_sources['amp_mixed_runtime.py']
+
+
+def test_all2500_spatial_is_one_complete_stage():
+    config_dir = HERE.parent / 'configs'
+    config = json.loads((config_dir / 'amp_spatial_all2500.json').read_text(encoding='utf8'))
+    bank = dict(designs=[dict(id=f'd{i:04d}', split='train', thigh_m=.2, calf_m=.25,
+                              knee_motor='k', ankle_motor='a') for i in range(2500)],
+                ranges_m=dict(thigh=[.2,.4], calf=[.25,.45]))
+    stage = stage_spec(bank, config, 0)
+    assert len(stage['design_ids']) == 2500
+    assert len(set(stage['design_ids'])) == 2500
+    assert (stage['first_update'], stage['end_update']) == (0, 5000)
+
+
+def test_all2500_entry_uses_only_registered_existing_assets(tmp_path, monkeypatch):
+    sys.path.insert(0, str(REPO))
+    spec = importlib.util.spec_from_file_location('multitask_start_for_test', REPO/'start.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config = json.loads((HERE.parent/'configs'/'amp_spatial_all2500.json').read_text(encoding='utf8'))
+    bank_path = tmp_path/'banks'/'amp'/'bank.json'
+    bank_path.parent.mkdir(parents=True)
+    bank = dict(task_key='run', configuration=config['grid'], context_schema=config['context_schema'],
+                designs=[dict(id=f'd{i:04d}', split='train') for i in range(2500)])
+    bank_path.write_text(json.dumps(bank), encoding='utf8')
+    library = tmp_path/'references'/'library.json'
+    library.parent.mkdir()
+    library.write_text('{}', encoding='utf8')
+    cache = tmp_path/'资产准备'/'amp'/'native_cache_portable'
+    cache.mkdir(parents=True)
+    proof = cache/'completed.json'
+    proof.write_text('{}', encoding='utf8')
+    record = tmp_path/'启动记录'/'amp_asset_cache.json'
+    record.parent.mkdir()
+    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    record.write_text(json.dumps(dict(cache=str(cache), bank_sha256=sha(bank_path),
+                                     completed_sha256=sha(proof))), encoding='utf8')
+
+    command = module.spatial_amp_command(tmp_path, 2, tmp_path/'experts'/'trial')
+    arguments = list(map(str, command))
+    assert str(bank_path) in arguments and str(library) in arguments and str(cache) in arguments
+    assert '--execute' in arguments and '--execution-mode' in arguments and 'persistent' in arguments
+    assert not any('prepare_native_cache.py' in arg or 'prepare_references.py' in arg for arg in arguments)
+
+    launch = []
+    monkeypatch.setattr(module, 'run', lambda argv, *, preview: launch.append(argv))
+    module.launch_spatial_amp(tmp_path, 2, preview=True)
+    output = launch[0][launch[0].index('--output-root') + 1]
+    output.mkdir(parents=True)
+    (output/'plan.json').write_text(json.dumps(dict(bank=str(bank_path))), encoding='utf8')
+    assert module.select_run(tmp_path, 'amp') == (tmp_path/'experts'/'amp', False)
+
+
+def test_vectorized_sampler_uses_each_rollout_sample_once_and_balances_groups():
+    groups = torch.tensor([0, 1, 2, 3, 4, 0, 1])
+    batches = vectorized_balanced_indices(groups, steps=12, batches=3)
+    assert [len(batch) for batch in batches] == [28, 28, 28]
+    joined = torch.cat(batches)
+    assert torch.equal(torch.sort(joined).values, torch.arange(84))
+    for group in groups.unique():
+        per_batch = [int((groups[(batch % len(groups))] == group).sum()) for batch in batches]
+        assert max(per_batch) - min(per_batch) <= 1
+
+
+def test_all2500_logging_switch_keeps_existing_global_metrics():
+    helper = extracted('amp_mixed_runtime.py', 'add_spatial_metrics', dict(torch=torch))
+    groups = torch.tensor([0, 1, 0, 1])
+    rewards = torch.tensor([1., 3., 5., 7.])
+    velocity = torch.tensor([2., 4., 6., 8.])
+    log = {'Mean reward': torch.tensor(4.), 'AMP/disc_loss': torch.tensor(.5)}
+    assert helper(log, rewards, velocity, groups, ['a', 'b'], enabled=False) is log
+    assert set(log) == {'Mean reward', 'AMP/disc_loss'}
+    helper(log, rewards, velocity, groups, ['a', 'b'], enabled=True)
+    assert torch.equal(log['Spatial/a/reward'], torch.tensor(3.))
+    assert torch.equal(log['Spatial/a/forward_velocity'], torch.tensor(4.))
+    assert torch.equal(log['Spatial/b/reward'], torch.tensor(5.))
+    assert torch.equal(log['Spatial/b/forward_velocity'], torch.tensor(6.))
+    assert log['Mean reward'].item() == 4.
 
 
 def observations():
