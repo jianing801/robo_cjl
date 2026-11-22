@@ -70,10 +70,15 @@ class NativeTask:
 
 
 def prepare_tasks(a, plan, root, protocol, counts):
+    # Load the pilot's native step hooks before the frozen teacher runtime paths
+    # are placed on sys.path by the per-task rollout builders.
+    import robolab.tasks
     from mixed_scene import create_subscenes
     from rollout import prepare_rollout
     from rollout_amp import prepare_rollout as prepare_amp_rollout
 
+    if Path(robolab.__file__).resolve().parent != HERE.parents[2]/'robolab':
+        raise RuntimeError('The active RoboLab package is outside the mixed pilot worktree')
     with ExitStack() as stack:
         preparers, recipes = [], []
         for task, count in zip(TASKS, counts, strict=True):
