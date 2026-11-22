@@ -178,7 +178,13 @@ def launch_spatial_amp(root, gpu, preview=False, started_wall=None, started_mono
         run(command, preview=True)
         return
     start_task_timer(root, 'amp-spatial', output, 5000, started_wall, started_monotonic)
-    run(command)
+    # Cache validation imports shared engine helpers after the module loader returns.
+    env = os.environ.copy()
+    python_paths = [str(ENTRY/'engine')]
+    if env.get('PYTHONPATH'):
+        python_paths.append(env['PYTHONPATH'])
+    env['PYTHONPATH'] = os.pathsep.join(python_paths)
+    run(command, env=env)
 
 
 def record_run(root, task, output):

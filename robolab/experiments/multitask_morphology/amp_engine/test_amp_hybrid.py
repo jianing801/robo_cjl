@@ -132,6 +132,14 @@ def test_all2500_entry_uses_only_registered_existing_assets(tmp_path, monkeypatc
     (output/'plan.json').write_text(json.dumps(dict(bank=str(bank_path))), encoding='utf8')
     assert module.select_run(tmp_path, 'amp') == (tmp_path/'experts'/'amp', False)
 
+    child_envs = []
+    monkeypatch.setattr(module, 'start_task_timer', lambda *args: None)
+    monkeypatch.setattr(module, 'run', lambda argv, *, env: child_envs.append(env))
+    monkeypatch.setenv('PYTHONPATH', str(tmp_path/'existing_imports'))
+    module.launch_spatial_amp(tmp_path, 2)
+    assert child_envs[0]['PYTHONPATH'].split(module.os.pathsep) == [
+        str(module.ENTRY/'engine'), str(tmp_path/'existing_imports')]
+
 
 def test_vectorized_sampler_uses_each_rollout_sample_once_and_balances_groups():
     groups = torch.tensor([0, 1, 2, 3, 4, 0, 1])
