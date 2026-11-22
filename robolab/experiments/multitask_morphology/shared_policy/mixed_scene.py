@@ -91,9 +91,18 @@ def create_subscenes(recipes, task_names):
     cfgs = [cfg for _, cfg in recipes]
     if any(cfg.decimation != cfgs[0].decimation for cfg in cfgs):
         raise ValueError('Task control decimation differs')
-    if any(cfg.sim.physx.to_dict() != cfgs[0].sim.physx.to_dict() for cfg in cfgs):
-        raise ValueError('Task PhysX solver settings differ')
-    sim = SimulationContext(cfgs[0].sim)
+    sim_cfg = cfgs[0].sim.copy()
+    configs = [cfg.sim.physx.to_dict() for cfg in cfgs]
+    differing = {key: [cfg[key] for cfg in configs]
+                 for key in configs[0] if any(cfg[key] != configs[0][key] for cfg in configs[1:])}
+    # Rough reserves a larger collision stack. Capacity can be shared across
+    # tasks, while solver behavior must match exactly.
+    stack = differing.pop('gpu_collision_stack_size', None)
+    if differing:
+        raise ValueError(f'Task PhysX solver settings differ: {differing}')
+    if stack:
+        sim_cfg.physx.gpu_collision_stack_size = max(stack)
+    sim = SimulationContext(sim_cfg)
     with use_stage(sim.get_initial_stage()):
         tasks = [add_subscene(sim, env_type, cfg, name)
                  for (env_type, cfg), name in zip(recipes, task_names, strict=True)]
