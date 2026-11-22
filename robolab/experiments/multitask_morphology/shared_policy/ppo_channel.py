@@ -45,7 +45,7 @@ def serve(channel,task,env,raw,obs,canonical,clip,reward_adapter=None,*,protocol
         assert_protocol_unchanged(protocol)
         validate_request(spec,session,index,protocol)
         model,_=load_student(spec['student'],raw.device)
-        std=float(spec['std']);rows={k:[] for k in ('obs','actions','logp','reward','done','timeout')}
+        std=float(spec['std']);rows={k:[] for k in ('obs','actions','logp','reward','environment_reward','done','timeout')}
         torque_rows=[]
         for step in range(spec['steps']):
             if stopped():return
@@ -66,8 +66,11 @@ def serve(channel,task,env,raw,obs,canonical,clip,reward_adapter=None,*,protocol
                         max_hard_clip_excess_nm=float(diag['hard_clip_excess_nm'].max()),
                         unavailable=int(diag['unavailable'].sum()),
                         over80=float((diag['utilization']>.8).float().mean())))
-                if reward_adapter:reward=reward_adapter(following,reward)
-                values=dict(obs=base,actions=action,logp=logp,reward=reward,
+                environment_reward=reward
+                if reward_adapter:
+                    environment_reward=reward.clone()
+                    reward=reward_adapter(following,reward)
+                values=dict(obs=base,actions=action,logp=logp,reward=reward,environment_reward=environment_reward,
                     done=done.bool(),timeout=extra.get('time_outs',torch.zeros_like(done)).bool())
                 for key,value in values.items():rows[key].append(value.detach().cpu().clone())
                 base=canonical(following,done.bool())

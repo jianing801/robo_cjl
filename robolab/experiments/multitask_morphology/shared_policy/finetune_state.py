@@ -65,7 +65,8 @@ def restore_rng(state):
     np.random.set_state((name, np.asarray(keys, dtype=np.uint32), pos, gaussian, cached))
 
 
-def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_sha256, metrics=None, *, rollout=None):
+def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_sha256, metrics=None, *,
+                    rollout=None, training_reward=None):
     folder = Path(root) / 'checkpoints'
     folder.mkdir(exist_ok=True)
     path = folder / f'update_{completed_updates:06d}_{uuid.uuid4().hex}.pt'
@@ -73,11 +74,15 @@ def save_checkpoint(root, model, critic, optimizer, completed_updates, manifest_
         optimizer=optimizer.state_dict(), rng=capture_rng(), completed_updates=completed_updates,
         manifest_sha256=manifest_sha256, schema=model.schema, architecture=model.architecture,
         metrics=metrics, simulator_state_restored=False)
+    if training_reward is not None:
+        value['training_reward'] = training_reward
     publish(path, value)
     record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
                   path=path.name, sha256=sha(path))
     if rollout is not None:
         record.update(metrics=metrics, rollout=rollout)
+    if training_reward is not None:
+        record['training_reward'] = training_reward
     write_new(folder / f'update_{completed_updates:06d}.json', record)
     return record
 
@@ -90,14 +95,15 @@ def _checkpoint_receipt(path, index, manifest_sha256):
     return record
 
 
-def _checkpoint_history(folder, manifest_sha256):
+def checkpoint_history(root, manifest_sha256):
+    folder = Path(root) / 'checkpoints'
     commits = sorted(folder.glob('update_*.json'))
     return [_checkpoint_receipt(path, index, manifest_sha256) for index, path in enumerate(commits)]
 
 
 def load_checkpoint(root, model, critic, optimizer, manifest_sha256):
     folder = Path(root) / 'checkpoints'
-    history = _checkpoint_history(folder, manifest_sha256)
+    history = checkpoint_history(root, manifest_sha256)
     if not history:
         return None
     record = history[-1]
@@ -108,6 +114,7 @@ def load_checkpoint(root, model, critic, optimizer, manifest_sha256):
     if (state.get('kind') != 'shared_ppo_learning_state_v2'
             or state['completed_updates'] != record['completed_updates']
             or state['manifest_sha256'] != manifest_sha256
+            or state.get('training_reward') != record.get('training_reward')
             or state['schema'] != model.schema or state['architecture'] != model.architecture):
         raise ValueError('PPO learning-state identity mismatch')
     model.load_state_dict(state['actor'], strict=True)
@@ -173,7 +180,7 @@ def prune_training_artifacts(root, manifest_sha256, completed, *, reconcile=Fals
     if sha(_checkpoint_blob(folder, latest)) != latest['sha256']:
         raise ValueError('Committed PPO checkpoint changed')
     if reconcile:
-        history = _checkpoint_history(folder, manifest_sha256)
+        history = checkpoint_history(root, manifest_sha256)
         if history[-1] != latest:
             raise ValueError('Compact PPO checkpoint history changed')
         obsolete = history[1:-2]
@@ -205,7 +212,8 @@ def validate_batch(data, *, task, index, session, actor_sha256, width, envs=8, a
         raise ValueError('PPO batch identity mismatch')
     n = session['steps_per_task']
     shapes = dict(obs=(n, envs, width), actions=(n, envs, actions), logp=(n, envs),
-                  reward=(n, envs), done=(n, envs), timeout=(n, envs), next_obs=(envs, width))
+                  reward=(n, envs), environment_reward=(n, envs), done=(n, envs), timeout=(n, envs),
+                  next_obs=(envs, width))
     for name, shape in shapes.items():
         value = data.get(name)
         if not isinstance(value, torch.Tensor) or tuple(value.shape) != shape or not torch.isfinite(value).all():

@@ -13,19 +13,28 @@ import numpy as np
 import torch
 
 from contract import load_plan, sha, write_new
-from finetune_state import (select_candidate, save_checkpoint, load_checkpoint,
+from finetune_state import (select_candidate, save_checkpoint, load_checkpoint, checkpoint_history,
                             prune_training_artifacts, validate_batch)
 from persistence import run_lock, resume_pause
 from randomization import protocol_metadata, assert_protocol_unchanged
 from student import load_student, save_student
+from training_reward import RolloutRewards, reward_history_rows, write_training_reward_csv
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
 STEPS_PER_TASK = 24
 ENVS_PER_TASK = 8
 ACTION_STD = .05
-# The predecessor used by the compact 200-update Linux BO runs.
-PREVIOUS_BO_FINETUNE_SOURCE_SHA256 = '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c'
+# Exact predecessors used by the compact 200-update Linux BO runs.
+LEGACY_BO_COORDINATORS = (
+    '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c',
+    '304cdd7c22039d3dc5eff837cf449eb1ff33c96c106dcffa92f4afed5bb4f48d',
+)
+LEGACY_BO_SOURCES = {
+    'finetune_state.py': '7b958616ceb651b059a7fef4c40bf3356b134a3dfe56a82bf1f64448b703efad',
+    'ppo_channel.py': '87d6f011074fc920b365e1b24cdaa5a05913493672a14535900df96fc3c06cfb',
+    'pipeline.py': 'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
+}
 
 
 def worker_command(plan, student, root, task, design_id, profile, strength, seed, full_body_torque=False):
@@ -96,6 +105,8 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
         worker_seed=worker_seed, simulator_state_restored=False,
         resume_scope='actor, critic, Adam, coordinator RNG and update count; fresh simulator episodes')
     write_new(attempt/'session.json', session)
+    rewards = RolloutRewards()
+    reward_rows = reward_history_rows(checkpoint_history(root, manifest_sha256), session['tasks'])
     workers = []; handles = []
     try:
         for task, spec in plan['teachers'].items():
@@ -132,13 +143,17 @@ def train_updates(a, root, plan, model, critic, optimizer, completed, manifest_s
                 task=task, index=index, session=session, actor_sha256=actor_sha256, width=model.width)
                 for task in plan['teachers']]
             check_pause(root)
+            training_reward = rewards.summarize(batches, session['session_id'])
             metrics = ppo_update(model, critic, optimizer, batches)
             check_pause(root); assert_protocol_unchanged(protocol)
             rollout = None
             if a.compact_training_artifacts:
                 rollout = dict(session_id=attempt.name,
                     task_audits={batch['task']: batch.get('full_body_audit') for batch in batches})
-            save_checkpoint(root, model, critic, optimizer, index+1, manifest_sha256, metrics, rollout=rollout)
+            receipt = save_checkpoint(root, model, critic, optimizer, index+1, manifest_sha256, metrics,
+                                      rollout=rollout, training_reward=training_reward)
+            reward_rows.extend(reward_history_rows([receipt], session['tasks']))
+            write_training_reward_csv(root, reward_rows)
             if rollout is not None:
                 prune_training_artifacts(root, manifest_sha256, index+1)
             print('JOINT_PPO_UPDATE', index+1, '/', a.updates, flush=True)
@@ -220,7 +235,7 @@ def run(a):
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = Path(a.output).resolve()
     sources = ('joint_finetune.py', 'finetune_state.py', 'ppo_channel.py', 'persistence.py', 'contract.py',
-               'student.py', 'pipeline.py', 'evaluation.py')
+               'student.py', 'pipeline.py', 'evaluation.py', 'training_reward.py')
     manifest = dict(kind='shared_candidate_finetuning_v2', plan_sha256=sha(a.plan),
         initial_actor_sha256=sha(a.student), candidate=candidate, updates=a.updates,
         full_body_torque=a.full_body_torque, collection_protocol=protocol, seed=a.seed,
@@ -237,10 +252,11 @@ def run(a):
     if a.resume:
         frozen_manifest = json.loads((root/'manifest.json').read_text(encoding='utf8'))
         if frozen_manifest != manifest:
-            previous_sources = {**manifest['sources'], 'joint_finetune.py': PREVIOUS_BO_FINETUNE_SOURCE_SHA256}
-            previous_bo_manifest = dict(manifest, sources=previous_sources)
+            previous_sources = {name: manifest['sources'][name] for name in sources if name != 'training_reward.py'}
+            previous_sources.update(LEGACY_BO_SOURCES)
             if not (a.training_only and a.compact_training_artifacts and a.updates == 200
-                    and frozen_manifest == previous_bo_manifest):
+                    and any(frozen_manifest == dict(manifest, sources={**previous_sources, 'joint_finetune.py': old})
+                            for old in LEGACY_BO_COORDINATORS)):
                 raise ValueError('Resume candidate, source, initial actor, training/evaluation budget or protocol changed')
     else:
         root.mkdir(parents=True, exist_ok=False)
@@ -268,6 +284,9 @@ def run(a):
     if completed > a.updates:
         raise ValueError('Checkpoint exceeds the frozen PPO budget')
     resume_pause(root, a.resume_paused)
+    if completed:
+        history = checkpoint_history(root, manifest_sha256)
+        write_training_reward_csv(root, reward_history_rows(history, plan['teachers']))
     if not a.training_only and (root/'completed.json').exists():
         record = json.loads((root/'completed.json').read_text(encoding='utf8'))
         if (record['manifest_sha256'] != manifest_sha256 or record['ppo_updates'] != completed

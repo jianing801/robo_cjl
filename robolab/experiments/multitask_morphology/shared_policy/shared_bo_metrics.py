@@ -31,7 +31,9 @@ def positive(value):
 
 def read_conditions(path):
     value = json.loads(Path(path).read_text(encoding='utf8'))
-    if (value.keys() != {'kind', 'duration_s', 'seeds', 'copies', 'tasks'}
+    fields = {'kind', 'duration_s', 'seeds', 'copies', 'tasks'}
+    if (not fields <= value.keys() <= fields | {'reset_mode'}
+            or ('reset_mode' in value and value['reset_mode'] != 'fixed')
             or value['kind'] != TRIAL_VERSION or set(value['tasks']) != set(TASKS)):
         raise ValueError('Invalid three-task conditions')
     seconds, seeds, copies = value['duration_s'], value['seeds'], value['copies']

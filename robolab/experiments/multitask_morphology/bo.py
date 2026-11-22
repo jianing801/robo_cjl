@@ -15,7 +15,18 @@ DEFAULT_ROOT = REPO/'robolab/logs/multitask_full2500_physical'
 MIGRATED_ROOT = DEFAULT_ROOT.with_name('multitask_full2500_physical_migrated')
 DEFAULT_BO_UPDATES = 200
 PRE_TRAINING_ONLY_BO_SHA256 = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
-FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
+FORMAL_CONDITIONS = HERE/'configs/bo_conditions_single_seed.json'
+LEGACY_FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
+# Exact LF and CRLF source sets preceding the fixed-reset protocol.
+PRE_FIXED_BO_SOURCES = (
+    (('0942320ad840a49a921bf014c57d033a6322f86e34043e50c28d6310ea06879d', PRE_TRAINING_ONLY_BO_SHA256),
+     '5aacc6dc340839ed76db3a4d3e4e92f07d33b9e88911c538ceba482cad68907e',
+     'c064cc6b15b03eb8869a38a567b0a1bae55f8ba93246fb13fc05e3de87e9445e'),
+    (('4bfc4fc4f674b2f3b1c41b9ab888a29bb4fd998088fbdf4f28cf8b450c72d6bf',
+      'ec8b7ddea5062dd043aa08f73359ea7a89aa62dccff49559d307286027f8e9dc'),
+     '781e3fa5a46a4d080565a58335179502a2a0dbcb08f1d6778c8f2511a7978d08',
+     '9e67388022469f694f0d0f38716379cf8f5568cf3803a6793eea9fd4416fcb5b'),
+)
 PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
@@ -41,14 +52,29 @@ def freeze(path, data):
         write_new(path, data)
 
 
-def freeze_candidate_manifest(path, identity):
-    # Preserve existing measurement provenance across the removal of optional diagnostics.
-    if path.is_file():
-        previous_sources = dict(identity['sources'])
-        previous_sources['bo.py'] = PRE_TRAINING_ONLY_BO_SHA256
-        if read(path) == dict(identity, sources=previous_sources):
-            return
+def freeze_candidate_manifest(path, identity, *, fixed_reset=False):
+    if path.is_file() and not fixed_reset:
+        saved = read(path)
+        coordinator = saved.get('sources', {}).get('bo.py')
+        for coordinators, capture, metrics in PRE_FIXED_BO_SOURCES:
+            if coordinator in coordinators:
+                previous_sources = dict(identity['sources'])
+                previous_sources.update({'bo.py': coordinator, 'bo_capture.py': capture,
+                                         'shared_bo_metrics.py': metrics})
+                if saved == dict(identity, sources=previous_sources):
+                    return
     freeze(path, identity)
+
+
+def official_conditions_path(conditions_sha256):
+    for path in (FORMAL_CONDITIONS, LEGACY_FORMAL_CONDITIONS):
+        if digest(read_conditions(path)) == conditions_sha256:
+            return path
+    raise ValueError('Official BO requires the fixed three-task conditions or the archived three-seed conditions')
+
+
+def calibration_label(conditions):
+    return 'calibration50_single_seed' if conditions.get('reset_mode') == 'fixed' else 'calibration50'
 
 
 def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
@@ -101,7 +127,7 @@ def check_formal_selection(root, plan, manifest, complete, student, *, require_h
         raise ValueError('Selected DAgger checkpoint differs from the reported winner')
 
 
-def shared_input(root, *, formal=False, require_horizontal_selection=False):
+def shared_input(root, *, formal=False, require_horizontal_selection=False, continuation=None):
     path = root/'shared_plan/plan.json'
     plan = load_plan(path)
     manifest = read(root/'shared_policy/manifest.json')
@@ -114,6 +140,11 @@ def shared_input(root, *, formal=False, require_horizontal_selection=False):
     if formal:
         check_formal_selection(root, plan, manifest, complete, student,
                                require_horizontal_selection=require_horizontal_selection)
+    if continuation is not None:
+        if not formal or not require_horizontal_selection:
+            raise ValueError('An appended round requires the formal horizontal selection')
+        from dagger_bo_input import continuation_actor
+        student = continuation_actor(continuation, root/'shared_policy', path, plan, student)
     return path, plan, student
 
 
@@ -231,7 +262,7 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
         sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
                                          SHARED/'rollout.py', SHARED/'rollout_amp.py')})
     work.mkdir(parents=True, exist_ok=True)
-    freeze_candidate_manifest(work/'manifest.json', identity)
+    freeze_candidate_manifest(work/'manifest.json', identity, fixed_reset=conditions.get('reset_mode') == 'fixed')
     resume_pause(work, a.resume_paused)
     tuning = (a.finetuned if getattr(a, 'finetuned', None) else work/'tuning').resolve()
     if not actor_receipt(tuning).is_file():
@@ -346,28 +377,48 @@ def calibrate(report, reference):
                 task_weights={task: 1/3 for task in TASKS}, metrics=metrics)
 
 
-def panel_scoring(reports, keys, benchmark):
-    """Fit each scale once to equal-weight structure means from three successful seeds."""
+def required_panel_pairs(conditions):
+    seeds = conditions['seeds']
+    if conditions['copies'] != 1 or len(seeds) not in (1, 3) or len(set(seeds)) != len(seeds):
+        raise ValueError('Calibration needs one or three distinct seeds with one trial each')
+    return {(seed, 0) for seed in seeds}
+
+
+def check_panel_pairs(pairs, expected):
+    if (len(pairs) != len(expected)
+            or {(pair['seed'], pair['replica']) for pair in pairs} != expected
+            or any(type(pair['seed']) is not int or type(pair['replica']) is not int for pair in pairs)):
+        raise ValueError('Incomplete or duplicate calibration seed coverage')
+    for pair in pairs:
+        tasks = pair['tasks']
+        if set(tasks) != set(TASKS):
+            raise ValueError('Missing task in a paired BO repetition')
+        statuses = {trial['status'] for trial in tasks.values()}
+        if not statuses <= {'success', 'failure'}:
+            raise ValueError('Invalid trial must be resolved before calibration or search')
+        if pair['feasible'] is not (statuses == {'success'}):
+            raise ValueError('Joint BO feasibility disagrees with task trial statuses')
+
+
+def panel_scoring(reports, keys, benchmark, *, conditions=None):
+    """Fit each scale to structures completing every declared trial for the task."""
     import numpy as np
     if len(keys) != 50 or len(set(keys)) != 50 or [tuple(r['candidate']['structure_key']) for r in reports] != list(keys):
         raise ValueError('Calibration requires the fixed 50 distinct structures in group-21 order')
-    first = reports[0]
-    conditions = first['conditions']
-    expected = {(seed, 0) for seed in conditions['seeds']}
-    if len(expected) != 3 or conditions['copies'] != 1:
-        raise ValueError('Calibration needs three distinct seeds with one trial each')
+    if conditions is None:
+        conditions = reports[0]['conditions']
+    conditions_sha256 = digest(conditions)
+    expected = required_panel_pairs(conditions)
     samples = {task: {metric: [] for metric in METRICS[task]} for task in TASKS}
     for report in reports:
         pairs = report['pairs']
         if (report['kind'] != REPORT_VERSION or report['domain'] != 'simulation'
                 or report['ppo_updates'] != benchmark['updates'] or report['conditions'] != conditions
-                or report['conditions_sha256'] != first['conditions_sha256']
-                or len(pairs) != 3 or {(r['seed'],r['replica']) for r in pairs} != expected):
-            raise ValueError('Inconsistent calibration conditions, candidate budget or seed coverage')
+                or report['conditions_sha256'] != conditions_sha256):
+            raise ValueError('Inconsistent calibration conditions or candidate budget')
+        check_panel_pairs(pairs, expected)
         for task in TASKS:
             runs = [pair['tasks'][task] for pair in pairs]
-            if any(run['status'] == 'invalid' for run in runs):
-                raise ValueError('Invalid trial must be resolved before calibration')
             if not all(run['status'] == 'success' for run in runs):
                 continue
             for metric in METRICS[task]:
@@ -388,7 +439,7 @@ def panel_scoring(reports, keys, benchmark):
             # With an explicit scale, the scorer maps the baseline to 1.
             metrics[task][name] = dict(p10=low, p90=high, baseline=high, scale=high-low,
                                       weight=weight, eligible_designs=len(values))
-    return dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=first['conditions_sha256'],
+    return dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=conditions_sha256,
         method='post_finetune_panel50',benchmark=benchmark,metrics=metrics,task_weights={t:1/3 for t in TASKS})
 
 
@@ -440,6 +491,8 @@ def initialize(a, work, source, plan, actor, conditions):
         if reanchor or (work/'completed.json').is_file():
             check_panel_receipt(old_scoring_path)
         previous_benchmark = previous['benchmark']
+        if previous.get('conditions_sha256') != manifest['conditions_sha256']:
+            raise ValueError('Frozen calibration uses different measurement conditions')
         if any(previous_benchmark.get(key) != value for key, value in benchmark.items()):
             raise ValueError('Frozen calibration uses a different starting policy, plan or PPO budget')
         for entry in previous_benchmark['reports']:
@@ -459,7 +512,7 @@ def initialize(a, work, source, plan, actor, conditions):
             reports.append(report)
             evidence.append(dict(report=str(path.relative_to(work)), sha256=sha(path)))
             print('CALIBRATION_PROGRESS', index, '/ 50', flush=True)
-    scoring = panel_scoring(reports,keys,dict(benchmark,reports=evidence))
+    scoring = panel_scoring(reports, keys, dict(benchmark, reports=evidence), conditions=conditions)
     freeze(work/'scoring.json',scoring)
     freeze(work/'completed.json',dict(scoring_sha256=sha(work/'scoring.json'),
                                       manifest_sha256=sha(work/'manifest.json')))
@@ -508,13 +561,24 @@ def propose(pool, observations, evaluated, schema, seed):
 
 def search(a, work, source, plan, actor, conditions):
     scoring = read(a.scoring)
-    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=digest(conditions)))
+    conditions_sha256 = digest(conditions)
+    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256))
+    formal = scoring.get('method') == 'post_finetune_panel50'
+    expected = required_panel_pairs(conditions) if formal else None
+
+    def score(report):
+        if expected is not None:
+            check_panel_pairs(report['pairs'], expected)
+        return objective(report, scoring)
+
     pool = read(plan['shared_bank'])['structures']
     keys = {tuple(k) for k in plan['selected_structure_keys']}
     pool = [r for r in pool if tuple(r['key']) in keys]
     observations, evaluated, results = [], set(), []
-    if scoring.get('method') == 'post_finetune_panel50':
+    if formal:
         check_panel_receipt(a.scoring)
+        if read(a.scoring.parent/'manifest.json').get('conditions_sha256') != conditions_sha256:
+            raise ValueError('Frozen calibration manifest uses different measurement conditions')
         if span_only_panel(scoring):
             raise ValueError('Rerun BO initialize to reuse completed measurements with P10/P90 anchors')
         benchmark = scoring['benchmark']
@@ -536,14 +600,22 @@ def search(a, work, source, plan, actor, conditions):
             if (report['candidate']['design_ids'] != row['design_ids'] or tuple(report['candidate']['structure_key']) != key
                     or report['ppo_updates'] != a.updates):
                 raise ValueError('Initial BO observation is attached to another candidate or budget')
-            scored = objective(report,scoring)
+            scored = score(report)
             observations.extend(dict(obs,params=parameters(row)) for obs in scored['observations'])
             evaluated.add(design_id)
             results.append(dict(design_id=design_id,structure_key=row['key'],evaluation=str(path),**scored))
-    freeze(work/'manifest.json', dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=sha(source),
-        initial_actor_sha256=sha(actor), conditions_sha256=digest(conditions), scoring_sha256=sha(a.scoring),
+    manifest = work/'manifest.json'
+    identity = dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=sha(source),
+        initial_actor_sha256=sha(actor), conditions_sha256=conditions_sha256, scoring_sha256=sha(a.scoring),
         coordinator_sha256=sha(__file__), surrogate_sha256=sha(REPO/'rough_bo/constrained_gp.py'),
-        updates=a.updates, seed=a.seed))
+        updates=a.updates, seed=a.seed)
+    if manifest.is_file() and conditions.get('reset_mode') != 'fixed':
+        saved = read(manifest)
+        previous_sha = saved.get('coordinator_sha256')
+        if (previous_sha in {coordinators[0] for coordinators, _, _ in PRE_FIXED_BO_SOURCES}
+                and saved == dict(identity, coordinator_sha256=previous_sha)):
+            identity = saved
+    freeze(manifest, identity)
     resume_pause(work, a.resume_paused)
     for i in range(len(evaluated), a.trials):
         trial = work/f'trial_{i:04d}'
@@ -561,14 +633,14 @@ def search(a, work, source, plan, actor, conditions):
             raise ValueError('Repeated or mismatched frozen BO proposal')
         print('BO_TRIAL', i + 1, '/', a.trials, design_id, flush=True)
         report = evaluate(a, trial/'candidate', source, plan, actor, design_id, conditions)
-        scored = objective(report, scoring)
+        scored = score(report)
         result = dict(proposal, evaluation=str(trial/'candidate/bo_evaluation.json'), **scored)
         freeze(trial/'observation.json', result)
         observations.extend(dict(row, params=parameters(matched[0])) for row in scored['observations'])
         evaluated.add(design_id)
         results.append(result)
     complete = [row for row in results if row['mean_objective'] is not None
-                and (scoring.get('method') != 'post_finetune_panel50' or row['complete_objectives'] == 3)]
+                and (expected is None or row['complete_objectives'] == len(expected))]
     best_observed = min(complete, key=lambda r: r['mean_objective']) if complete else None
     freeze(work/f'budget_{a.trials:04d}.json', dict(trials=len(results), best_observed=best_observed,
         candidates=[{k: r[k] for k in ('design_id', 'structure_key', 'evaluation',
@@ -585,6 +657,8 @@ def main(argv=None):
         roots.add_argument('--migrated', action='store_true', help='Use the completed migrated common bank')
         p.add_argument('--output', type=Path)
         p.add_argument('--conditions', type=Path)
+        p.add_argument('--shared-continuation', type=Path,
+                       help='Use the verified winning actor through this completed DAgger continuation')
         p.add_argument('--gpu', type=int, default=0)
         p.add_argument('--updates', type=int, default=DEFAULT_BO_UPDATES)
         p.add_argument('--timeout', type=int, default=1800)
@@ -605,7 +679,7 @@ def main(argv=None):
     p.add_argument('--scoring', required=True, type=Path)
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
-    p.add_argument('--conditions', type=Path, default=HERE/'configs/bo_conditions.json')
+    p.add_argument('--conditions', type=Path, default=LEGACY_FORMAL_CONDITIONS)
     p.add_argument('--output', type=Path, required=True)
     a = parser.parse_args(argv)
     if a.command == 'ingest':
@@ -625,9 +699,10 @@ def main(argv=None):
     if (a.migrated or (a.root/'migration_in_progress.json').is_file()) and not (a.root/'migration_completed.json').is_file():
         parser.error('Complete migration of the selected experiment root before BO')
     formal = a.command == 'initialize'
-    default_conditions = FORMAL_CONDITIONS
+    conditions_path = a.conditions or FORMAL_CONDITIONS
+    conditions = read_conditions(conditions_path)
     if a.command == 'search':
-        default_scoring = a.root/'bo/calibration50/scoring.json'
+        default_scoring = a.root/'bo'/calibration_label(conditions)/'scoring.json'
         anchored_scoring = default_scoring.parent/'percentile_scoring/scoring.json'
         if (anchored_scoring.parent/'completed.json').is_file():
             default_scoring = anchored_scoring
@@ -636,19 +711,36 @@ def main(argv=None):
         formal = scoring.get('method') == 'post_finetune_panel50'
         if not formal and (a.scoring == default_scoring or 'reports' in scoring.get('benchmark', {})):
             raise ValueError('Official initial observations require the frozen panel scoring method')
-        if not formal and scoring.get('conditions_sha256') == digest(read_conditions(PILOT_CONDITIONS)):
-            default_conditions = PILOT_CONDITIONS
-    a.conditions = (a.conditions or default_conditions).resolve()
-    conditions = read_conditions(a.conditions)
-    if formal and conditions != read_conditions(FORMAL_CONDITIONS):
-        raise ValueError('Official BO calibration and search require the fixed three-task conditions')
-    source, plan, actor = shared_input(a.root, formal=formal,
+        if a.conditions is None:
+            if formal and a.scoring != default_scoring.resolve():
+                conditions_path = official_conditions_path(scoring['conditions_sha256'])
+            elif not formal and scoring.get('conditions_sha256') == digest(read_conditions(PILOT_CONDITIONS)):
+                conditions_path = PILOT_CONDITIONS
+            conditions = read_conditions(conditions_path)
+        if scoring.get('conditions_sha256') != digest(conditions):
+            raise ValueError('BO search scoring and measurements require the same conditions')
+    a.conditions = conditions_path.resolve()
+    continuation = {}
+    if a.shared_continuation is not None:
+        if (conditions.get('reset_mode') != 'fixed' or a.updates != DEFAULT_BO_UPDATES
+                or (a.command == 'search' and not formal)):
+            parser.error('A continuation actor requires formal single-seed conditions and the default PPO budget')
+        formal = True
+        continuation['continuation'] = a.shared_continuation.resolve()
+    if formal:
+        official_conditions_path(digest(conditions))
+    source, plan, actor = shared_input(a.root, formal=formal, **continuation,
                                       require_horizontal_selection=formal and a.updates == DEFAULT_BO_UPDATES)
     if a.command == 'evaluate' and a.candidate not in plan['teachers']['stairs']['design_ids']:
         parser.error('Candidate must be an exact shared Rough structure ID')
     if getattr(a, 'finetuned', None) and not actor_receipt(a.finetuned).is_file():
         parser.error('--finetuned needs the completed candidate run directory')
-    label = {'search':'search','initialize':'calibration50'}.get(a.command,getattr(a,'candidate',None))
+    if a.command == 'initialize':
+        label = calibration_label(conditions)
+    elif a.command == 'search':
+        label = 'search_single_seed' if formal and conditions.get('reset_mode') == 'fixed' else 'search'
+    else:
+        label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     work = (a.output or a.root/'bo'/label).resolve()
     with run_lock(work):
         work.mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ import time
 import psutil
 
 from bo import (HERE, REPO, FORMAL_CONDITIONS, TASKS, calibration_keys, check_panel_receipt,
-                checked_report, completed_actor, digest, freeze, panel_scoring, paired_trials,
+                checked_report, completed_actor, digest, freeze, official_conditions_path, panel_scoring, paired_trials,
                 read, read_conditions, run_lock, sha, shared_input)
 
 
@@ -83,17 +83,21 @@ def initialize(command, work, *, resume_paused, observe=observe_calibration, sle
         sleep(30)
 
 
-def summarize(root, work, updates):
-    source, _, initial = shared_input(root, formal=True, require_horizontal_selection=True)
-    conditions = read_conditions(FORMAL_CONDITIONS)
+def summarize(root, work, updates, *, conditions_path=None, continuation=None):
+    source, _, initial = shared_input(root, formal=True, require_horizontal_selection=True,
+                                      continuation=continuation)
     scoring_path = work/'scoring.json'
     check_panel_receipt(scoring_path)
     scoring = read(scoring_path)
+    frozen_conditions = official_conditions_path(scoring['conditions_sha256'])
+    conditions = read_conditions(conditions_path or frozen_conditions)
+    conditions_sha256 = digest(conditions)
     keys = calibration_keys()
     benchmark = scoring['benchmark']
     if (benchmark['updates'] != updates or benchmark['initial_actor_sha256'] != sha(initial)
             or benchmark['source_plan_sha256'] != sha(source) or len(benchmark['reports']) != len(keys)
-            or scoring['conditions_sha256'] != digest(conditions)):
+            or scoring['conditions_sha256'] != conditions_sha256
+            or read(work/'manifest.json').get('conditions_sha256') != conditions_sha256):
         raise ValueError('Calibration receipt has a different budget, policy, plan or conditions')
     tasks = {task: [] for task in TASKS}
     reports = []
@@ -114,6 +118,8 @@ def summarize(root, work, updates):
             if not native_path.is_relative_to(folder.resolve()) or sha(native_path) != measurement['sha256']:
                 raise ValueError(f'Measurement receipt changed at structure {index}')
             native = read(native_path)
+            if native.get('conditions_sha256') != conditions_sha256:
+                raise ValueError(f'Measurement conditions differ at structure {index}')
             if native['actor_sha256'] != report['student_sha256'] or sha(native['trace']) != native['trace_sha256']:
                 raise ValueError(f'Measurement actor or raw trace changed at structure {index}')
             measurements.append(native)
@@ -123,8 +129,11 @@ def summarize(root, work, updates):
         for pair in report['pairs']:
             for task, trial in pair['tasks'].items():
                 tasks[task].append(trial)
-    if panel_scoring(reports, keys, benchmark) != scoring:
+    if panel_scoring(reports, keys, benchmark, conditions=conditions) != scoring:
         raise ValueError('Frozen scoring differs from recomputed quantiles')
+    trials_per_task = len(keys) * len(conditions['seeds']) * conditions['copies']
+    if any(len(trials) != trials_per_task for trials in tasks.values()):
+        raise ValueError('Calibration measurement count differs from the frozen conditions')
     task_summary = {}
     for task, trials in tasks.items():
         speeds = [r['mean_forward_mps'] for r in trials if r['mean_forward_mps'] is not None]
@@ -154,12 +163,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--conditions', type=Path, help='Approved BO conditions file')
+    parser.add_argument('--shared-continuation', type=Path,
+                        help='Use the verified winning actor through this completed DAgger continuation')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--distillation-pid', type=int)
     parser.add_argument('--resume-paused', action='store_true')
     args = parser.parse_args(argv)
     root, work = args.root.resolve(), args.output.resolve()
-    shared = root/'shared_policy'
+    continuation = args.shared_continuation.resolve() if args.shared_continuation is not None else None
+    shared = continuation or root/'shared_policy'
+    actor_source = {'continuation': continuation} if continuation is not None else {}
     process = None
     if args.distillation_pid is not None:
         try:
@@ -169,15 +183,28 @@ def main(argv=None):
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             process = None
     with run_lock(work.with_name(work.name + '_handoff')):
+        manifest = work/'manifest.json'
+        frozen = read(manifest)['conditions_sha256'] if manifest.is_file() else None
+        conditions_path = args.conditions or (official_conditions_path(frozen) if frozen else FORMAL_CONDITIONS)
+        conditions = read_conditions(conditions_path)
+        conditions_sha256 = digest(conditions)
+        official_conditions_path(conditions_sha256)
+        if continuation is not None and conditions.get('reset_mode') != 'fixed':
+            raise ValueError('A continuation actor requires formal single-seed conditions')
+        if frozen is not None and conditions_sha256 != frozen:
+            raise ValueError('Requested conditions differ from the frozen calibration')
         print('BO_HANDOFF_WAIT', shared, 'pid=', args.distillation_pid, flush=True)
         wait_for_distillation(shared, process)
-        shared_input(root, formal=True, require_horizontal_selection=True)
+        shared_input(root, formal=True, require_horizontal_selection=True, **actor_source)
         if not (work/'completed.json').is_file():
             command = [sys.executable, '-u', str(HERE/'bo.py'), 'initialize', '--root', str(root),
-                       '--output', str(work), '--gpu', str(args.gpu), '--updates', str(DEFAULT_BO_UPDATES)]
+                       '--output', str(work), '--gpu', str(args.gpu), '--updates', str(DEFAULT_BO_UPDATES),
+                       '--conditions', str(conditions_path.resolve())]
+            if continuation is not None:
+                command += ['--shared-continuation', str(continuation)]
             print('BO_HANDOFF_START', 'updates=', DEFAULT_BO_UPDATES, work, flush=True)
             initialize(command, work, resume_paused=args.resume_paused)
-        summarize(root, work, DEFAULT_BO_UPDATES)
+        summarize(root, work, DEFAULT_BO_UPDATES, conditions_path=conditions_path, **actor_source)
 
 
 if __name__ == '__main__':

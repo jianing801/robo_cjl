@@ -86,14 +86,39 @@ def test_calibration_interrupt_during_first_report_scan_stops_controller(tmp_pat
     assert len(stopped) == 1
 
 
-def test_summary_checks_450_trials_and_recomputes_anchored_scales(tmp_path, monkeypatch):
+def test_handoff_resumes_with_the_frozen_legacy_conditions(tmp_path, monkeypatch):
+    import bo
+
+    work = tmp_path/'calibration'
+    work.mkdir()
+    legacy = bo.LEGACY_FORMAL_CONDITIONS
+    conditions_sha256 = bo.digest(bo.read_conditions(legacy))
+    (work/'manifest.json').write_text(json.dumps(dict(conditions_sha256=conditions_sha256)))
+    calls = []
+    monkeypatch.setattr(handoff, 'wait_for_distillation', lambda *args: None)
+    monkeypatch.setattr(handoff, 'shared_input', lambda *args, **kwargs: None)
+    monkeypatch.setattr(handoff, 'initialize', lambda cmd, *args, **kwargs: calls.append(cmd))
+    monkeypatch.setattr(handoff, 'summarize', lambda *args, conditions_path: calls.append(conditions_path))
+    args = ['--root', str(tmp_path), '--output', str(work), '--resume-paused']
+    handoff.main(args)
+    command, summary_conditions = calls
+    assert Path(command[command.index('--conditions')+1]) == legacy
+    assert summary_conditions == legacy
+    with pytest.raises(ValueError, match='frozen calibration'):
+        handoff.main(args+['--conditions', str(bo.FORMAL_CONDITIONS)])
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_summary_checks_frozen_trials_and_recomputes_anchored_scales(tmp_path, monkeypatch, legacy):
     import bo
     plan, actor = tmp_path/'plan.json', tmp_path/'actor.pt'
     plan.touch()
     actor.write_bytes(b'actor')
     monkeypatch.setattr(handoff, 'shared_input', lambda *_, **__: (plan, {}, actor))
     monkeypatch.setattr(handoff, 'completed_actor', lambda *_, **__: actor)
-    conditions = bo.read_conditions(bo.FORMAL_CONDITIONS)
+    selected = bo.LEGACY_FORMAL_CONDITIONS if legacy else bo.FORMAL_CONDITIONS
+    conditions = bo.read_conditions(selected)
     keys = bo.calibration_keys()
     reports, receipts = [], []
     for i, key in enumerate(keys, 1):
@@ -106,6 +131,7 @@ def test_summary_checks_450_trials_and_recomputes_anchored_scales(tmp_path, monk
         for seed in conditions['seeds']:
             for task in bo.TASKS:
                 native = dict(task=task, seed=seed, actor_sha256=bo.sha(actor),
+                    conditions_sha256=bo.digest(conditions),
                     trace=str(trace), trace_sha256=bo.sha(trace),
                     trials=[dict(replica=0, status='success', mean_forward_mps=.5,
                                  metrics={metric: float(i) for metric in bo.METRICS[task]})])
@@ -124,14 +150,16 @@ def test_summary_checks_450_trials_and_recomputes_anchored_scales(tmp_path, monk
     benchmark = dict(updates=200, initial_actor_sha256=bo.sha(actor), source_plan_sha256=bo.sha(plan),
                      reports=receipts)
     manifest = tmp_path/'manifest.json'
-    manifest.touch()
+    manifest.write_text(json.dumps(dict(conditions_sha256=bo.digest(conditions))))
     scoring = tmp_path/'scoring.json'
     scoring.write_text(json.dumps(bo.panel_scoring(reports, keys, benchmark)))
     (tmp_path/'completed.json').write_text(json.dumps(dict(scoring_sha256=bo.sha(scoring),
                                                           manifest_sha256=bo.sha(manifest))))
     handoff.summarize(tmp_path, tmp_path, 200)
     result = json.loads((tmp_path/'calibration_summary.json').read_bytes())
-    assert result['structures'] == 50 and result['trials'] == 450 and result['paired_successes'] == 150
+    assert result['structures'] == 50
+    assert result['trials'] == (450 if legacy else 150)
+    assert result['paired_successes'] == (150 if legacy else 50)
     for task in result['normalization'].values():
         for metric in task.values():
             assert metric['multiplier'] * metric['p10'] + metric['offset'] == pytest.approx(0)
@@ -139,3 +167,20 @@ def test_summary_checks_450_trials_and_recomputes_anchored_scales(tmp_path, monk
     (tmp_path/'design_01/trace.npz').write_bytes(b'changed')
     with pytest.raises(ValueError, match='raw trace changed'):
         handoff.summarize(tmp_path, tmp_path, 200)
+
+def test_handoff_explicit_continuation_passes_same_actor_source_to_evaluation_and_summary(tmp_path, monkeypatch):
+    extension = tmp_path/'shared_policy_round4'
+    calls = []
+    monkeypatch.setattr(handoff, 'wait_for_distillation',
+                        lambda folder, process: calls.append(folder))
+    monkeypatch.setattr(handoff, 'shared_input',
+                        lambda *args, **kwargs: calls.append(kwargs['continuation']))
+    monkeypatch.setattr(handoff, 'initialize',
+                        lambda command, *args, **kwargs: calls.append(command))
+    monkeypatch.setattr(handoff, 'summarize',
+                        lambda *args, **kwargs: calls.append(kwargs['continuation']))
+    handoff.main(['--root', str(tmp_path), '--output', str(tmp_path/'calibration'),
+                  '--shared-continuation', str(extension)])
+    wait_for, verify, command, summarize = calls
+    assert wait_for == verify == summarize == extension.resolve()
+    assert Path(command[command.index('--shared-continuation') + 1]) == extension.resolve()

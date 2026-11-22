@@ -45,22 +45,16 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
     command.ranges.heading = (0., 0.)
     # Isaac's native horizon must not interrupt the declared measurement.
     cfg.episode_length_s = max(cfg.episode_length_s, conditions['duration_s'] + DT * 2)
+    flight = None
     if task != 'run':
         import isaaclab.terrains as terrains
 
         size = (40., 40.)
-        flight = None
         if task == 'stairs' and spec.get('course') == COURSE:
             flight = evaluation_flight(conditions['duration_s'], spec['speed_mps'], spec['step_depth_m'],
                                        spec['travel_margin_factor'])
             tile = flight_tile(spec['step_height_m'], spec['step_depth_m'], 1., flight['rear_steps'])
             size = (flight['length_m'], WIDTH_M)
-            base = cfg.events.reset_base.params
-            for key in ('pose_range', 'velocity_range'):
-                base[key] = {axis: (0., 0.) for axis in base[key]}
-            cfg.events.reset_robot_joints.params.update(position_range=(0., 0.), velocity_range=(0., 0.))
-            if audit is not None:
-                audit['reset'].update(base=dict(base), joint_position=(0., 0.), joint_velocity=(0., 0.))
         elif task == 'stairs':
             from isaaclab.utils import configclass
 
@@ -84,6 +78,14 @@ def configure_conditions(cfg, task, conditions, seed, audit=None):
             terrain.max_init_terrain_level = 0
     elif cfg.scene.terrain.terrain_type != 'plane':
         raise ValueError(f'Fixed BO {task} requires the native flat scene')
+    if conditions.get('reset_mode') == 'fixed' or flight is not None:
+        base = cfg.events.reset_base.params
+        for key in ('pose_range', 'velocity_range'):
+            base[key] = {axis: (0., 0.) for axis in base[key]}
+        joint_position = (1., 1.) if task == 'run' else (0., 0.)
+        cfg.events.reset_robot_joints.params.update(position_range=joint_position, velocity_range=(0., 0.))
+        if audit is not None:
+            audit['reset'].update(base=dict(base), joint_position=joint_position, joint_velocity=(0., 0.))
     if audit is not None:
         audit['commands'].update(
             ranges={k: tuple(getattr(command.ranges, k))

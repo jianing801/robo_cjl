@@ -1,6 +1,7 @@
 """Real CPU learning/IPC, synthetic environments; not Isaac gait evidence."""
 from contextlib import nullcontext
 from copy import deepcopy
+import csv
 import json
 import os
 from pathlib import Path
@@ -60,7 +61,7 @@ def batches_for(model):
         distribution = torch.distributions.Normal(model(x.flatten(0,1)).reshape(24,8,23), joint.ACTION_STD)
         actions = distribution.sample()
         logp = distribution.log_prob(actions).sum(-1)
-    return [dict(obs=x, actions=actions, logp=logp, reward=torch.ones(24,8),
+    return [dict(obs=x, actions=actions, logp=logp, reward=torch.ones(24,8), environment_reward=torch.ones(24,8),
                  done=torch.zeros(24,8,dtype=torch.bool), timeout=torch.zeros(24,8,dtype=torch.bool),
                  next_obs=x[-1])] * 3
 
@@ -126,7 +127,7 @@ def test_request_rejects_stale_or_corrupt_identity(tmp_path,field,value):
     with pytest.raises(ValueError): validate_request(spec,session,1,{'profile':'robust'})
 
 
-@pytest.mark.parametrize('corruption', ['stale','nan','shape','mask','timeout'])
+@pytest.mark.parametrize('corruption', ['stale','nan','shape','mask','timeout','native_nan','missing_native'])
 def test_batch_rejects_corruption(tmp_path,corruption):
     _,plan=fixture_plan(tmp_path); model,_,_=learning_state(plan['schema'])
     data=deepcopy(batches_for(model)[0])
@@ -136,6 +137,8 @@ def test_batch_rejects_corruption(tmp_path,corruption):
     elif corruption=='nan': data['reward'][0,0]=float('nan')
     elif corruption=='shape': data['obs']=data['obs'][:-1]
     elif corruption=='mask': data['done']=data['done'].long()
+    elif corruption=='native_nan': data['environment_reward'][0,0]=float('nan')
+    elif corruption=='missing_native': del data['environment_reward']
     else: data['timeout'][0,0]=True
     with pytest.raises(ValueError):
         validate_batch(data,task='stairs',index=1,session=session,actor_sha256='actor',width=model.width)
@@ -173,10 +176,19 @@ if '--full-body-torque' in options:
  raw.step_dt=.02
  raw.robot=SimpleNamespace(actuators={})
 class Env:
+ steps=0
  def step(self,action):
-  return obs,torch.ones(8),torch.zeros(8,dtype=torch.int64),{}
+  self.steps+=1
+  done=torch.zeros(8,dtype=torch.int64)
+  timeout=torch.zeros(8,dtype=torch.bool)
+  if self.steps%30==0:
+   done[:2]=1
+   timeout[0]=True
+  reward=float({'stairs':1,'backpack':2,'run':3}[task])
+  return obs,torch.full((8,),reward),done,{'time_outs':timeout}
 session=json.loads((Path(channel)/'session.json').read_text())
-serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collection_protocol'])
+adapter=(lambda obs,reward:reward.mul_(2)) if task=='run' else None
+serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,adapter,protocol=session['collection_protocol'])
 ''')
     original_popen=joint.subprocess.Popen; launches=[]
     def popen(command,**kwargs):
@@ -226,6 +238,9 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collect
         args.extend(['--compact-training-artifacts','--full-body-torque'])
     with pytest.raises(KeyboardInterrupt): joint.main(args)
     assert (output/'checkpoints/update_000001.json').exists() and not (output/'completed.json').exists()
+    saved_reward=json.loads((output/'checkpoints/update_000001.json').read_text())['training_reward']
+    assert saved_reward['tasks']['run']['mean_environment_step_reward']==3.
+    assert saved_reward['tasks']['run']['mean_ppo_step_reward']==6.
     if compact:
         first_attempt=next((output/'attempts').iterdir())
         assert {p.name for p in first_attempt.glob('*.pt')}=={
@@ -238,6 +253,8 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collect
     with pytest.raises(KeyboardInterrupt): joint.main(args+['--resume-paused'])
     assert (output/f'checkpoints/update_{updates:06d}.json').exists()
     assert (output/'shared_actor_finetuned.pt').exists() and not (output/'completed.json').exists()
+    reward_csv=output/'training_reward.csv'
+    reward_csv.unlink()  # Restore the derived view from checkpoint receipts on resume.
     joint.main(args+['--resume-paused'])
     assert not (output/'USER_PAUSED').exists() and len(launches)==6
     sessions=[json.loads(p.read_text()) for p in (output/'attempts').glob('*/session.json')]
@@ -254,6 +271,10 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collect
         assert 'compact_training_artifacts' not in manifest
     receipts=[json.loads(p.read_text()) for p in sorted((output/'checkpoints').glob('update_*.json'))]
     assert [r['completed_updates'] for r in receipts]==list(range(updates+1))
+    assert 'training_reward' not in receipts[0]
+    with reward_csv.open(newline='', encoding='utf8') as stream:
+        rewards={(int(r['update']),r['task']):r for r in csv.DictReader(stream)}
+    assert set(rewards)=={(i,task) for i in range(1,updates+1) for task in plan['teachers']}
     retained={r['completed_updates'] for r in receipts if (output/'checkpoints'/r['path']).is_file()}
     assert retained==({0,3,4} if compact else {0,1,2})
     for index in range(updates):
@@ -261,6 +282,22 @@ serve(channel,task,Env(),raw,obs,lambda x,reset:x,None,protocol=session['collect
         blobs=[folder/f'{name}_{index:03d}.pt' for name in ('actor','stairs','backpack','run')]
         assert all(p.exists() is (not compact) for p in blobs)
         assert all((folder/f'{task}.stdout.log').exists() for task in plan['teachers'])
+        reward_receipt=receipts[index+1]['training_reward']
+        assert reward_receipt['session_id']==folder.name
+        for task, native_reward in {'stairs':1.,'backpack':2.,'run':3.}.items():
+            ppo_reward=native_reward*2 if task=='run' else native_reward
+            task_reward=reward_receipt['tasks'][task]
+            completed_episodes=2 if index>=2 else 0
+            assert task_reward==dict(
+                reward_samples=192, mean_environment_step_reward=native_reward, mean_ppo_step_reward=ppo_reward,
+                completed_episodes=completed_episodes, timeout_episodes=completed_episodes//2,
+                terminated_episodes=completed_episodes//2,
+                mean_environment_episode_return=native_reward*30 if completed_episodes else None,
+                mean_ppo_episode_return=ppo_reward*30 if completed_episodes else None)
+            recorded=rewards[index+1,task]
+            assert recorded['session_id']==folder.name
+            assert all(recorded[field]==('' if value is None else str(value))
+                       for field,value in task_reward.items())
         if compact:
             assert receipts[index+1]['rollout']['session_id']==folder.name
             audits=receipts[index+1]['rollout']['task_audits']
@@ -344,7 +381,11 @@ def test_training_only_writes_checkpoint_receipt_without_diagnostics(tmp_path, m
         joint.main(args+['--resume'])
 
 
-def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypatch):
+@pytest.mark.parametrize('legacy_source,has_receipt', [
+    ('306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c', False),
+    ('304cdd7c22039d3dc5eff837cf449eb1ff33c96c106dcffa92f4afed5bb4f48d', True),
+])
+def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypatch, legacy_source, has_receipt):
     plan_path, plan = fixture_plan(tmp_path)
     model, _, _ = learning_state(plan['schema'])
     initial, output = tmp_path/'actor.pt', tmp_path/'candidate'
@@ -359,23 +400,35 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
                         lambda *args: pytest.fail('Legacy BO diagnostics ran again'))
     # The unit fixture omits collection receipts and keeps only the learning state.
     monkeypatch.setattr(joint, 'prune_training_artifacts', lambda *args, **kwargs: None)
-    legacy_source = '306da1b0c983a6683929c1c643d23a83f999f868be697be08a5c09f8e32d856c'
-
     def train(a, root, plan, actor, critic, optimizer, completed, digest, protocol, env):
         for index in range(1, a.updates):
             write_new(root/f'checkpoints/update_{index:06d}.json',
                       dict(completed_updates=index, manifest_sha256=digest))
         save_checkpoint(root, actor, critic, optimizer, a.updates, digest)
 
+    def write_legacy_manifest(path, value):
+        if path == output/'manifest.json':
+            sources = dict(value['sources'])
+            sources.pop('training_reward.py', None)
+            sources.update({
+                'joint_finetune.py': legacy_source,
+                'finetune_state.py': '7b958616ceb651b059a7fef4c40bf3356b134a3dfe56a82bf1f64448b703efad',
+                'ppo_channel.py': '87d6f011074fc920b365e1b24cdaa5a05913493672a14535900df96fc3c06cfb',
+                'pipeline.py': 'fffd518a08c6beeeb4348816d7baab3ba208f05572a302c86bf564da10351777',
+            })
+            value = dict(value, sources=sources)
+        write_new(path, value)
+
     args = ['--plan', str(plan_path), '--student', str(initial), '--output', str(output),
             '--design-id', 'stairs_0', '--updates', '200', '--compact-training-artifacts']
     with monkeypatch.context() as legacy:
         legacy.setattr(joint, 'train_updates', train)
-        legacy.setattr(joint, 'sha',
-                       lambda path: legacy_source if path == joint.HERE/'joint_finetune.py' else sha(path))
+        legacy.setattr(joint, 'write_new', write_legacy_manifest)
         joint.main(args+['--training-only'])
     receipt = output/'training_completed.json'
-    receipt.unlink()
+    saved_receipt = receipt.read_bytes()
+    if not has_receipt:
+        receipt.unlink()
     manifest = output/'manifest.json'
     old_manifest = manifest.read_bytes()
     commit = output/'checkpoints/update_000200.json'
@@ -388,11 +441,24 @@ def test_training_only_adopts_exact_legacy_compact_200_commit(tmp_path, monkeypa
         joint.main(args+['--resume'])
     with pytest.raises(ValueError, match='changed'):
         joint.main(args+['--resume', '--training-only', '--seed', '2'])
+    wrong_sources = json.loads(old_manifest)
+    wrong_sources['sources']['ppo_channel.py'] = 'a'*64
+    manifest.write_text(json.dumps(wrong_sources), encoding='utf8')
+    with pytest.raises(ValueError, match='changed'):
+        joint.main(args+['--resume', '--training-only'])
+    manifest.write_bytes(old_manifest)
     joint.main(args+['--resume', '--training-only'])
     result = json.loads(receipt.read_text(encoding='utf8'))
+    assert receipt.read_bytes() == saved_receipt
     assert result['ppo_updates'] == 200 and result['student_sha256'] == sha(actor_path) == old_actor
     assert manifest.read_bytes() == old_manifest and result['manifest_sha256'] == sha(manifest)
     assert commit.read_bytes() == old_commit and result['checkpoint_sha256'] == sha(commit)
+    with (output/'training_reward.csv').open(newline='', encoding='utf8') as stream:
+        rewards = list(csv.DictReader(stream))
+    assert len(rewards) == 600
+    assert rewards[-1]['update'] == '200' and rewards[-1]['task'] == 'run'
+    assert all(row['session_id'] == row['reward_samples'] == row['mean_ppo_step_reward'] == ''
+               for row in rewards)
 
 
 def test_launcher_selects_candidate_and_keeps_robust_finetuning(tmp_path,monkeypatch):

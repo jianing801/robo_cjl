@@ -51,6 +51,49 @@ def test_fall_strict_10_percent_boundary_and_invalid_data():
     assert trial('run', actual=np.nan)['status'] == 'invalid'
 
 
+@pytest.mark.parametrize('task', bo.TASKS)
+@pytest.mark.parametrize('legacy', [False, True])
+def test_bo_reset_matches_declared_conditions(task, legacy, monkeypatch):
+    import bo_capture
+
+    path = bo.LEGACY_FORMAL_CONDITIONS if legacy else bo.FORMAL_CONDITIONS
+    conditions = bo.read_conditions(path)
+    assert conditions['seeds'] == ([20261118, 20261119, 20261120] if legacy else [20261118])
+    assert conditions['copies'] == 1
+    assert conditions.get('reset_mode') == (None if legacy else 'fixed')
+    terrains = SimpleNamespace(MeshPlaneTerrainCfg=SimpleNamespace, TerrainGeneratorCfg=SimpleNamespace)
+    monkeypatch.setitem(sys.modules, 'isaaclab', SimpleNamespace(terrains=terrains))
+    monkeypatch.setitem(sys.modules, 'isaaclab.terrains', terrains)
+    monkeypatch.setattr(bo_capture, 'flight_tile', lambda *_: None)
+    command = SimpleNamespace(ranges=SimpleNamespace(), heading_command=True)
+    pose = {'x': (-.01, .01), 'yaw': (-.02, .02)}
+    velocities = {'x': (-.1, .1), 'yaw': (-.2, .2)}
+    joint_position = (.9, 1.1) if task == 'run' else (-.1, .1)
+    base = dict(pose_range=pose, velocity_range=velocities)
+    joint = dict(position_range=joint_position, velocity_range=(-.1, .1))
+    cfg = SimpleNamespace(commands=SimpleNamespace(base_velocity=command) if task == 'run' else command,
+                          episode_length_s=10., scene=SimpleNamespace(terrain=SimpleNamespace(terrain_type='plane')),
+                          scene_context=SimpleNamespace(),
+                          events=SimpleNamespace(reset_base=SimpleNamespace(params=base),
+                                                 reset_robot_joints=SimpleNamespace(params=joint)))
+    audit = dict(reset={}, commands={})
+    bo_capture.configure_conditions(cfg, task, conditions, 20261118, audit)
+    speed = conditions['tasks'][task]['speed_mps']
+    assert command.ranges.lin_vel_x == (speed, speed)
+    assert command.ranges.lin_vel_y == command.ranges.ang_vel_z == (0., 0.)
+    assert cfg.episode_length_s > conditions['duration_s']
+    if legacy and task != 'stairs':
+        assert base == dict(pose_range=pose, velocity_range=velocities)
+        assert joint == dict(position_range=joint_position, velocity_range=(-.1, .1))
+        assert audit['reset'] == {}
+    else:
+        assert base == dict(pose_range=dict.fromkeys(pose, (0., 0.)),
+                            velocity_range=dict.fromkeys(velocities, (0., 0.)))
+        position = (1., 1.) if task == 'run' else (0., 0.)
+        assert joint == dict(position_range=position, velocity_range=(0., 0.))
+        assert audit['reset']['joint_position'] == position
+
+
 def fixtures():
     conditions = dict(seeds=[7], copies=4)
     reports = []
@@ -142,6 +185,7 @@ def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path)
     pytest.param(200, None, True, True, False, id='manual-resume-fresh-tuning'),
     pytest.param(200, True, True, True, False, id='manual-resume-existing-tuning'),
     pytest.param(200, True, True, False, 'pending', id='reuse-frozen-bo-manifest'),
+    pytest.param(200, True, True, False, 'three-seed', id='reuse-three-seed-coordinator-manifest'),
     pytest.param(200, True, True, False, 'legacy', id='reuse-legacy-diagnostics-and-formal-measurements'),
 ])
 def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
@@ -179,7 +223,13 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     if old_bo:
         sources = {name: bo.sha(bo.SHARED/name) for name in (
             'bo_capture.py', 'shared_bo_metrics.py', 'stair_course.py', 'rollout.py', 'rollout_amp.py')}
-        sources['bo.py'] = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
+        sources.update({
+            'bo.py': ('0942320ad840a49a921bf014c57d033a6322f86e34043e50c28d6310ea06879d'
+                      if old_bo == 'three-seed' else
+                      '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'),
+            'bo_capture.py': '5aacc6dc340839ed76db3a4d3e4e92f07d33b9e88911c538ceba482cad68907e',
+            'shared_bo_metrics.py': 'c064cc6b15b03eb8869a38a567b0a1bae55f8ba93246fb13fc05e3de87e9445e',
+        })
         (out/'manifest.json').write_text(json.dumps(dict(kind='rpo_bo_candidate_v1', candidate=candidate,
             source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial), conditions_sha256=digest(conditions),
             updates=updates, sources=sources), indent=3))
@@ -315,20 +365,22 @@ def test_completed_actor_validates_checkpoint_and_keeps_legacy_diagnostics_compa
         assert bo.completed_actor(root, source, initial, candidate, updates) == actor
 
 
-def test_post_finetune_panel_uses_structure_means_and_frozen_weights():
+@pytest.mark.parametrize('seeds', [[20261118], [11, 22, 33]])
+def test_post_finetune_panel_uses_structure_means_and_frozen_weights(seeds):
     import copy
     from collection_grid import calibration_keys
     keys=calibration_keys()
+    conditions = dict(seeds=seeds, copies=1)
     reports=[]
     for i,key in enumerate(keys):
         pairs=[]
-        for seed in (11,22,33):
+        for seed in seeds:
             tasks={task:dict(status='success',reached_top=True,metrics={m:i+1. for m in bo.METRICS[task]})
                    for task in bo.TASKS}
             pairs.append(dict(tasks=tasks,seed=seed,replica=0,feasible=True))
         reports.append(dict(candidate=dict(structure_key=list(key)), pairs=pairs,
-            kind=bo.REPORT_VERSION, domain='simulation', conditions=dict(seeds=[11,22,33],copies=1),
-            conditions_sha256='conditions',ppo_updates=100))
+            kind=bo.REPORT_VERSION, domain='simulation', conditions=conditions,
+            conditions_sha256=digest(conditions),ppo_updates=100))
     scoring=bo.panel_scoring(reports,keys,{'initial_actor_sha256':'actor','updates':100})
     for task in bo.TASKS:
         metric=scoring['metrics'][task]['cot']
@@ -352,11 +404,19 @@ def test_post_finetune_panel_uses_structure_means_and_frozen_weights():
     assert objective(missed_top[0],scoring) == objective(reports[0],scoring)
     incomplete=copy.deepcopy(reports)
     incomplete[0]['pairs'][0]['tasks']['stairs']['status']='failure'
+    incomplete[0]['pairs'][0]['feasible'] = False
     revised=bo.panel_scoring(incomplete,keys,{'initial_actor_sha256':'actor','updates':100})
     assert revised['metrics']['stairs']['cot']['eligible_designs']==49
     assert revised['metrics']['run']['cot']['eligible_designs']==50
     with pytest.raises(ValueError):
         bo.panel_scoring(reports[:-1]+reports[:1],keys,{'updates':100})
+    missing = copy.deepcopy(reports)
+    missing[0]['pairs'].pop()
+    with pytest.raises(ValueError, match='seed coverage'):
+        bo.panel_scoring(missing, keys, {'updates':100})
+    incomplete[0]['pairs'][0]['feasible'] = True
+    with pytest.raises(ValueError, match='feasibility'):
+        bo.panel_scoring(incomplete, keys, {'updates':100})
 
 @pytest.fixture
 def official_panel(tmp_path, monkeypatch):
@@ -423,7 +483,7 @@ def official_panel(tmp_path, monkeypatch):
         for j, seed in enumerate(conditions['seeds']):
             tasks = {t: dict(status='success',metrics={m:n+2 for m in bo.METRICS[t]}) for t in bo.TASKS}
             tasks['stairs']['reached_top'] = n not in (-1,0) or j != 2
-            if n == 0 and j == 2:
+            if n == 0 and j == len(conditions['seeds']) - 1:
                 tasks['stairs'].update(status='failure', reason='below_minimum_forward_speed', metrics=None)
             pairs.append(dict(tasks=tasks,seed=seed,replica=0,
                               feasible=all(t['status']=='success' for t in tasks.values())))
@@ -436,7 +496,8 @@ def official_panel(tmp_path, monkeypatch):
 
     def choose(pool, observations, evaluated, _schema, _seed):
         assert evaluated == {ids[k]['stairs'] for k in fixed}
-        assert len(observations) == 150 and sum(o['feasible'] for o in observations) == 149
+        assert len(observations) in (50, 150)
+        assert sum(o['feasible'] for o in observations) == len(observations) - 1
         return next(r for r in pool if r['key'] == list(next_key)), dict(method='fixture')
     monkeypatch.setattr(bo,'propose',choose)
     return SimpleNamespace(root=tmp_path,calls=calls,selection=selection_path,student=actor,
@@ -446,22 +507,24 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     p=official_panel
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),200) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50/manifest.json')
+    manifest = bo.read(p.root/'bo/calibration50_single_seed/manifest.json')
     assert manifest['updates'] == 200 and manifest['selection_velocity_frame'] == 'horizontal_heading'
     bo.main(['search','--migrated','--trials','50'])
     bo.main(['search','--migrated','--trials','51'])
     assert p.calls[50:] == [(p.next_id,bo.sha(p.student),200)]
-    saved=bo.read(p.root/'bo/search/budget_0051.json')
+    saved=bo.read(p.root/'bo/search_single_seed/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
-    assert saved['candidates'][0]['complete_objectives'] == 2
-    assert saved['candidates'][-1]['complete_objectives'] == 3
+    assert saved['candidates'][0]['complete_objectives'] == 0
+    assert saved['candidates'][0]['mean_objective'] is None
+    assert saved['candidates'][-1]['complete_objectives'] == 1
     assert saved['best_observed']['design_id'] == p.next_id
-    assert not (p.root/'bo/search/trial_0000').exists()
+    assert not (p.root/'bo/search_single_seed/trial_0000').exists()
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
-    initialize = ['initialize', '--migrated', '--updates', '100']
-    search = ['search', '--migrated', '--updates', '100', '--trials', '50']
+    legacy = ['--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
+    initialize = ['initialize', '--migrated', '--updates', '100', *legacy]
+    search = ['search', '--migrated', '--updates', '100', '--trials', '50', *legacy]
     bo.main(initialize)
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
     calibration = p.root/'bo/calibration50'
@@ -500,7 +563,7 @@ def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_
 
 def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
     p = official_panel
-    args = ['initialize', '--migrated', '--updates', '100']
+    args = ['initialize', '--migrated', '--updates', '100', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
     bo.main(args)
     manifest = p.root/'bo/calibration50/manifest.json'
     original_manifest = manifest.read_bytes()
@@ -508,16 +571,31 @@ def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
     assert len(p.calls) == 50
     assert manifest.read_bytes() == original_manifest
     with pytest.raises(ValueError, match='Frozen BO identity differs'):
-        bo.main(['initialize', '--migrated'])
+        bo.main(['initialize', '--migrated', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)])
     assert len(p.calls) == 50
     assert manifest.read_bytes() == original_manifest
+
+
+def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
+    p = official_panel
+    legacy = ['--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
+    bo.main(['initialize', '--migrated', *legacy])
+    calibration = p.root/'bo/calibration50'
+    original_manifest = (calibration/'manifest.json').read_bytes()
+    with pytest.raises(ValueError, match='Frozen BO identity differs'):
+        bo.main(['initialize', '--migrated', '--output', str(calibration)])
+    with pytest.raises(ValueError, match='same conditions'):
+        bo.main(['search', '--migrated', '--trials', '50', '--scoring', str(calibration/'scoring.json'),
+                 '--conditions', str(bo.FORMAL_CONDITIONS)])
+    assert len(p.calls) == 50
+    assert (calibration/'manifest.json').read_bytes() == original_manifest
 
 
 @pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
 def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50'
+    calib=p.root/'bo/calibration50_single_seed'
     args=['search','--root',str(p.root),'--trials','51']
     if change=='actor':
         p.student.write_bytes(b'changed')
@@ -539,7 +617,7 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     with pytest.raises(ValueError):
         bo.main(args)
     assert len(p.calls)==50
-    assert not (p.root/'bo/search/manifest.json').exists()
+    assert not (p.root/'bo/search_single_seed/manifest.json').exists()
 
 @pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
                                     'conditions','selection_hash','nominal','body_axis'])
