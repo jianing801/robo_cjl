@@ -187,6 +187,40 @@ def launch_spatial_amp(root, gpu, preview=False, started_wall=None, started_mono
     run(command, env=env)
 
 
+def launch_spatial_rough(root, gpu, preview=False, started_wall=None, started_monotonic=None):
+    config = read(ENTRY/'configs'/'rough_spatial_all2500.json')
+    bank_file = bank_path(root, 'rough')
+    if not bank_file.is_file():
+        raise FileNotFoundError(f'缺少现有的 Rough 结构库：{bank_file}')
+    bank = read(bank_file)
+    limit = config['rotation']['active_designs']
+    updates = config['rotation']['total_updates']
+    if (bank.get('task_key') != 'stairs' or bank.get('configuration') != config['grid']
+            or bank.get('context_schema') != config.get('context_schema')
+            or sum(row.get('split') == 'train' for row in bank.get('designs', [])) != limit):
+        raise ValueError('Rough结构库与空间域实验配置不匹配。')
+    if root == MIGRATED_ROOT.resolve() and not (root/'migration_completed.json').is_file():
+        raise RuntimeError('2500结构迁移库尚未完成。')
+    cache = prepared_cache(root, 'rough')
+    if cache is None:
+        raise FileNotFoundError('缺少已登记的 Rough USD 缓存。')
+    if not cache.resolve().is_relative_to(root):
+        raise ValueError('Rough USD 缓存路径不在本次实验根目录内。')
+
+    output = root/'experts'/f'spatial_rough_all2500_{datetime.now():%Y%m%d_%H%M%S_%f}'
+    command = [sys.executable, '-u', ENTRY/'rough_spatial'/'train_spatial_rough.py',
+               '--bank', bank_file, '--output-root', output, '--asset-cache', cache.resolve(),
+               '--device', f'cuda:{gpu}']
+    print(f"空间域 Rough 对照：{config['grid']['num_envs']} 个环境、{limit} 种结构、{updates} 次更新。", flush=True)
+    print('复用 Rough USD 缓存：', cache, flush=True)
+    print('本次独立输出目录：', output, flush=True)
+    if preview:
+        run(command, preview=True)
+        return
+    start_task_timer(root, 'rough-spatial', output, updates, started_wall, started_monotonic)
+    run(command)
+
+
 def record_run(root, task, output):
     folder = root/'启动记录'; folder.mkdir(exist_ok=True)
     value = dict(output=str(output.resolve()), bank=str(bank_path(root, task).resolve()))
@@ -714,7 +748,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -755,7 +789,7 @@ def main(argv=None):
     action = ALIASES.get(args.操作, args.操作)
     if args.root and args.migrated:
         parser.error('--root 与 --migrated 只选一个')
-    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial') else DEFAULT_ROOT)).resolve()
+    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial','rough-spatial') else DEFAULT_ROOT)).resolve()
     if args.source_root is not None and action != 'migrate':
         parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
@@ -775,6 +809,9 @@ def main(argv=None):
         parser.error('该迁移库尚未完成。先运行 start.py 迁移。')
     if action == 'amp-spatial':
         launch_spatial_amp(root,args.gpu,args.dry_run,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
+        return
+    if action == 'rough-spatial':
+        launch_spatial_rough(root,args.gpu,args.dry_run,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
         return
     if action == 'status':
         print('实验目录：', root)
