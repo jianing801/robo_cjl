@@ -139,6 +139,23 @@ def test_calibration_and_repetition_keeps_failure_out_of_performance():
         objective(dict(report, domain='hardware'), scoring)
 
 
+@pytest.mark.parametrize('missing', ['measurement_rate', 'trial_rate', 'absolute_cot'])
+def test_absolute_scoring_rejects_positive_only_or_wrong_rate_evidence(missing):
+    report = fixtures()
+    if missing != 'measurement_rate':
+        report['conditions']['measurement_dt_s'] = .005
+    report['conditions_sha256'] = digest(report['conditions'])
+    scoring = dict(bo.calibrate(report, dict(name='pilot')), cot_basis='absolute_mechanical')
+    for pair in report['pairs']:
+        for task_trial in pair['tasks'].values():
+            if missing != 'trial_rate':
+                task_trial['dt_s'] = .005
+            if missing != 'absolute_cot' and task_trial['status'] == 'success':
+                task_trial['observed']['absolute_mechanical_cot'] = 0.2
+    with pytest.raises(ValueError, match='200 Hz'):
+        objective(report, scoring)
+
+
 def test_search_makes_exact_unique_proposals_and_preserves_scores_on_resume(tmp_path, monkeypatch):
     report = fixtures()
     conditions = report['conditions']
@@ -453,6 +470,8 @@ def test_post_finetune_panel_uses_structure_means_and_frozen_weights(seeds):
         assert metric['scale']==pytest.approx(39.2)
         assert metric['weight']==pytest.approx(1/3 if task=='stairs' else .4)
     assert objective(reports[0],scoring)['mean_objective']==pytest.approx((1-5.9)/39.2)
+    assert scoring['task_weights'] == pytest.approx(dict.fromkeys(bo.TASKS, 1/3))
+    assert scoring.get('cot_basis', 'positive_mechanical') == 'positive_mechanical'
     for value, normalized in ((1., (1-5.9)/39.2), (5.9, 0.), (45.1, 1.), (50., (50-5.9)/39.2)):
         sample = copy.deepcopy(reports[0])
         for pair in sample['pairs']:
@@ -542,15 +561,61 @@ def official_panel(tmp_path, monkeypatch):
                         conditions_sha256=digest(conditions))
         folder.mkdir(parents=True,exist_ok=True)
         bo.freeze(folder/'manifest.json',manifest)
+        actor = (folder/'tuning/shared_actor_finetuned.pt').resolve()
+        tuning_plan = actor.parent/'plan.json'
+        teachers = {task: dict(design_ids=[candidate['design_ids'][task]], bank_sha256=f'bank-{task}')
+                    for task in bo.TASKS}
+        fixed_dt = conditions.get('measurement_dt_s', DT)
+        physics_rate = fixed_dt == .005
+        if physics_rate:
+            actor.parent.mkdir()
+            actor.write_bytes(f'fitted {candidate_id}'.encode())
+            bo.freeze(tuning_plan, dict(teachers=teachers))
+            bo.freeze(actor.parent/'manifest.json', dict(
+                candidate=candidate, updates=a.updates, plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial),
+                ppo_schedule=bo.PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=bo.MIXED_BO_LAYOUT))
+            write_training_completion(actor.parent, candidate, a.updates, actor)
+        else:
+            actor = initial
         pairs = []
         for j, seed in enumerate(conditions['seeds']):
-            tasks = {t: dict(status='success',metrics={m:n+2 for m in bo.METRICS[t]}) for t in bo.TASKS}
+            tasks = {t: dict(replica=0, status='success', mean_forward_mps=.5,
+                             metrics={m:n+2 for m in bo.METRICS[t]},
+                             dt_s=fixed_dt, steps=round(conditions['duration_s'] / fixed_dt),
+                             observed=dict(absolute_mechanical_cot=3 * (n+2) + 2 + 4 * (n == -1 and t == 'stairs')))
+                     for t in bo.TASKS}
             tasks['stairs']['reached_top'] = n not in (-1,0) or j != 2
             if n == 0 and j == len(conditions['seeds']) - 1:
                 tasks['stairs'].update(status='failure', reason='below_minimum_forward_speed', metrics=None)
             pairs.append(dict(tasks=tasks,seed=seed,replica=0,
                               feasible=all(t['status']=='success' for t in tasks.values())))
+        measurements = []
+        for pair in pairs:
+            seed = pair['seed']
+            for task in bo.TASKS:
+                attempt = folder/'measurements'/f'{seed}_{task}'/'synthetic'
+                (attempt/'logs').mkdir(parents=True, exist_ok=True)
+                (attempt/'native').mkdir(parents=True, exist_ok=True)
+                trace = attempt/'native/bo_trials.json'
+                if physics_rate:
+                    samples = trace.with_name('bo_samples.npz')
+                    samples.write_bytes(b'raw physics trace fixture')
+                    bo.freeze(trace, dict(
+                        kind=bo.TRIAL_VERSION, task=task, seed=seed, actor_sha256=bo.sha(actor),
+                        design_id=candidate['design_ids'][task], bank_sha256=teachers[task]['bank_sha256'],
+                        plan_sha256=bo.sha(tuning_plan), conditions_sha256=digest(conditions),
+                        trace=str(samples), trace_sha256=bo.sha(samples),
+                        trials=[pair['tasks'][task]]))
+                else:
+                    bo.freeze(trace, {})
+                bo.freeze(attempt/'logs/exit.json', dict(returncode=0, seconds=3.))
+                measurement = dict(report=str(trace), sha256=bo.sha(trace))
+                if physics_rate:
+                    bo.freeze(attempt.parent/'accepted.json', measurement)
+                measurements.append(measurement)
         report = dict(candidate=candidate,conditions=conditions,conditions_sha256=digest(conditions),
+                      measurements=measurements,
+                      student=str(actor), student_sha256=bo.sha(actor),
                       ppo_updates=a.updates,kind=bo.REPORT_VERSION,domain='simulation',pairs=pairs,
                       evaluation_manifest_sha256=bo.sha(folder/'manifest.json'))
         bo.freeze(folder/'bo_evaluation.json',report)
@@ -570,7 +635,7 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     p=official_panel
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50_single_seed_ppo100_random/manifest.json')
+    manifest = bo.read(p.root/'bo/calibration50_single_seed_ppo100_random_200hz/manifest.json')
     assert manifest['updates'] == 100 and manifest['selection_velocity_frame'] == 'horizontal_heading'
     assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
     assert manifest['init_at_random_ep_len'] is True
@@ -578,13 +643,34 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     bo.main(['search','--migrated','--trials','50'])
     bo.main(['search','--migrated','--trials','51'])
     assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
-    saved=bo.read(p.root/'bo/search_single_seed_ppo100_random/budget_0051.json')
+    saved=bo.read(p.root/'bo/search_single_seed_ppo100_random_200hz/budget_0051.json')
     assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
     assert saved['candidates'][0]['complete_objectives'] == 0
     assert saved['candidates'][0]['mean_objective'] is None
     assert saved['candidates'][-1]['complete_objectives'] == 1
     assert saved['best_observed']['design_id'] == p.next_id
-    assert not (p.root/'bo/search_single_seed_ppo100_random/trial_0000').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100_random_200hz/trial_0000').exists()
+    scoring_path = p.root/'bo/calibration50_single_seed_ppo100_random_200hz/scoring.json'
+    scoring = bo.read(scoring_path)
+    assert scoring['cot_basis'] == 'absolute_mechanical'
+    assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
+    assert scoring['metrics']['stairs']['cot']['p10'] == pytest.approx(3 * 7.8 + 2)
+    assert scoring['metrics']['backpack']['cot']['p10'] == pytest.approx(3 * 6.9 + 2)
+    assert scoring['metrics']['run']['cot']['p90'] == pytest.approx(3 * 46.1 + 2)
+    # Candidate 51 was never used to fit the normalization. Its stair CoT differs
+    # from its other tasks, so an accidental equal-task average changes this score.
+    task_costs = {}
+    for task, specs in scoring['metrics'].items():
+        values = dict.fromkeys(specs, 1.)
+        values['cot'] = 9. if task == 'stairs' else 5.
+        task_costs[task] = sum(spec['weight'] * (values[metric] - spec['p10']) / spec['scale']
+                               for metric, spec in specs.items())
+    latest = bo.read(p.root/'bo/search_single_seed_ppo100_random_200hz/trial_0050/observation.json')
+    assert latest['observations'][0]['task_objectives'] == pytest.approx(task_costs)
+    assert latest['mean_objective'] == pytest.approx(
+        .4 * task_costs['stairs'] + .3 * task_costs['backpack'] + .3 * task_costs['run'])
+    search_manifest = p.root/'bo/search_single_seed_ppo100_random_200hz/manifest.json'
+    assert bo.read(search_manifest)['scoring_sha256'] == bo.sha(scoring_path)
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
@@ -661,7 +747,7 @@ def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
 def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50_single_seed_ppo100_random'
+    calib=p.root/'bo/calibration50_single_seed_ppo100_random_200hz'
     args=['search','--root',str(p.root),'--trials','51']
     if change=='actor':
         p.student.write_bytes(b'changed')
@@ -683,7 +769,7 @@ def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,
     with pytest.raises(ValueError):
         bo.main(args)
     assert len(p.calls)==50
-    assert not (p.root/'bo/search_single_seed_ppo100_random/manifest.json').exists()
+    assert not (p.root/'bo/search_single_seed_ppo100_random_200hz/manifest.json').exists()
 
 @pytest.mark.parametrize('change', ['winner','reserved','old_version','relabelled_50','budget_50',
                                     'conditions','selection_hash','nominal','body_axis'])
@@ -738,3 +824,137 @@ def test_migrated_root_and_explicit_root_are_mutually_exclusive(tmp_path):
     with pytest.raises(SystemExit) as error:
         bo.main(['search','--migrated','--root',str(tmp_path),'--trials','51'])
     assert error.value.code==2
+
+
+def test_physics_protocol_preserves_tasks_and_separates_scores():
+    old = bo.read_conditions(bo.FORMAL_CONDITIONS)
+    current = bo.read_conditions(bo.PHYSICS_CONDITIONS)
+    assert current == dict(old, measurement_dt_s=.005)
+    assert bo.calibration_label(current) == bo.calibration_label(old) + '_200hz'
+    assert bo.official_conditions_path(digest(current)) == bo.PHYSICS_CONDITIONS
+
+
+@pytest.mark.parametrize('fell', [False, True])
+def test_physics_step_capture_records_braking_and_excludes_reset_state(tmp_path, fell):
+    import torch
+    from bo_capture import TrialCapture
+
+    cfg = bo.read_conditions(bo.FORMAL_CONDITIONS)
+    cfg.update(measurement_dt_s=.005, duration_s=.04)
+    motors = [dict(joint=j, rated_torque_nm=4.) for j in sorted(KNEE_ANKLE)]
+    data = SimpleNamespace(root_pos_w=torch.tensor([[0., 0., 1.]]),
+        root_lin_vel_w=torch.tensor([[.5, 0., 0.]]), root_ang_vel_b=torch.zeros(1, 3),
+        applied_torque=torch.zeros(1, 6), joint_vel=torch.full((1, 6), 2.))
+    robot = SimpleNamespace(data=data, root_physx_view=SimpleNamespace(get_masses=lambda: torch.tensor([[20.]])))
+    scene = SimpleNamespace(env_origins=torch.zeros(1, 3))
+    raw = SimpleNamespace(robot=robot, scene=scene, step_dt=.02, physics_dt=.005,
+                          num_envs=1, reset_terminated=torch.tensor([fell]))
+    substeps = iter(range(1, 9))
+
+    def physics_update(dt):
+        i = next(substeps)
+        data.root_pos_w[0, 0] = i*.005
+        data.root_lin_vel_w[0, 0] = 1.5 if i % 4 == 1 else .5
+        data.root_ang_vel_b[0, :2] = torch.tensor([3., 4.]) if i % 4 == 1 else 0.
+        data.applied_torque[0, 0] = {1: 8., 2: -4.}.get(i % 4, 0.)
+
+    scene.update = physics_update
+    recorder = TrialCapture(raw, 'stairs', cfg, 20261118, motors)
+    for done in (fell, False):
+        for _ in range(4):
+            scene.update(dt=.005)
+        if done:
+            recorder.before_reset(torch.tensor([0]))
+            data.root_pos_w[0, 0] = 99.
+        recorder.capture(torch.tensor([[.5, 0., 0.]]), torch.tensor([done]))
+    recorder.publish(tmp_path, {})
+    assert scene.update is physics_update
+    row = bo.read(tmp_path/'bo_trials.json')['trials'][0]
+    assert (row['dt_s'], row['steps'], row['status']) == (.005, 4 if fell else 8, 'failure' if fell else 'success')
+    assert row['forward_m'] == pytest.approx(.02 if fell else .04)
+    assert row['observed']['forward_rmse_mps'] == pytest.approx(.5)
+    assert row['observed']['roll_pitch_rms_rad_s'] == pytest.approx(2.5)
+    assert row['observed']['positive_mechanical_work_j'] == pytest.approx(.08 if fell else .16)
+    assert row['observed']['absolute_mechanical_work_j'] == pytest.approx(.12 if fell else .24)
+    assert row['observed']['absolute_mechanical_cot'] == pytest.approx(1.5 * row['observed']['cot'])
+    with np.load(tmp_path/'bo_samples.npz') as trace:
+        assert (trace['dt_s'], trace['control_dt_s']) == (.005, .02)
+
+
+def test_calibration_evaluation_timer_counts_only_accepted_new_measurements(tmp_path):
+    reports = []
+    for index, task in enumerate(bo.TASKS, 1):
+        for name in ('accepted', 'discarded'):
+            attempt = tmp_path/'design_01'/'measurements'/task/name
+            (attempt/'logs').mkdir(parents=True)
+            (attempt/'native').mkdir()
+            (attempt/'logs/exit.json').write_text(json.dumps(dict(returncode=0, seconds=index if name == 'accepted' else 999)))
+            p = attempt/'native/bo_trials.json'
+            p.write_text('{}', encoding='utf8')
+            if name == 'accepted':
+                reports.append(dict(report=str(p), sha256=bo.sha(p)))
+    assert bo.calibration_evaluation_timing(tmp_path, reports) == dict(accepted_measurements=3, evaluation_seconds=6)
+    with pytest.raises(ValueError, match='Duplicate'):
+        bo.calibration_evaluation_timing(tmp_path, reports + reports)
+
+
+
+def test_measurement_only_panel_defers_scoring(official_panel):
+    p = official_panel
+    bo.main(['initialize', '--migrated', '--measure-only'])
+    out = p.root/'bo/calibration50_single_seed_ppo100_random_200hz'
+    assert len(bo.read(out/'measurements_completed.json')['reports']) == 50
+    assert bo.read(out/'evaluation_timing.json') == dict(accepted_measurements=150, evaluation_seconds=450.)
+    assert not (out/'scoring.json').exists()
+
+
+def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, monkeypatch):
+    p = official_panel
+    bo.main(['initialize', '--migrated', '--measure-only'])
+    out = p.root/'bo/calibration50_single_seed_ppo100_random_200hz'
+    args = ['freeze-scoring', '--measurements-root', str(out)]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Freezing existing measurements must not start a simulator or train an actor')
+
+    monkeypatch.setattr(bo, 'evaluate', forbidden)
+    monkeypatch.setattr(bo, 'evaluate_native', forbidden)
+    monkeypatch.setattr(bo, 'run_worker', forbidden)
+    report = out/'design_01/bo_evaluation.json'
+    receipt = out/'measurements_completed.json'
+    native = Path(bo.read(report)['measurements'][0]['report'])
+    accepted = native.parents[2]/'accepted.json'
+    raw = Path(bo.read(native)['trace'])
+    changes = {
+        receipt: json.dumps(dict(bo.read(receipt), conditions_sha256='wrong')).encode(),
+        report: report.read_bytes() + b' ',
+        accepted: json.dumps(dict(bo.read(accepted), sha256='wrong')).encode(),
+        native: native.read_bytes() + b' ',
+        raw: b'other physics trace',
+        out/'design_01/tuning/shared_actor_finetuned.pt': b'other fitted actor',
+    }
+    for changed, replacement in changes.items():
+        original = changed.read_bytes()
+        changed.write_bytes(replacement)
+        with pytest.raises(ValueError):
+            bo.main(args)
+        assert not (out/'scoring.json').exists()
+        changed.write_bytes(original)
+
+    frozen = {path: bo.sha(path) for path in (*changes, out/'manifest.json')}
+    paused = out/'USER_PAUSED'
+    paused.touch()
+    with pytest.raises(RuntimeError, match='USER_PAUSED'):
+        bo.main(args)
+    assert not (out/'scoring.json').exists()
+    assert paused.is_file()
+    bo.main([*args, '--resume-paused'])
+    assert not paused.exists()
+    bo.main(args)
+    assert len(p.calls) == 50
+    assert {path: bo.sha(path) for path in frozen} == frozen
+    scoring = bo.read(out/'scoring.json')
+    assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
+    assert scoring['cot_basis'] == 'absolute_mechanical'
+    assert bo.read(out/'completed.json')['scoring_sha256'] == bo.sha(out/'scoring.json')
+    assert bo.read(out/'calibration_summary.json')['trials'] == 150

@@ -164,7 +164,12 @@ class TrialCapture:
         if not np.isfinite(self.mass).all() or (self.mass <= 0.).any():
             raise ValueError('Invalid effective total mass')
         self.fields = ('position', 'vx', 'omega', 'torque', 'joint_vel')
+        self.dt = conditions.get('measurement_dt_s', DT)
+        self.samples_per_control = round(DT / self.dt)
+        if self.samples_per_control > 1 and abs(raw.physics_dt - self.dt) > 1e-10:
+            raise ValueError('BO physical step differs from the declared measurement interval')
         self.samples = []
+        self.active_samples = []
         self.active = np.ones(self.count, dtype=bool)
         self.fell = np.zeros(self.count, dtype=bool)
         self.timeout = self.fell.copy()
@@ -173,15 +178,30 @@ class TrialCapture:
             self.payload = raw.robot.backpack_mass_kg.cpu().numpy().copy()
             if not np.allclose(self.payload, self.spec['payload_kg'], atol=1e-5, rtol=0):
                 raise ValueError('Actual applied payload differs from the fixed BO conditions')
+        self.scene_update = None
+        if self.samples_per_control > 1:
+            self.scene_update = raw.scene.update
+            raw.scene.update = self.sample_after_update
         raw.bo_recorder = self
 
-    def snapshot(self, ids=slice(None)):
+    def state_tensors(self, ids=slice(None)):
         data = self.raw.robot.data
-        tensors = (data.root_pos_w[ids], data.root_lin_vel_w[ids, 0], data.root_ang_vel_b[ids, :2],
-                   data.applied_torque[ids], data.joint_vel[ids])
-        return [x.detach().cpu().numpy().copy() for x in tensors]
+        return (data.root_pos_w[ids], data.root_lin_vel_w[ids, 0], data.root_ang_vel_b[ids, :2],
+                data.applied_torque[ids], data.joint_vel[ids])
+
+    def snapshot(self, ids=slice(None)):
+        return [x.detach().cpu().numpy().copy() for x in self.state_tensors(ids)]
+
+    def sample_after_update(self, dt):
+        if abs(dt - self.dt) > 1e-10:
+            raise ValueError('Unexpected BO physics substep interval')
+        self.scene_update(dt=dt)
+        # Snapshot the physics state before the control step can reset the environment.
+        self.samples.append(tuple(x.detach().clone() for x in self.state_tensors()))
 
     def before_reset(self, ids):
+        if self.samples_per_control > 1:
+            return
         if ids is None:
             ids = slice(None)
             indices = np.arange(self.count)
@@ -194,28 +214,44 @@ class TrialCapture:
                            (self.spec['speed_mps'], 0., 0.), atol=1e-6, rtol=0):
             raise ValueError('Actual BO command differs from the fixed forward command')
         done = dones.detach().cpu().numpy().reshape(-1).astype(bool)
-        state = self.snapshot()
-        reset = self.terminal
-        self.terminal = None
-        if (done & self.active).any():
-            if reset is None or not set(np.flatnonzero(done & self.active)).issubset(reset[0]):
-                raise ValueError('BO terminal data must precede the simulator reset')
-            for combined, terminal in zip(state, reset[1], strict=True):
-                combined[reset[0]] = terminal
+        if self.samples_per_control == 1:
+            state = self.snapshot()
+            reset = self.terminal
+            self.terminal = None
+            if (done & self.active).any():
+                if reset is None or not set(np.flatnonzero(done & self.active)).issubset(reset[0]):
+                    raise ValueError('BO terminal data must precede the simulator reset')
+                for combined, terminal in zip(state, reset[1], strict=True):
+                    combined[reset[0]] = terminal
+            self.samples.append(state)
+        elif len(self.samples) != (len(self.active_samples) + 1) * self.samples_per_control:
+            raise ValueError('Incomplete physics substeps during BO evaluation')
         terminated = self.raw.reset_terminated.detach().cpu().numpy().reshape(-1).astype(bool)
         self.fell |= self.active & done & terminated
         self.timeout |= self.active & done & ~terminated
-        self.samples.append((*state, self.active.copy()))
+        self.active_samples.append(self.active.copy())
         self.active &= ~done
 
     def publish(self, output, identity):
         self.raw.bo_recorder = None
-        values = {name: np.stack(items) for name, items in zip(
-            (*self.fields, 'active'), zip(*self.samples, strict=True), strict=True)}
+        if self.scene_update is not None:
+            self.raw.scene.update = self.scene_update
+        if len(self.active_samples) != self.steps or len(self.samples) != self.steps * self.samples_per_control:
+            raise ValueError('BO trace does not cover the declared measurement horizon')
+        columns = zip(self.fields, zip(*self.samples, strict=True), strict=True)
+        extras = {}
+        if self.samples_per_control == 1:
+            values = {name: np.stack(items) for name, items in columns}
+        else:
+            import torch
+
+            values = {name: torch.stack(items).cpu().numpy() for name, items in columns}
+            extras = dict(dt_s=self.dt, control_dt_s=DT)
+        values['active'] = np.repeat(np.stack(self.active_samples), self.samples_per_control, axis=0)
         trace = Path(output) / 'bo_samples.npz'
         with trace.open('xb') as stream:
             np.savez_compressed(stream, **values, initial_position=self.initial, origins=self.origins,
-                                total_mass_kg=self.mass, fell=self.fell, timeout=self.timeout)
+                                total_mass_kg=self.mass, fell=self.fell, timeout=self.timeout, **extras)
         rows = []
         for i in range(self.count):
             active = values['active'][:, i]
@@ -246,8 +282,8 @@ class TrialCapture:
                 payload = dict(mass_kg=float(self.payload[i]),
                     mount_position_torso_m=list(self.properties[i]['mount_position_torso_m']),
                     center_of_mass_torso_m=list(self.properties[i]['com_position_torso_m']))
-            rows.append(dict(replica=i, **score_trial(self.task, speed=self.spec['speed_mps'], dt=DT,
-                expected_steps=self.steps, mass=float(self.mass[i]), forward=forward,
+            rows.append(dict(replica=i, **score_trial(self.task, speed=self.spec['speed_mps'], dt=self.dt,
+                expected_steps=self.steps * self.samples_per_control, mass=float(self.mass[i]), forward=forward,
                 motors=self.motors, fell=self.fell[i], timeout=self.timeout[i], reached_top=reached_top,
                 route_completed=route_completed, payload=payload, outside_stairs=outside,
                 min_forward_progress_ratio=self.conditions.get('min_forward_progress_ratio'), **samples)))

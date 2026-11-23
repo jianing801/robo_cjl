@@ -16,9 +16,9 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 
 | 任务 | 工况 | 三项代价及对应权重 |
 |---|---|---|
-| Rough 上楼 | 0.5 m/s，从底部平地起步，测量 20 秒。级高 7.5 cm，踏面深 30 cm | 整机正机械功 CoT、前向速度 RMSE、横滚与俯仰角速度合成 RMS，各 1/3 |
-| 负重 | 平地直行 0.5 m/s，实装 10 kg | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
-| AMP 跑步 | 平地直线 1.5 m/s，使用本结构参考 | CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
+| Rough 上楼 | 0.5 m/s，从底部平地起步，测量 20 秒。级高 7.5 cm，踏面深 30 cm | 绝对机械 CoT、前向速度 RMSE、横滚与俯仰角速度合成 RMS，各 1/3 |
+| 负重 | 平地直行 0.5 m/s，实装 10 kg | 绝对机械 CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
+| AMP 跑步 | 平地直线 1.5 m/s，使用本结构参考 | 绝对机械 CoT 0.4、前向速度 RMSE 0.4、六个膝踝关节最大持续额定扭矩占比 0.2 |
 
 固定工况的指令沿世界水平 +X 前进。三项任务均以该方向的实际速度计算前向速度 RMSE，并按表中权重计入连续硬件代价。蒸馏选模按三项等权任务成功率排序，成功要求存活并达到指令行程门槛，默认 20%。[共享策略的选模判据](共享策略蒸馏详细说明.md#如何从-abc-中选一个)
 
@@ -30,7 +30,7 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 
 定标按任务分别进行。每个结构在某项任务上成功时，用该项正式试次的指标参与该任务定标。在该任务的合格结构中，按结构等权，通过线性插值计算每项指标的 P10 和 P90。某任务的有效结构不足两种，或某项指标的分位差为零时，程序中止定标。
 
-先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。综合代价默认对三个任务等权。定标产物 `bo/calibration50_single_seed_ppo100_random/scoring.json` 冻结九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
+先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。**综合代价 = 0.4 × 上楼代价 + 0.3 × 负重代价 + 0.3 × 跑步代价。** 定标产物 `bo/calibration50_single_seed_ppo100_random_200hz/scoring.json` 冻结 CoT 口径、九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
 
 Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，并保留区间外数值。《综合指标构建手册》第 5.3 节说明如何使用固定参照尺度，第 6.10 节式（31）给出了线性加权。历史专家图的原始权重和分数见[专家评估记录](Rough与AMP专家评估及评分记录.md#归一化方法与文献)。[Moharir 等，AIAA AVIATION 2026](https://doi.org/10.2514/6.2026-4497) · [作者公开全文](https://www.researchgate.net/publication/406033991_A_Unified_Objective_Layer_for_Multidisciplinary_Optimization_of_Aircraft_Arrival_Trajectories) · [OECD/JRC 手册](https://doi.org/10.1787/9789264043466-en)
 
@@ -40,7 +40,15 @@ Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，�
 
 选用已完成追加蒸馏后的胜出模型时，给 `initialize`、`search` 和 `evaluate` 加同一个 `--shared-continuation <追加轮目录>`。程序核验历史回合，并按任务成功率选择共享模型。切换起始模型时，为定标和搜索各指定新的 `--output`，搜索通过 `--scoring` 指向该定标目录。已有清单只接受其绑定的模型与工况。
 
-新单种子定标默认写入 `bo/calibration50_single_seed_ppo100_random`。启动时会核验已有模型和定标结果的回合计时方式及环境分配。
+正式评估默认每 5 ms 采样一次（200 Hz），20 秒每项有 4000 个物理步。策略每 20 ms 输出一次动作。正式评分读取 `observed.absolute_mechanical_cot`，将每个物理步、每个关节的机械功率 `|τ × q̇|` 累加再积分，以整机重量（负重时含背包）乘净水平行程为分母。`observed.cot` 保存正机械 CoT，供对照。绝对机械 CoT 描述关节的驱动与制动机械功，电耗需另行测量。[TALOS 评估，式（10）](https://pmc.ncbi.nlm.nih.gov/articles/PMC8934419/)
+
+新单种子定标默认写入 `bo/calibration50_single_seed_ppo100_random_200hz`。已有原 50 个结构的完整模型时，在 `initialize` 命令后追加 `--reuse-finetuned-panel <旧定标目录>`，通过 PPO 身份校验后只做复评。加 `--measure-only` 将测量单独保存。该面板测完并生成 `measurements_completed.json` 后，用下面这条命令校验原始报告并冻结评分。此步骤用 CPU，复用已完成的仿真和微调。
+
+```bash
+conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py freeze-scoring --measurements-root robolab/logs/multitask_full2500_physical_migrated/bo/calibration50_single_seed_ppo100_random_200hz
+```
+
+进度行同时给出已完成结构数和已接受测量的累计用时。完成后在 `evaluation_timing.json` 汇总，只累计本轮最终接受的测量进程用时。复用的训练时间、旧测量、废弃尝试及暂停时间都排除。
 
 ### 训练中断
 
@@ -52,7 +60,7 @@ Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，�
 conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 100 --gpu 0
 ```
 
-正式总预算为 **100 个结构**。前 50 个是原第 21 组的定标结构，后 50 个由 BO 逐个提议。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性及代价，选择下一结构。默认三任务之间等权。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
+正式总预算为 **100 个结构**。前 50 个是原第 21 组的定标结构，后 50 个由 BO 逐个提议。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性和代价，通过约束期望改进选择下一结构。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
 
 蒸馏选模的 200 个结构均已排除这 50 个定标结构。历史教师参考成绩保留在独立归档中；新的尺度来自本次学生微调后的测量。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
 
@@ -72,7 +80,7 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py ingest --spec baseline_measurements.json --output baseline.json
 ```
 
-导入默认按上文的正式单种子工况和 20% 水平行程门槛判定。使用 `calibrate` 做独立定标时，至少需要两组各任务均成功的试次。可用 `--conditions` 指定实际种子或副本数，并设置 `min_forward_progress_ratio` 为 0.20。复现旧的三种子测量时，显式传入 `--conditions robolab/experiments/multitask_morphology/configs/bo_conditions.json`。
+导入默认使用历史 50 Hz 单种子工况和 20% 水平行程门槛。使用 `calibrate` 做独立定标时，至少需要两组各任务均成功的试次。可用 `--conditions` 指定实际种子或副本数，并设置 `min_forward_progress_ratio` 为 0.20。复现旧的三种子测量时，显式传入 `--conditions robolab/experiments/multitask_morphology/configs/bo_conditions.json`。
 
 测量清单采用 JSON。顶层需要 `domain`（`simulation` 或 `hardware`）、`measurement_convention`（`rpo_three_task_mechanical_positive_v1`）、`dt_s`（0.02）、`candidate` 和 `trials`。每条试次填写 `task`（`stairs`、`backpack` 或 `run`）、`seed`、从 0 开始的 `replica`、`trace`、实测 `total_mass_kg`、`fell` 及 `motors`。可同时标记 `reached_top`、`route_completed` 和 `protection_stop`。负重加 `payload.mass_kg` 和 `payload.mount_position_torso_m`。
 

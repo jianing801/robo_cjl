@@ -1,0 +1,27 @@
+{
+  "kind": "rpo_three_task_mechanical_positive_v1",
+  "duration_s": 20.0,
+  "measurement_dt_s": 0.005,
+  "seeds": [20261118],
+  "reset_mode": "fixed",
+  "copies": 1,
+  "min_forward_progress_ratio": 0.20,
+  "tasks": {
+    "stairs": {
+      "speed_mps": 0.5,
+      "step_height_m": 0.075,
+      "step_depth_m": 0.3,
+      "course": "bottom_start_long_stairs",
+      "travel_margin_factor": 2.0
+    },
+    "backpack": {
+      "speed_mps": 0.5,
+      "payload_kg": 10.0,
+      "route_distance_m": 8.0
+    },
+    "run": {
+      "speed_mps": 1.5,
+      "route_distance_m": 30.0
+    }
+  }
+}

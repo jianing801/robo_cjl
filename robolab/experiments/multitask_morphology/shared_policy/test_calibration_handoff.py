@@ -168,6 +168,57 @@ def test_summary_checks_frozen_trials_and_recomputes_anchored_scales(tmp_path, m
     with pytest.raises(ValueError, match='raw trace changed'):
         handoff.summarize(tmp_path, tmp_path, 200)
 
+
+def test_summary_recomputes_absolute_200hz_scales_and_checks_weights(tmp_path, monkeypatch):
+    import bo
+
+    plan, actor = tmp_path/'plan.json', tmp_path/'actor.pt'
+    plan.write_bytes(b'plan')
+    actor.write_bytes(b'actor')
+    conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
+    conditions_hash = bo.digest(conditions)
+    keys = bo.calibration_keys()
+    reports, receipts = [], []
+    for i, key in enumerate(keys, 1):
+        tasks = {task: dict(
+            replica=0, status='success', mean_forward_mps=.5,
+            dt_s=.005, steps=4000, observed=dict(absolute_mechanical_cot=2. * i + 1.),
+            metrics=dict.fromkeys(bo.METRICS[task], float(i))) for task in bo.TASKS}
+        reports.append(dict(kind=bo.REPORT_VERSION, domain='simulation',
+            candidate=dict(structure_key=list(key)), ppo_updates=100, conditions=conditions,
+            conditions_sha256=conditions_hash,
+            pairs=[dict(seed=conditions['seeds'][0], replica=0, feasible=True, tasks=tasks)]))
+        receipts.append(dict(report=f'design_{i:02d}/bo_evaluation.json', sha256=f'report-{i:02d}'))
+    benchmark = dict(updates=100, initial_actor_sha256=bo.sha(actor), source_plan_sha256=bo.sha(plan),
+        reports=receipts, selection_velocity_frame='horizontal_heading',
+        ppo_schedule=bo.PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=bo.MIXED_BO_LAYOUT)
+    manifest = tmp_path/'manifest.json'
+    manifest.write_text(json.dumps(dict(conditions_sha256=conditions_hash)), encoding='utf8')
+    measurements = tmp_path/'measurements_completed.json'
+    measurements.write_text(json.dumps(dict(reports=receipts)), encoding='utf8')
+    scoring = bo.panel_scoring(reports, keys, benchmark, conditions=conditions)
+    scoring_path, receipt_path = tmp_path/'scoring.json', tmp_path/'completed.json'
+    def write_scoring(value):
+        scoring_path.write_text(json.dumps(value), encoding='utf8')
+        receipt_path.write_text(json.dumps(dict(scoring_sha256=bo.sha(scoring_path),
+            manifest_sha256=bo.sha(manifest), measurements_completed_sha256=bo.sha(measurements))), encoding='utf8')
+    write_scoring(scoring)
+    monkeypatch.setattr(handoff, 'shared_input', lambda *_, **__: (plan, {}, actor))
+    monkeypatch.setattr(handoff, 'checked_measurement_panel', lambda _: (reports, keys, benchmark, conditions))
+    handoff.summarize(tmp_path, tmp_path, 100)
+    summary = bo.read(tmp_path/'calibration_summary.json')
+    assert summary['trials'] == 150 and summary['paired_successes'] == 50
+    for task in bo.TASKS:
+        cot = summary['normalization'][task]['cot']
+        assert cot['p10'] == pytest.approx(12.8)
+        assert cot['p90'] == pytest.approx(91.2)
+        assert cot['multiplier'] * 12.8 + cot['offset'] == pytest.approx(0)
+        assert cot['multiplier'] * 91.2 + cot['offset'] == pytest.approx(1)
+    write_scoring(dict(scoring, task_weights=dict(stairs=.3, backpack=.4, run=.3)))
+    with pytest.raises(ValueError):
+        handoff.summarize(tmp_path, tmp_path, 100)
+
+
 def test_handoff_explicit_continuation_passes_same_actor_source_to_evaluation_and_summary(tmp_path, monkeypatch):
     extension = tmp_path/'shared_policy_round4'
     calls = []

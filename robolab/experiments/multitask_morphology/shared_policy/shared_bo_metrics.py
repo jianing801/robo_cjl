@@ -19,6 +19,10 @@ TRIAL_VERSION = 'rpo_three_task_mechanical_positive_v1'
 REPORT_VERSION = 'rpo_three_task_bo_evaluation_v1'
 SCORING_VERSION = 'rpo_three_task_bo_scoring_v1'
 DT = .02
+PHYSICS_DT = .005
+POSITIVE_COT_BASIS = 'positive_mechanical'
+ABSOLUTE_COT_BASIS = 'absolute_mechanical'
+FORMAL_TASK_WEIGHTS = dict(stairs=.4, backpack=.3, run=.3)
 
 
 def digest(value):
@@ -33,10 +37,12 @@ def positive(value):
 def read_conditions(path):
     value = json.loads(Path(path).read_text(encoding='utf8'))
     fields = {'kind', 'duration_s', 'seeds', 'copies', 'tasks'}
-    if (not fields <= value.keys() <= fields | {'reset_mode', 'min_forward_progress_ratio'}
+    if (not fields <= value.keys() <= fields | {'reset_mode', 'min_forward_progress_ratio', 'measurement_dt_s'}
             or ('reset_mode' in value and value['reset_mode'] != 'fixed')
             or value['kind'] != TRIAL_VERSION or set(value['tasks']) != set(TASKS)):
         raise ValueError('Invalid three-task conditions')
+    if 'measurement_dt_s' in value and value['measurement_dt_s'] != PHYSICS_DT:
+        raise ValueError('Physics-step BO measurements require a 5 ms interval')
     if 'min_forward_progress_ratio' in value:
         ratio = value['min_forward_progress_ratio']
         if not positive(ratio) or ratio > 1:
@@ -100,7 +106,8 @@ def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, to
         progress_failure = 'below_minimum_forward_progress' if forward < minimum_m else None
     reason = 'fell' if fell else progress_failure
     status = 'failure' if reason else 'success'
-    energy = float(np.maximum(torque * joint_vel, 0).sum() * dt)
+    power = torque * joint_vel
+    energy = float(np.maximum(power, 0).sum() * dt)
     rmse = float(np.sqrt(np.mean((vx - speed) ** 2)))
     sway = float(np.sqrt(np.mean(np.sum(omega ** 2, axis=1))))
     rms = np.sqrt(np.mean(torque ** 2, axis=0))
@@ -118,6 +125,11 @@ def score_trial(task, *, speed, dt, expected_steps, mass, forward, vx, omega, to
     observed = dict(cot=energy / (mass * 9.81 * forward) if positive(mass) and forward > 0 else None,
         forward_rmse_mps=rmse, roll_pitch_rms_rad_s=sway, knee_ankle_max_rated_ratio=motor_cost,
         positive_mechanical_work_j=energy)
+    if dt == PHYSICS_DT:
+        absolute_work = float(np.abs(power).sum() * dt)
+        observed.update(absolute_mechanical_work_j=absolute_work,
+                        absolute_mechanical_cot=absolute_work / (mass * 9.81 * forward)
+                        if positive(mass) and forward > 0 else None)
     row['observed'] = observed
     if status == 'success':
         row['metrics'] = {name: observed[name] for name in METRICS[task]}
@@ -145,6 +157,23 @@ def paired_trials(reports, conditions):
     return result
 
 
+def scoring_cot_basis(scoring):
+    basis = scoring.get('cot_basis', POSITIVE_COT_BASIS)
+    if basis not in (POSITIVE_COT_BASIS, ABSOLUTE_COT_BASIS):
+        raise ValueError('Unknown mechanical CoT scoring basis')
+    return basis
+
+
+def trial_metric(trial, name, cot_basis):
+    if name == 'cot' and cot_basis == ABSOLUTE_COT_BASIS:
+        value = (trial.get('observed') or {}).get('absolute_mechanical_cot')
+        if (trial.get('dt_s') != PHYSICS_DT or type(value) not in (int, float)
+                or not math.isfinite(value) or value < 0):
+            raise ValueError('Missing or invalid 200 Hz absolute mechanical CoT')
+        return value
+    return (trial['metrics'] or {}).get(name)
+
+
 def validate_scoring(value, report):
     if (value.get('kind') != SCORING_VERSION or value.get('domain') != report.get('domain')
             or value.get('conditions_sha256') != report.get('conditions_sha256')):
@@ -155,6 +184,11 @@ def validate_scoring(value, report):
             and math.isclose(sum(values.values()), 1., abs_tol=1e-12))
     if not weights(value['task_weights'], TASKS) or set(value['metrics']) != set(TASKS):
         raise ValueError('Task weights must be nonnegative and sum to one')
+    if scoring_cot_basis(value) == ABSOLUTE_COT_BASIS:
+        if 'conditions' in report and report['conditions'].get('measurement_dt_s') != PHYSICS_DT:
+            raise ValueError('Absolute mechanical CoT scoring requires 200 Hz measurements')
+        if value.get('method') == 'post_finetune_panel50' and value['task_weights'] != FORMAL_TASK_WEIGHTS:
+            raise ValueError('Formal 200 Hz scoring requires 0.4/0.3/0.3 task weights')
     for task, items in value['metrics'].items():
         if not weights({k: row['weight'] for k, row in items.items()}, METRICS[task]):
             raise ValueError(f'Invalid {task} metric weights')
@@ -167,6 +201,7 @@ def validate_scoring(value, report):
 
 def objective(report, scoring):
     validate_scoring(scoring, report)
+    cot_basis = scoring_cot_basis(scoring)
     observations = []
     for pair in report['pairs']:
         feasible = pair['feasible']
@@ -176,8 +211,8 @@ def objective(report, scoring):
         if feasible:
             normalized = {}
             for task, specs in scoring['metrics'].items():
-                raw = pair['tasks'][task]['metrics']
-                if raw is None or any(raw.get(k) is None for k in specs):
+                raw = {key: trial_metric(pair['tasks'][task], key, cot_basis) for key in specs}
+                if any(value is None for value in raw.values()):
                     continue
                 normalized[task] = {}
                 for key, spec in specs.items():

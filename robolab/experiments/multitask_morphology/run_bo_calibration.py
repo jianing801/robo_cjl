@@ -1,9 +1,7 @@
 """Continue a live three-task distillation into formal BO calibration."""
 import argparse
-from math import isclose
 import os
 from pathlib import Path
-from statistics import fmean
 import signal
 import subprocess
 import sys
@@ -11,10 +9,12 @@ import time
 
 import psutil
 
-from bo import (HERE, REPO, FORMAL_CONDITIONS, TASKS, calibration_keys, check_panel_receipt,
-                checked_report, completed_actor, digest, freeze, official_conditions_path, panel_scoring, paired_trials,
-                read, read_conditions, run_lock, sha, shared_input, uses_current_schedule)
+from bo import (HERE, REPO, PHYSICS_CONDITIONS, calibration_keys, check_panel_receipt,
+                checked_measurement_panel, checked_report, completed_actor, digest, freeze_scoring,
+                official_conditions_path, panel_scoring, paired_trials, read, read_conditions, run_lock,
+                sha, shared_input, uses_current_schedule, write_calibration_summary)
 from finetune_settings import MIXED_BO_LAYOUT, PPO_SCHEDULE
+from shared_bo_metrics import ABSOLUTE_COT_BASIS, scoring_cot_basis
 
 
 def own_distillation(command, root):
@@ -84,28 +84,10 @@ def initialize(command, work, *, resume_paused, observe=observe_calibration, sle
         sleep(30)
 
 
-def summarize(root, work, updates, *, conditions_path=None, continuation=None):
-    source, _, initial = shared_input(root, formal=True, require_horizontal_selection=True,
-                                      continuation=continuation)
-    scoring_path = work/'scoring.json'
-    check_panel_receipt(scoring_path)
-    scoring = read(scoring_path)
-    frozen_conditions = official_conditions_path(scoring['conditions_sha256'])
-    conditions = read_conditions(conditions_path or frozen_conditions)
+def checked_historical_reports(work, source, initial, benchmark, conditions):
     conditions_sha256 = digest(conditions)
-    keys = calibration_keys()
-    benchmark = scoring['benchmark']
+    updates = benchmark['updates']
     mixed = uses_current_schedule(updates, conditions)
-    if (benchmark['updates'] != updates or benchmark['initial_actor_sha256'] != sha(initial)
-            or benchmark['source_plan_sha256'] != sha(source) or len(benchmark['reports']) != len(keys)
-            or scoring['conditions_sha256'] != conditions_sha256
-            or read(work/'manifest.json').get('conditions_sha256') != conditions_sha256):
-        raise ValueError('Calibration receipt has a different budget, policy, plan or conditions')
-    if mixed and (benchmark.get('init_at_random_ep_len') is not True
-                  or benchmark.get('envs_per_task') != MIXED_BO_LAYOUT
-                  or benchmark.get('ppo_schedule') != PPO_SCHEDULE):
-        raise ValueError('Calibration receipt uses a different mixed PPO training configuration')
-    tasks = {task: [] for task in TASKS}
     reports = []
     for index, entry in enumerate(benchmark['reports'], 1):
         folder = work/f'design_{index:02d}'
@@ -133,35 +115,40 @@ def summarize(root, work, updates, *, conditions_path=None, continuation=None):
         if paired_trials(measurements, conditions) != report['pairs']:
             raise ValueError(f'Measurement pairing differs at structure {index}')
         reports.append(report)
-        for pair in report['pairs']:
-            for task, trial in pair['tasks'].items():
-                tasks[task].append(trial)
-    if panel_scoring(reports, keys, benchmark, conditions=conditions) != scoring:
+    return reports
+
+
+def summarize(root, work, updates, *, conditions_path=None, continuation=None):
+    source, _, initial = shared_input(root, formal=True, require_horizontal_selection=True,
+                                      continuation=continuation)
+    scoring_path = work/'scoring.json'
+    check_panel_receipt(scoring_path)
+    scoring = read(scoring_path)
+    frozen_conditions = official_conditions_path(scoring['conditions_sha256'])
+    conditions = read_conditions(conditions_path or frozen_conditions)
+    conditions_sha256 = digest(conditions)
+    keys = calibration_keys()
+    benchmark = scoring['benchmark']
+    if (benchmark['updates'] != updates or benchmark['initial_actor_sha256'] != sha(initial)
+            or benchmark['source_plan_sha256'] != sha(source) or len(benchmark['reports']) != len(keys)
+            or scoring['conditions_sha256'] != conditions_sha256
+            or read(work/'manifest.json').get('conditions_sha256') != conditions_sha256):
+        raise ValueError('Calibration receipt has a different budget, policy, plan or conditions')
+    if uses_current_schedule(updates, conditions) and (
+            benchmark.get('init_at_random_ep_len') is not True or benchmark.get('envs_per_task') != MIXED_BO_LAYOUT
+            or benchmark.get('ppo_schedule') != PPO_SCHEDULE):
+        raise ValueError('Calibration receipt uses a different mixed PPO training configuration')
+    cot_basis = scoring_cot_basis(scoring)
+    if cot_basis == ABSOLUTE_COT_BASIS:
+        reports, verified_keys, verified_benchmark, verified_conditions = checked_measurement_panel(work)
+        if (verified_keys, verified_benchmark, verified_conditions) != (keys, benchmark, conditions):
+            raise ValueError('Frozen scoring and completed 200 Hz measurement panel differ')
+    else:
+        reports = checked_historical_reports(work, source, initial, benchmark, conditions)
+    if panel_scoring(reports, keys, benchmark, conditions=conditions, cot_basis=cot_basis,
+                     task_weights=scoring['task_weights']) != scoring:
         raise ValueError('Frozen scoring differs from recomputed quantiles')
-    trials_per_task = len(keys) * len(conditions['seeds']) * conditions['copies']
-    if any(len(trials) != trials_per_task for trials in tasks.values()):
-        raise ValueError('Calibration measurement count differs from the frozen conditions')
-    task_summary = {}
-    for task, trials in tasks.items():
-        speeds = [r['mean_forward_mps'] for r in trials if r['mean_forward_mps'] is not None]
-        task_summary[task] = dict(trials=len(trials), successes=sum(r['status']=='success' for r in trials),
-                                  mean_horizontal_mps=fmean(speeds) if speeds else None,
-                                  command_mps=conditions['tasks'][task]['speed_mps'])
-    coefficients = {}
-    for task, metrics in scoring['metrics'].items():
-        coefficients[task] = {}
-        for metric, row in metrics.items():
-            scale = row['p90'] - row['p10']
-            if not isclose(scale, row['scale'], rel_tol=1e-12) or scale <= 0.:
-                raise ValueError(f'Invalid calibration scale for {task}/{metric}')
-            coefficients[task][metric] = dict(**row, multiplier=1/scale, offset=-row['p10']/scale)
-    summary = dict(structures=len(reports), ppo_updates=updates, initial_actor_sha256=sha(initial),
-                   scoring_sha256=sha(scoring_path), trials=sum(len(v) for v in tasks.values()),
-                   paired_successes=sum(pair['feasible'] is True for r in reports for pair in r['pairs']),
-                   tasks=task_summary, normalization=coefficients)
-    path = work/'calibration_summary.json'
-    freeze(path, summary)
-    print('BO_CALIBRATION_VERIFIED', path, flush=True)
+    write_calibration_summary(work, reports, scoring, conditions)
 
 
 def main(argv=None):
@@ -192,7 +179,7 @@ def main(argv=None):
     with run_lock(work.with_name(work.name + '_handoff')):
         manifest = work/'manifest.json'
         frozen = read(manifest)['conditions_sha256'] if manifest.is_file() else None
-        conditions_path = args.conditions or (official_conditions_path(frozen) if frozen else FORMAL_CONDITIONS)
+        conditions_path = args.conditions or (official_conditions_path(frozen) if frozen else PHYSICS_CONDITIONS)
         conditions = read_conditions(conditions_path)
         conditions_sha256 = digest(conditions)
         official_conditions_path(conditions_sha256)
@@ -204,13 +191,17 @@ def main(argv=None):
         wait_for_distillation(shared, process)
         shared_input(root, formal=True, require_horizontal_selection=True, **actor_source)
         if not (work/'completed.json').is_file():
-            command = [sys.executable, '-u', str(HERE/'bo.py'), 'initialize', '--root', str(root),
-                       '--output', str(work), '--gpu', str(args.gpu), '--updates', str(DEFAULT_BO_UPDATES),
-                       '--conditions', str(conditions_path.resolve())]
-            if continuation is not None:
-                command += ['--shared-continuation', str(continuation)]
-            print('BO_HANDOFF_START', 'updates=', DEFAULT_BO_UPDATES, work, flush=True)
-            initialize(command, work, resume_paused=args.resume_paused)
+            if (work/'measurements_completed.json').is_file():
+                with run_lock(work):
+                    freeze_scoring(work, resume_paused=args.resume_paused)
+            else:
+                command = [sys.executable, '-u', str(HERE/'bo.py'), 'initialize', '--root', str(root),
+                           '--output', str(work), '--gpu', str(args.gpu), '--updates', str(DEFAULT_BO_UPDATES),
+                           '--conditions', str(conditions_path.resolve())]
+                if continuation is not None:
+                    command += ['--shared-continuation', str(continuation)]
+                print('BO_HANDOFF_START', 'updates=', DEFAULT_BO_UPDATES, work, flush=True)
+                initialize(command, work, resume_paused=args.resume_paused)
         summarize(root, work, DEFAULT_BO_UPDATES, conditions_path=conditions_path, **actor_source)
 
 

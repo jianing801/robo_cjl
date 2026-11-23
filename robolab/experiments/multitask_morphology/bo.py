@@ -1,9 +1,10 @@
 """Evaluate and search exact structures after shared-policy distillation."""
 import argparse
+from copy import copy
 import json
 from pathlib import Path
 from statistics import fmean, stdev
-from math import isfinite
+from math import isclose, isfinite
 import os
 import sys
 from uuid import uuid4
@@ -21,6 +22,7 @@ PRE_INGEST_ALIGNMENT_BO_SHA256 = {
     'fead4dca36355e514f86981a1526cd79c1bb96ce7ee12a7c8e7d16cde9773233',
     'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
 }
+PHYSICS_CONDITIONS = HERE/'configs/bo_conditions_physics_step.json'
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions_single_seed.json'
 LEGACY_FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 # Exact LF and CRLF source sets preceding the fixed-reset protocol.
@@ -36,9 +38,10 @@ PRE_FIXED_BO_SOURCES = (
 PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
-from shared_bo_metrics import (DT, KNEE_ANKLE, METRICS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
+from shared_bo_metrics import (ABSOLUTE_COT_BASIS, DT, FORMAL_TASK_WEIGHTS, KNEE_ANKLE, METRICS, PHYSICS_DT,
+                               POSITIVE_COT_BASIS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
                                digest, objective, paired_trials, positive, read_conditions, score_trial,
-                               validate_scoring)
+                               scoring_cot_basis, trial_metric, validate_scoring)
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from evaluation import EVALUATION_VELOCITY_FRAME
@@ -77,7 +80,7 @@ def freeze_candidate_manifest(path, identity, *, fixed_reset=False):
 
 
 def official_conditions_path(conditions_sha256):
-    for path in (FORMAL_CONDITIONS, LEGACY_FORMAL_CONDITIONS):
+    for path in (PHYSICS_CONDITIONS, FORMAL_CONDITIONS, LEGACY_FORMAL_CONDITIONS):
         if digest(read_conditions(path)) == conditions_sha256:
             return path
     raise ValueError('Official BO requires the fixed three-task conditions or the archived three-seed conditions')
@@ -90,7 +93,8 @@ def uses_current_schedule(updates, conditions):
 def calibration_label(conditions, updates=DEFAULT_BO_UPDATES):
     if conditions.get('reset_mode') != 'fixed':
         return 'calibration50'
-    return 'calibration50_single_seed_ppo100_random' if uses_current_schedule(updates, conditions) else 'calibration50_single_seed'
+    label = 'calibration50_single_seed_ppo100_random' if uses_current_schedule(updates, conditions) else 'calibration50_single_seed'
+    return label + ('_200hz' if 'measurement_dt_s' in conditions else '')
 
 
 def check_formal_selection(root, plan, manifest, complete, student, *, require_horizontal_selection=False):
@@ -170,6 +174,12 @@ def actor_receipt(root):
 
 
 def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_schedule=None, mixed_bo=False):
+    return completed_actor_from_hashes(root, sha(source_plan), sha(initial), candidate, updates,
+                                       ppo_schedule=ppo_schedule, mixed_bo=mixed_bo)
+
+
+def completed_actor_from_hashes(root, source_plan_sha256, initial_actor_sha256, candidate, updates, *,
+                                ppo_schedule=None, mixed_bo=False):
     manifest_path = root/'manifest.json'
     receipt = actor_receipt(root)
     complete = read(receipt)
@@ -180,12 +190,14 @@ def completed_actor(root, source_plan, initial, candidate, updates, *, ppo_sched
     expected_result = 'CANDIDATE_FINETUNED' if training_only else 'CANDIDATE_FINETUNED_EVALUATED'
     if training_only:
         root = root.resolve()
-        if actor != root/'shared_actor_finetuned.pt' or actor.resolve() != actor:
+        canonical = root/'shared_actor_finetuned.pt'
+        if not actor.is_absolute() or actor.is_symlink() or canonical.is_symlink() or actor.resolve() != canonical:
             raise ValueError('Fine-tuned actor is outside its canonical tuning output')
+        actor = canonical
     if (complete.get('result') != expected_result
             or complete['manifest_sha256'] != manifest_hash
-            or manifest['plan_sha256'] != sha(source_plan)
-            or manifest['initial_actor_sha256'] != sha(initial)
+            or manifest['plan_sha256'] != source_plan_sha256
+            or manifest['initial_actor_sha256'] != initial_actor_sha256
             or complete['candidate'] != candidate or manifest['candidate'] != candidate
             or complete['ppo_updates'] != updates or manifest['updates'] != updates
             or sha(actor) != complete['student_sha256']):
@@ -217,10 +229,33 @@ def run_worker(command, folder, environment, timeout, root):
     child([str(v) for v in command], folder, environment, timeout, root)
 
 
+def check_native_measurement(report, path, conditions, *, task, seed, design_id, actor_sha, bank_sha, plan_sha):
+    dt = conditions.get('measurement_dt_s', DT)
+    full_count = round(conditions['duration_s'] / dt)
+    if (report['kind'] != TRIAL_VERSION or report['design_id'] != design_id
+            or report['task'] != task or report['seed'] != seed
+            or report['conditions_sha256'] != digest(conditions)
+            or report['actor_sha256'] != actor_sha or report['bank_sha256'] != bank_sha
+            or report['plan_sha256'] != plan_sha or sha(report['trace']) != report['trace_sha256']
+            or sorted(row['replica'] for row in report['trials']) != list(range(conditions['copies']))
+            or any(row.get('dt_s') != dt or not 0 <= row['steps'] <= full_count
+                   or (row['status'] == 'success' and row['steps'] != full_count)
+                   for row in report['trials'])):
+        raise ValueError(f'Incomplete or mismatched BO telemetry: {path}')
+    if any(row.get('reason') == 'outside_stair_course' for row in report['trials']):
+        raise ValueError(f'The timed stair course boundary was reached; extend the measurement course: {path}')
+    if any(row['status'] not in ('success', 'failure') for row in report['trials']):
+        raise ValueError(f'Invalid trial preserved for diagnosis. Repeat the same command: {path}')
+    if dt == PHYSICS_DT:
+        for row in report['trials']:
+            if row['status'] == 'success':
+                trial_metric(row, 'cot', ABSOLUTE_COT_BASIS)
+
+
 def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, gpu, timeout):
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
     actor_sha = sha(actor)
-    expected_conditions = digest(conditions)
+    plan_sha = sha(plan_path)
     requests = [(seed, task) for seed in conditions['seeds'] for task in TASKS]
     reports = []
     for seed, task in requests:
@@ -256,17 +291,9 @@ def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, g
             if sha(report_path) != evidence['sha256']:
                 raise ValueError(f'Committed trial changed: {report_path}')
         report = read(report_path)
-        if (report['kind'] != TRIAL_VERSION or report['design_id'] != design_id
-                or report['task'] != task or report['seed'] != seed
-                or report['conditions_sha256'] != expected_conditions
-                or report['actor_sha256'] != actor_sha or report['bank_sha256'] != spec['bank_sha256']
-                or report['plan_sha256'] != sha(plan_path) or sha(report['trace']) != report['trace_sha256']
-                or sorted(row['replica'] for row in report['trials']) != list(range(conditions['copies']))):
-            raise ValueError(f'Incomplete or mismatched BO telemetry: {report_path}')
-        if any(row.get('reason') == 'outside_stair_course' for row in report['trials']):
-            raise ValueError(f'The timed stair course boundary was reached; extend the measurement course: {report_path}')
-        if any(row['status'] == 'invalid' for row in report['trials']):
-            raise ValueError(f'Invalid trial preserved for diagnosis. Repeat the same command: {report_path}')
+        check_native_measurement(report, report_path, conditions, task=task, seed=seed,
+                                 design_id=design_id, actor_sha=actor_sha,
+                                 bank_sha=spec['bank_sha256'], plan_sha=plan_sha)
         if not commit.exists():
             write_new(commit, evidence)
         reports.append(dict(report, evidence=evidence))
@@ -288,6 +315,8 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
     tuning = (a.finetuned if getattr(a, 'finetuned', None) else work/'tuning').resolve()
     mixed = uses_current_schedule(a.updates, conditions)
     if not actor_receipt(tuning).is_file():
+        if getattr(a, 'finetuned', None):
+            raise ValueError(f'Missing completed PPO run selected for reuse: {tuning}')
         entry = SHARED/'mixed_finetune.py' if mixed else HERE/'finetune.py'
         command = [sys.executable, '-u', entry, '--plan', source, '--student', initial,
                    '--output', tuning, '--design-id', design_id, '--updates', str(a.updates)]
@@ -346,9 +375,10 @@ def ingest_measurements(spec_path, conditions_path):
     import numpy as np
     specification = read(spec_path)
     conditions = read_conditions(conditions_path)
+    dt = conditions.get('measurement_dt_s', DT)
     if (specification['domain'] not in ('simulation', 'hardware')
-            or specification['dt_s'] != DT or specification['measurement_convention'] != TRIAL_VERSION):
-        raise ValueError('Imported arrays must follow the declared mechanical BO convention at 50 Hz')
+            or specification['dt_s'] != dt or specification['measurement_convention'] != TRIAL_VERSION):
+        raise ValueError(f'Imported arrays must follow the declared mechanical BO convention at {1/dt:g} Hz')
     grouped, evidence = {}, []
     base = spec_path.resolve().parent
     for trial in specification['trials']:
@@ -381,7 +411,7 @@ def ingest_measurements(spec_path, conditions_path):
                                            stair['travel_margin_factor'])
                 xy = positions[:, :2] - samples['initial_position'][:2]
                 outside = bool(outside_flight(xy[:, 0], xy[:, 1], flight['origin_x_m'], flight['length_m']).any())
-            score = score_trial(task, speed=speed, dt=DT, expected_steps=round(conditions['duration_s'] / DT),
+            score = score_trial(task, speed=speed, dt=dt, expected_steps=round(conditions['duration_s'] / dt),
                 mass=trial['total_mass_kg'], forward=forward, vx=samples['vx'], omega=samples['omega'],
                 torque=samples['torque'], joint_vel=samples['joint_vel'], motors=motors, fell=trial['fell'],
                 reached_top=trial.get('reached_top'), route_completed=trial.get('route_completed'),
@@ -435,13 +465,21 @@ def check_panel_pairs(pairs, expected):
             raise ValueError('Joint BO feasibility disagrees with task trial statuses')
 
 
-def panel_scoring(reports, keys, benchmark, *, conditions=None):
+def panel_scoring(reports, keys, benchmark, *, conditions=None, cot_basis=None, task_weights=None):
     """Fit each scale to structures completing every declared trial for the task."""
     import numpy as np
     if len(keys) != 50 or len(set(keys)) != 50 or [tuple(r['candidate']['structure_key']) for r in reports] != list(keys):
         raise ValueError('Calibration requires the fixed 50 distinct structures in group-21 order')
     if conditions is None:
         conditions = reports[0]['conditions']
+    physics_measurement = conditions.get('measurement_dt_s') == PHYSICS_DT
+    if cot_basis is None:
+        cot_basis = ABSOLUTE_COT_BASIS if physics_measurement else POSITIVE_COT_BASIS
+    if scoring_cot_basis(dict(cot_basis=cot_basis)) == ABSOLUTE_COT_BASIS and not physics_measurement:
+        raise ValueError('Absolute mechanical CoT scoring requires 200 Hz measurements')
+    absolute = cot_basis == ABSOLUTE_COT_BASIS
+    if task_weights is None:
+        task_weights = FORMAL_TASK_WEIGHTS if absolute else {task: 1/3 for task in TASKS}
     conditions_sha256 = digest(conditions)
     expected = required_panel_pairs(conditions)
     samples = {task: {metric: [] for metric in METRICS[task]} for task in TASKS}
@@ -457,8 +495,8 @@ def panel_scoring(reports, keys, benchmark, *, conditions=None):
             if not all(run['status'] == 'success' for run in runs):
                 continue
             for metric in METRICS[task]:
-                values = [run['metrics'][metric] for run in runs]
-                if any(value is None or not isfinite(value) or value < 0 for value in values):
+                values = [trial_metric(run, metric, cot_basis) for run in runs]
+                if any(type(value) not in (int, float) or not isfinite(value) or value < 0 for value in values):
                     raise ValueError(f'Missing or invalid successful trial measurement: {task}/{metric}')
                 samples[task][metric].append(fmean(values))
     metrics = {}
@@ -474,8 +512,12 @@ def panel_scoring(reports, keys, benchmark, *, conditions=None):
             # With an explicit scale, the scorer maps the baseline to 1.
             metrics[task][name] = dict(p10=low, p90=high, baseline=high, scale=high-low,
                                       weight=weight, eligible_designs=len(values))
-    return dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=conditions_sha256,
-        method='post_finetune_panel50',benchmark=benchmark,metrics=metrics,task_weights={t:1/3 for t in TASKS})
+    scoring = dict(kind=SCORING_VERSION,domain='simulation',conditions_sha256=conditions_sha256,
+        method='post_finetune_panel50',benchmark=benchmark,metrics=metrics,task_weights=dict(task_weights))
+    if absolute:
+        scoring['cot_basis'] = cot_basis
+    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256, conditions=conditions))
+    return scoring
 
 
 def span_only_panel(scoring):
@@ -489,6 +531,10 @@ def check_panel_receipt(scoring_path):
     if (receipt['scoring_sha256'] != sha(scoring_path)
             or receipt['manifest_sha256'] != sha(scoring_path.parent/'manifest.json')):
         raise ValueError('Frozen calibration scoring or manifest changed')
+    if scoring_cot_basis(read(scoring_path)) == ABSOLUTE_COT_BASIS:
+        evidence = scoring_path.parent/'measurements_completed.json'
+        if not evidence.is_file() or receipt.get('measurements_completed_sha256') != sha(evidence):
+            raise ValueError('Frozen calibration measurement receipt changed')
 
 
 def initial_report(path, evidence, benchmark):
@@ -507,6 +553,158 @@ def initial_report(path, evidence, benchmark):
     return report
 
 
+def calibration_evaluation_timing(work, evidence):
+    work = work.resolve()
+    measured = {}
+    for receipt in evidence:
+        report = Path(receipt['report']).resolve()
+        if not report.is_relative_to(work) or report in measured:
+            raise ValueError(f'Duplicate or outside calibration measurement: {report}')
+        if sha(report) != receipt['sha256']:
+            raise ValueError(f'Calibration measurement changed: {report}')
+        elapsed = read(report.parent.parent/'logs/exit.json')
+        if elapsed['returncode'] != 0 or not positive(elapsed['seconds']):
+            raise ValueError(f'Missing worker duration for accepted measurement: {report}')
+        measured[report] = elapsed['seconds']
+    return dict(accepted_measurements=len(measured), evaluation_seconds=sum(measured.values()))
+
+
+def checked_panel_candidate(work, index, evidence, benchmark, conditions, tuning_panel):
+    folder = work/f'design_{index:02d}'
+    path = folder/'bo_evaluation.json'
+    if (Path(evidence['report']) != path.relative_to(work) or path.resolve() != path):
+        raise ValueError(f'Unexpected calibration report path at structure {index}')
+    report = initial_report(path, evidence, benchmark)
+    if report['conditions'] != conditions or report['ppo_updates'] != benchmark['updates']:
+        raise ValueError(f'Calibration conditions or PPO budget changed at structure {index}')
+    candidate = report['candidate']
+    tuning = tuning_panel/f'design_{index:02d}'/'tuning'
+    mixed = uses_current_schedule(benchmark['updates'], conditions)
+    actor = completed_actor_from_hashes(tuning, benchmark['source_plan_sha256'], benchmark['initial_actor_sha256'],
+                                        candidate, benchmark['updates'],
+                                        ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed).resolve()
+    actor_sha = sha(actor)
+    if actor != Path(report['student']).resolve() or actor_sha != report['student_sha256']:
+        raise ValueError(f'Calibration actor changed at structure {index}')
+    plan_path = tuning/'plan.json'
+    plan = read(plan_path)
+    plan_sha = sha(plan_path)
+    measurements = {}
+    expected = {(seed, task) for seed in conditions['seeds'] for task in TASKS}
+    for entry in report['measurements']:
+        native_path = Path(entry['report'])
+        if (not native_path.is_absolute() or native_path.resolve() != native_path
+                or not native_path.is_relative_to(folder/'measurements') or sha(native_path) != entry['sha256']):
+            raise ValueError(f'Calibration measurement receipt changed at structure {index}')
+        native = read(native_path)
+        seed, task = native['seed'], native['task']
+        trial_root = folder/'measurements'/f'{seed}_{task}'
+        if ((seed, task) not in expected or (seed, task) in measurements
+                or native_path.parents[2] != trial_root or native_path.name != 'bo_trials.json'
+                or read(trial_root/'accepted.json') != entry
+                or Path(native['trace']) != native_path.with_name('bo_samples.npz')):
+            raise ValueError(f'Invalid accepted calibration measurement at structure {index}')
+        spec = plan['teachers'][task]
+        design_id = candidate['design_ids'][task]
+        if spec['design_ids'] != [design_id]:
+            raise ValueError(f'Frozen tuning design changed at structure {index}/{task}')
+        check_native_measurement(native, native_path, conditions, task=task, seed=seed, design_id=design_id,
+                                 actor_sha=actor_sha, bank_sha=spec['bank_sha256'], plan_sha=plan_sha)
+        measurements[seed, task] = native
+    if measurements.keys() != expected or paired_trials(measurements.values(), conditions) != report['pairs']:
+        raise ValueError(f'Incomplete or inconsistent measured trials at structure {index}')
+    return report
+
+
+def checked_measurement_panel(work):
+    work = work.resolve()
+    manifest_path = work/'manifest.json'
+    evidence_path = work/'measurements_completed.json'
+    if not evidence_path.is_file():
+        raise ValueError(f'Completed 200 Hz measurement receipt is required: {evidence_path}')
+    manifest, evidence = read(manifest_path), read(evidence_path)
+    conditions_hash = manifest['conditions_sha256']
+    conditions_path = official_conditions_path(conditions_hash)
+    if conditions_path != PHYSICS_CONDITIONS:
+        raise ValueError('Scoring can only be frozen from completed official 200 Hz measurements')
+    conditions = read_conditions(conditions_path)
+    keys = calibration_keys()
+    if (evidence['manifest_sha256'] != sha(manifest_path) or evidence['conditions_sha256'] != conditions_hash
+            or manifest['structure_keys'] != list(map(list, keys)) or len(evidence['reports']) != len(keys)):
+        raise ValueError('Completed measurement receipt does not match the frozen 50-structure manifest')
+    benchmark = {field: manifest[field] for field in ('initial_actor_sha256', 'source_plan_sha256', 'updates')}
+    mixed = uses_current_schedule(benchmark['updates'], conditions)
+    if benchmark['updates'] == PREVIOUS_BO_UPDATES or mixed:
+        if manifest.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME:
+            raise ValueError('Measurements require horizontal heading checkpoint selection')
+        benchmark['selection_velocity_frame'] = EVALUATION_VELOCITY_FRAME
+    if mixed:
+        settings = dict(ppo_schedule=PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=MIXED_BO_LAYOUT)
+        if any(manifest.get(key) != value for key, value in settings.items()):
+            raise ValueError('Measurements use a different PPO schedule, episode timing or environment layout')
+        benchmark.update(settings)
+    tuning_panel = work
+    if reused := manifest.get('reused_finetuned_panel'):
+        tuning_panel = Path(reused['path']).resolve()
+        if (tuning_panel == work or sha(tuning_panel/'manifest.json') != reused['manifest_sha256']):
+            raise ValueError('Reused calibration tuning panel changed')
+    reports = [checked_panel_candidate(work, index, entry, benchmark, conditions, tuning_panel)
+               for index, entry in enumerate(evidence['reports'], 1)]
+    return reports, keys, dict(benchmark, reports=evidence['reports']), conditions
+
+
+def freeze_panel_scoring(work, scoring):
+    receipt = dict(manifest_sha256=sha(work/'manifest.json'))
+    if scoring_cot_basis(scoring) == ABSOLUTE_COT_BASIS:
+        receipt['measurements_completed_sha256'] = sha(work/'measurements_completed.json')
+    path = work/'scoring.json'
+    freeze(path, scoring)
+    freeze(work/'completed.json', dict(receipt, scoring_sha256=sha(path)))
+    print('BO_CALIBRATION_READY', path, flush=True)
+
+
+def write_calibration_summary(work, reports, scoring, conditions):
+    tasks = {task: [pair['tasks'][task] for report in reports for pair in report['pairs']] for task in TASKS}
+    trials_per_task = len(reports) * len(conditions['seeds']) * conditions['copies']
+    if any(len(trials) != trials_per_task for trials in tasks.values()):
+        raise ValueError('Calibration measurement count differs from the frozen conditions')
+    task_summary = {}
+    for task, trials in tasks.items():
+        speeds = [row['mean_forward_mps'] for row in trials if row['mean_forward_mps'] is not None]
+        task_summary[task] = dict(trials=len(trials), successes=sum(row['status'] == 'success' for row in trials),
+                                  mean_horizontal_mps=fmean(speeds) if speeds else None,
+                                  command_mps=conditions['tasks'][task]['speed_mps'])
+    coefficients = {}
+    for task, metrics in scoring['metrics'].items():
+        coefficients[task] = {}
+        for metric, row in metrics.items():
+            scale = row['p90'] - row['p10']
+            if not isclose(scale, row['scale'], rel_tol=1e-12) or scale <= 0.:
+                raise ValueError(f'Invalid calibration scale for {task}/{metric}')
+            coefficients[task][metric] = dict(**row, multiplier=1/scale, offset=-row['p10']/scale)
+    benchmark = scoring['benchmark']
+    summary = dict(structures=len(reports), ppo_updates=benchmark['updates'],
+                   initial_actor_sha256=benchmark['initial_actor_sha256'],
+                   scoring_sha256=sha(work/'scoring.json'), trials=sum(len(rows) for rows in tasks.values()),
+                   paired_successes=sum(pair['feasible'] is True for report in reports for pair in report['pairs']),
+                   tasks=task_summary, normalization=coefficients)
+    if scoring_cot_basis(scoring) == ABSOLUTE_COT_BASIS:
+        summary.update(cot_basis=ABSOLUTE_COT_BASIS, task_weights=scoring['task_weights'])
+    path = work/'calibration_summary.json'
+    freeze(path, summary)
+    print('BO_CALIBRATION_VERIFIED', path, flush=True)
+
+
+def freeze_scoring(work, *, resume_paused=False):
+    if (work/'USER_PAUSED').exists() and not resume_paused:
+        raise RuntimeError('USER_PAUSED; pass --resume-paused to continue this run')
+    reports, keys, benchmark, conditions = checked_measurement_panel(work)
+    scoring = panel_scoring(reports, keys, benchmark, conditions=conditions)
+    resume_pause(work, resume_paused)
+    freeze_panel_scoring(work, scoring)
+    write_calibration_summary(work, reports, scoring, conditions)
+
+
 def initialize(a, work, source, plan, actor, conditions):
     keys = calibration_keys()
     lookup = {tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
@@ -520,7 +718,26 @@ def initialize(a, work, source, plan, actor, conditions):
         benchmark['init_at_random_ep_len'] = True
         benchmark['envs_per_task'] = MIXED_BO_LAYOUT
     manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
+    reuse = getattr(a, 'reuse_finetuned_panel', None)
+    if reuse is not None:
+        reuse = reuse.resolve()
+        if reuse == work.resolve():
+            raise ValueError('Reevaluation requires a separate completed calibration panel')
+        check_panel_receipt(reuse/'scoring.json')
+        previous = read(reuse/'manifest.json')
+        if any(previous.get(key) != value for key, value in benchmark.items()) or previous.get(
+                'structure_keys') != manifest['structure_keys']:
+            raise ValueError('Reusable panel differs in structures, shared actor or PPO setting')
+        manifest['reused_finetuned_panel'] = dict(path=str(reuse), manifest_sha256=sha(reuse/'manifest.json'))
     freeze(work/'manifest.json', manifest)
+    if (work/'measurements_completed.json').is_file():
+        if getattr(a, 'measure_only', False):
+            checked_measurement_panel(work)
+            resume_pause(work, a.resume_paused)
+            print('BO_CALIBRATION_MEASUREMENTS_READY', work/'measurements_completed.json', flush=True)
+        else:
+            freeze_scoring(work, resume_paused=a.resume_paused)
+        return
     resume_pause(work,a.resume_paused)
     reports, evidence = [], []
     old_scoring_path = work/'scoring.json'
@@ -544,18 +761,38 @@ def initialize(a, work, source, plan, actor, conditions):
             work.mkdir(exist_ok=True)
             freeze(work/'manifest.json', manifest)
     else:
+        elapsed = 0.
         for index, key in enumerate(keys, 1):
             folder = work/f'design_{index:02d}'
-            report = evaluate(a, folder, source, plan, actor, lookup[key]['design_ids']['stairs'], conditions)
+            candidate_args = a
+            if reuse is not None:
+                candidate_args = copy(a)
+                candidate_args.finetuned = reuse/f'design_{index:02d}'/'tuning'
+            report = evaluate(candidate_args, folder, source, plan, actor, lookup[key]['design_ids']['stairs'], conditions)
             path = folder/'bo_evaluation.json'
             reports.append(report)
             evidence.append(dict(report=str(path.relative_to(work)), sha256=sha(path)))
-            print('CALIBRATION_PROGRESS', index, '/ 50', flush=True)
+            if 'measurement_dt_s' in conditions:
+                elapsed += calibration_evaluation_timing(work, report['measurements'])['evaluation_seconds']
+                print('CALIBRATION_PROGRESS', index, '/ 50', f'evaluation_seconds={elapsed:.2f}', flush=True)
+            else:
+                print('CALIBRATION_PROGRESS', index, '/ 50', flush=True)
+    if 'measurement_dt_s' in conditions:
+        timing = calibration_evaluation_timing(work, [row for report in reports for row in report['measurements']])
+        if timing['accepted_measurements'] != len(keys) * len(TASKS) * len(conditions['seeds']):
+            raise ValueError('Incomplete accepted measurement coverage for the fixed panel')
+        freeze(work/'evaluation_timing.json', timing)
+    if conditions.get('measurement_dt_s') == PHYSICS_DT:
+        freeze(work/'measurements_completed.json', dict(conditions_sha256=digest(conditions),
+               manifest_sha256=sha(work/'manifest.json'), reports=evidence))
+    if getattr(a, 'measure_only', False):
+        print('BO_CALIBRATION_MEASUREMENTS_READY', work/'measurements_completed.json', flush=True)
+        return
+    if conditions.get('measurement_dt_s') == PHYSICS_DT:
+        freeze_scoring(work, resume_paused=a.resume_paused)
+        return
     scoring = panel_scoring(reports, keys, dict(benchmark, reports=evidence), conditions=conditions)
-    freeze(work/'scoring.json',scoring)
-    freeze(work/'completed.json',dict(scoring_sha256=sha(work/'scoring.json'),
-                                      manifest_sha256=sha(work/'manifest.json')))
-    print('BO_CALIBRATION_READY',work/'scoring.json',flush=True)
+    freeze_panel_scoring(work, scoring)
 
 
 def parameters(row):
@@ -601,8 +838,11 @@ def propose(pool, observations, evaluated, schema, seed):
 def search(a, work, source, plan, actor, conditions):
     scoring = read(a.scoring)
     conditions_sha256 = digest(conditions)
-    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256))
+    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256, conditions=conditions))
     formal = scoring.get('method') == 'post_finetune_panel50'
+    if formal and conditions.get('measurement_dt_s') == PHYSICS_DT and (
+            scoring_cot_basis(scoring) != ABSOLUTE_COT_BASIS or scoring['task_weights'] != FORMAL_TASK_WEIGHTS):
+        raise ValueError('Formal 200 Hz BO search requires frozen absolute mechanical CoT and 0.4/0.3/0.3 task weights')
     expected = required_panel_pairs(conditions) if formal else None
 
     def score(report):
@@ -711,6 +951,10 @@ def main(argv=None):
         if command == 'evaluate':
             p.add_argument('--candidate', required=True, help='Exact Rough (stairs) ID in the shared bank')
             p.add_argument('--finetuned', type=Path, help='Reuse a completed candidate run with the same plan and budget')
+        elif command == 'initialize':
+            p.add_argument('--reuse-finetuned-panel', type=Path,
+                           help='Use all 50 completed PPO runs from a separate calibration panel')
+            p.add_argument('--measure-only', action='store_true', help='Save both CoTs and defer freezing scores')
         elif command == 'search':
             p.add_argument('--scoring', type=Path)
             p.add_argument('--seed', type=int, default=42)
@@ -722,11 +966,21 @@ def main(argv=None):
     p = sub.add_parser('score')
     p.add_argument('report', type=Path)
     p.add_argument('--scoring', required=True, type=Path)
+    p = sub.add_parser('freeze-scoring', help='Freeze scoring from a completed 200 Hz measurement panel on CPU')
+    p.add_argument('--measurements-root', required=True, type=Path)
+    p.add_argument('--resume-paused', action='store_true')
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
     p.add_argument('--conditions', type=Path, default=FORMAL_CONDITIONS)
     p.add_argument('--output', type=Path, required=True)
     a = parser.parse_args(argv)
+    if a.command == 'freeze-scoring':
+        work = a.measurements_root.resolve()
+        if not work.is_dir():
+            parser.error('Completed measurement panel directory does not exist')
+        with run_lock(work):
+            freeze_scoring(work, resume_paused=a.resume_paused)
+        return
     if a.command == 'ingest':
         write_new(a.output, ingest_measurements(a.spec, a.conditions))
         return
@@ -744,8 +998,10 @@ def main(argv=None):
     if (a.migrated or (a.root/'migration_in_progress.json').is_file()) and not (a.root/'migration_completed.json').is_file():
         parser.error('Complete migration of the selected experiment root before BO')
     formal = a.command == 'initialize'
-    conditions_path = a.conditions or FORMAL_CONDITIONS
+    conditions_path = a.conditions or PHYSICS_CONDITIONS
     conditions = read_conditions(conditions_path)
+    if (getattr(a, 'reuse_finetuned_panel', None) or getattr(a, 'measure_only', False)) and 'measurement_dt_s' not in conditions:
+        parser.error('Panel reevaluation and measurement-only calibration require 200 Hz conditions')
     if a.command == 'search':
         default_scoring = a.root/'bo'/calibration_label(conditions, a.updates)/'scoring.json'
         anchored_scoring = default_scoring.parent/'percentile_scoring/scoring.json'
@@ -759,6 +1015,8 @@ def main(argv=None):
         if a.conditions is None:
             if formal and a.scoring != default_scoring.resolve():
                 conditions_path = official_conditions_path(scoring['conditions_sha256'])
+                if conditions_path != PHYSICS_CONDITIONS:
+                    parser.error('Archived BO scoring requires its matching explicit --conditions')
             elif not formal and scoring.get('conditions_sha256') == digest(read_conditions(PILOT_CONDITIONS)):
                 conditions_path = PILOT_CONDITIONS
             conditions = read_conditions(conditions_path)
@@ -789,6 +1047,8 @@ def main(argv=None):
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
         label += '_ppo100_random'
+    if a.command != 'initialize' and 'measurement_dt_s' in conditions:
+        label += '_200hz'
     work = (a.output or a.root/'bo'/label).resolve()
     with run_lock(work):
         work.mkdir(parents=True, exist_ok=True)
