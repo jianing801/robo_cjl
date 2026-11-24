@@ -23,6 +23,9 @@ PRE_INGEST_ALIGNMENT_BO_SHA256 = {
     'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
 }
 PHYSICS_CONDITIONS = HERE/'configs/bo_conditions_physics_step.json'
+ORIGINAL_RPO_ARCHIVE = REPO/'docs/reference/rpo_original_configuration'
+ORIGINAL_RPO_SCORING_METHOD = 'post_finetune_original_rpo'
+FORMAL_SCORING_METHODS = ('post_finetune_panel50', ORIGINAL_RPO_SCORING_METHOD)
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions_single_seed.json'
 LEGACY_FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 # Exact LF and CRLF source sets preceding the fixed-reset protocol.
@@ -575,17 +578,21 @@ def checked_panel_candidate(work, index, evidence, benchmark, conditions, tuning
     if (Path(evidence['report']) != path.relative_to(work) or path.resolve() != path):
         raise ValueError(f'Unexpected calibration report path at structure {index}')
     report = initial_report(path, evidence, benchmark)
+    return checked_candidate_measurements(folder, report, benchmark, conditions,
+                                          tuning_panel/f'design_{index:02d}'/'tuning')
+
+
+def checked_candidate_measurements(folder, report, benchmark, conditions, tuning):
     if report['conditions'] != conditions or report['ppo_updates'] != benchmark['updates']:
-        raise ValueError(f'Calibration conditions or PPO budget changed at structure {index}')
+        raise ValueError(f'Conditions or PPO budget changed: {folder}')
     candidate = report['candidate']
-    tuning = tuning_panel/f'design_{index:02d}'/'tuning'
     mixed = uses_current_schedule(benchmark['updates'], conditions)
     actor = completed_actor_from_hashes(tuning, benchmark['source_plan_sha256'], benchmark['initial_actor_sha256'],
                                         candidate, benchmark['updates'],
                                         ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed).resolve()
     actor_sha = sha(actor)
     if actor != Path(report['student']).resolve() or actor_sha != report['student_sha256']:
-        raise ValueError(f'Calibration actor changed at structure {index}')
+        raise ValueError(f'Measurement actor changed: {folder}')
     plan_path = tuning/'plan.json'
     plan = read(plan_path)
     plan_sha = sha(plan_path)
@@ -595,7 +602,7 @@ def checked_panel_candidate(work, index, evidence, benchmark, conditions, tuning
         native_path = Path(entry['report'])
         if (not native_path.is_absolute() or native_path.resolve() != native_path
                 or not native_path.is_relative_to(folder/'measurements') or sha(native_path) != entry['sha256']):
-            raise ValueError(f'Calibration measurement receipt changed at structure {index}')
+            raise ValueError(f'Measurement receipt changed: {folder}')
         native = read(native_path)
         seed, task = native['seed'], native['task']
         trial_root = folder/'measurements'/f'{seed}_{task}'
@@ -603,16 +610,16 @@ def checked_panel_candidate(work, index, evidence, benchmark, conditions, tuning
                 or native_path.parents[2] != trial_root or native_path.name != 'bo_trials.json'
                 or read(trial_root/'accepted.json') != entry
                 or Path(native['trace']) != native_path.with_name('bo_samples.npz')):
-            raise ValueError(f'Invalid accepted calibration measurement at structure {index}')
+            raise ValueError(f'Invalid accepted measurement: {folder}')
         spec = plan['teachers'][task]
         design_id = candidate['design_ids'][task]
         if spec['design_ids'] != [design_id]:
-            raise ValueError(f'Frozen tuning design changed at structure {index}/{task}')
+            raise ValueError(f'Frozen tuning design changed: {folder}/{task}')
         check_native_measurement(native, native_path, conditions, task=task, seed=seed, design_id=design_id,
                                  actor_sha=actor_sha, bank_sha=spec['bank_sha256'], plan_sha=plan_sha)
         measurements[seed, task] = native
     if measurements.keys() != expected or paired_trials(measurements.values(), conditions) != report['pairs']:
-        raise ValueError(f'Incomplete or inconsistent measured trials at structure {index}')
+        raise ValueError(f'Incomplete or inconsistent measured trials: {folder}')
     return report
 
 
@@ -651,6 +658,123 @@ def checked_measurement_panel(work):
     reports = [checked_panel_candidate(work, index, entry, benchmark, conditions, tuning_panel)
                for index, entry in enumerate(evidence['reports'], 1)]
     return reports, keys, dict(benchmark, reports=evidence['reports']), conditions
+
+
+def checked_original_rpo_reference(root, benchmark, conditions):
+    archive_path = ORIGINAL_RPO_ARCHIVE/'manifest.json'
+    archive = read(archive_path)
+    protocol_path = root/'reference_protocol.json'
+    protocol = read(protocol_path)
+    expected = {key: benchmark[key] for key in ('source_plan_sha256', 'initial_actor_sha256', 'updates')}
+    expected['conditions_sha256'] = digest(conditions)
+    if protocol != expected or sha(protocol_path) != archive['files_sha256']['reference_protocol.json']:
+        raise ValueError('Original RPO reference and initial samples must share the archived PPO and measurement protocol')
+    folder = root/'candidate'
+    path = folder/'bo_evaluation.json'
+    singleton = dict(benchmark, source_plan_sha256=sha(root/'reference_plan.json'))
+    report = initial_report(path, dict(sha256=archive['raw_source_report_sha256']), singleton)
+    if (report['candidate']['structure_key'] != archive['design_key']
+            or report['student_sha256'] != archive['final_actor_sha256']):
+        raise ValueError('Original RPO structure or final actor differs from the archived reference')
+    checked_candidate_measurements(folder, report, singleton, conditions, folder/'tuning')
+    return report, dict(root=str(root), archive_manifest_sha256=sha(archive_path),
+                        report_sha256=sha(path), protocol_sha256=sha(protocol_path))
+
+
+def original_rpo_scoring(reference, source, benchmark, panel, conditions):
+    expected = required_panel_pairs(conditions)
+    check_panel_pairs(reference['pairs'], expected)
+    (pair,) = reference['pairs']
+    if (conditions.get('measurement_dt_s') != PHYSICS_DT or len(expected) != 1
+            or pair['feasible'] is not True or any(row['status'] != 'success' for row in pair['tasks'].values())):
+        raise ValueError('Original RPO ratios require three successful tasks with one fixed 200 Hz evaluation')
+    metrics = {}
+    for task, names in METRICS.items():
+        weights = (1/3, 1/3, 1/3) if task == 'stairs' else (.4, .4, .2)
+        metrics[task] = {
+            name: dict(baseline=trial_metric(pair['tasks'][task], name, ABSOLUTE_COT_BASIS), weight=weight)
+            for name, weight in zip(names, weights, strict=True)
+        }
+    scoring = dict(kind=SCORING_VERSION, method=ORIGINAL_RPO_SCORING_METHOD, domain='simulation',
+                   conditions_sha256=digest(conditions), cot_basis=ABSOLUTE_COT_BASIS,
+                   task_weights=FORMAL_TASK_WEIGHTS, metrics=metrics, benchmark=benchmark,
+                   measurement_panel=panel, original_rpo_reference=source)
+    score = objective(reference, scoring)
+    if (score['mean_objective'] != 1.0
+            or score['observations'][0]['task_objectives'] != dict.fromkeys(TASKS, 1.0)):
+        raise ValueError('Original RPO reference scores must all equal one')
+    return scoring
+
+
+def original_rpo_initial_scores(reports, evidence, scoring, conditions):
+    expected = required_panel_pairs(conditions)
+    candidates = []
+    for report, entry in zip(reports, evidence, strict=True):
+        check_panel_pairs(report['pairs'], expected)
+        scored = objective(report, scoring)
+        if scored['valid_pairs'] != len(expected) or scored['complete_objectives'] != scored['joint_successes']:
+            raise ValueError('Initial BO sample has incomplete performance measurements')
+        candidate = report['candidate']
+        candidates.append(dict(design_id=candidate['design_ids']['stairs'], structure_key=candidate['structure_key'],
+                               report=entry['report'], **scored))
+    return candidates
+
+
+def measurement_panel_source(root):
+    return dict(root=str(root), manifest_sha256=sha(root/'manifest.json'),
+                measurements_completed_sha256=sha(root/'measurements_completed.json'))
+
+
+def freeze_original_rpo_scoring(measurements_root, reference_root, output):
+    panel, reference_root, output = (Path(path).resolve() for path in (measurements_root, reference_root, output))
+    if any(output.is_relative_to(source) or source.is_relative_to(output) for source in (panel, reference_root)):
+        raise ValueError('Original RPO scoring needs a separate output directory')
+    panel_source = measurement_panel_source(panel)
+    reports, _, benchmark, conditions = checked_measurement_panel(panel)
+    reference, source = checked_original_rpo_reference(reference_root, benchmark, conditions)
+    scoring = original_rpo_scoring(reference, source, benchmark, panel_source, conditions)
+    candidates = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
+    if measurement_panel_source(panel) != panel_source:
+        raise ValueError('Measurement panel changed while freezing Original RPO scoring')
+    output.mkdir(parents=True, exist_ok=True)
+    path = output/'scoring.json'
+    freeze(path, scoring)
+    observations = output/'initial_observations.json'
+    freeze(observations, dict(scoring_sha256=sha(path), reference_objective=1.0, candidates=candidates))
+    freeze(output/'completed.json', dict(scoring_sha256=sha(path), initial_observations_sha256=sha(observations)))
+    print('BO_ORIGINAL_RPO_SCORING_READY', path, len(candidates), flush=True)
+
+
+def read_search_benchmark(scoring_path, scoring, conditions):
+    if scoring['method'] != ORIGINAL_RPO_SCORING_METHOD:
+        check_panel_receipt(scoring_path)
+        root = scoring_path.parent
+        if read(root/'manifest.json').get('conditions_sha256') != digest(conditions):
+            raise ValueError('Frozen calibration manifest uses different measurement conditions')
+        if span_only_panel(scoring):
+            raise ValueError('Rerun BO initialize to reuse completed measurements with P10/P90 anchors')
+        return root, scoring['benchmark']
+    folder = scoring_path.parent
+    observations_path = folder/'initial_observations.json'
+    receipt = read(folder/'completed.json')
+    if (receipt['scoring_sha256'] != sha(scoring_path)
+            or receipt['initial_observations_sha256'] != sha(observations_path)):
+        raise ValueError('Frozen Original RPO scoring or initial observations changed')
+    panel = Path(scoring['measurement_panel']['root']).resolve()
+    panel_source = measurement_panel_source(panel)
+    if panel_source != scoring['measurement_panel']:
+        raise ValueError('Frozen Original RPO measurement panel changed')
+    reports, _, benchmark, measured_conditions = checked_measurement_panel(panel)
+    if measured_conditions != conditions:
+        raise ValueError('Frozen Original RPO measurement conditions changed')
+    reference, source = checked_original_rpo_reference(
+        Path(scoring['original_rpo_reference']['root']), benchmark, conditions)
+    if original_rpo_scoring(reference, source, benchmark, panel_source, conditions) != scoring:
+        raise ValueError('Frozen Original RPO scoring differs from the reference and measured panel')
+    records = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
+    if read(observations_path) != dict(scoring_sha256=sha(scoring_path), reference_objective=1.0, candidates=records):
+        raise ValueError('Frozen Original RPO initial observations differ from measured reports')
+    return panel, benchmark
 
 
 def freeze_panel_scoring(work, scoring):
@@ -839,7 +963,8 @@ def search(a, work, source, plan, actor, conditions):
     scoring = read(a.scoring)
     conditions_sha256 = digest(conditions)
     validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256, conditions=conditions))
-    formal = scoring.get('method') == 'post_finetune_panel50'
+    method = scoring.get('method')
+    formal = method in FORMAL_SCORING_METHODS
     if formal and conditions.get('measurement_dt_s') == PHYSICS_DT and (
             scoring_cot_basis(scoring) != ABSOLUTE_COT_BASIS or scoring['task_weights'] != FORMAL_TASK_WEIGHTS):
         raise ValueError('Formal 200 Hz BO search requires frozen absolute mechanical CoT and 0.4/0.3/0.3 task weights')
@@ -848,19 +973,18 @@ def search(a, work, source, plan, actor, conditions):
     def score(report):
         if expected is not None:
             check_panel_pairs(report['pairs'], expected)
-        return objective(report, scoring)
+        scored = objective(report, scoring)
+        if (method == ORIGINAL_RPO_SCORING_METHOD
+                and scored['complete_objectives'] != scored['joint_successes']):
+            raise ValueError('Successful BO trial has incomplete performance measurements')
+        return scored
 
     pool = read(plan['shared_bank'])['structures']
     keys = {tuple(k) for k in plan['selected_structure_keys']}
     pool = [r for r in pool if tuple(r['key']) in keys]
     observations, evaluated, results = [], set(), []
     if formal:
-        check_panel_receipt(a.scoring)
-        if read(a.scoring.parent/'manifest.json').get('conditions_sha256') != conditions_sha256:
-            raise ValueError('Frozen calibration manifest uses different measurement conditions')
-        if span_only_panel(scoring):
-            raise ValueError('Rerun BO initialize to reuse completed measurements with P10/P90 anchors')
-        benchmark = scoring['benchmark']
+        panel_root, benchmark = read_search_benchmark(a.scoring, scoring, conditions)
         keys = calibration_keys()
         if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
                 or benchmark['updates'] != a.updates or len(benchmark['reports']) != len(keys)):
@@ -876,7 +1000,7 @@ def search(a, work, source, plan, actor, conditions):
             raise ValueError('The total BO budget must include the 50 initial observations')
         lookup = {tuple(row['key']): row for row in pool}
         for key, evidence in zip(keys,benchmark['reports'],strict=True):
-            path = a.scoring.parent/evidence['report']
+            path = panel_root/evidence['report']
             report = initial_report(path, evidence, benchmark)
             row = lookup[key]
             design_id = row['design_ids']['stairs']
@@ -969,6 +1093,9 @@ def main(argv=None):
     p = sub.add_parser('freeze-scoring', help='Freeze scoring from a completed 200 Hz measurement panel on CPU')
     p.add_argument('--measurements-root', required=True, type=Path)
     p.add_argument('--resume-paused', action='store_true')
+    p.add_argument('--original-rpo-reference', type=Path,
+                   help='Validated original RPO evaluation directory for reference-ratio scoring')
+    p.add_argument('--output', type=Path, help='Separate output directory for original RPO scoring')
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
     p.add_argument('--conditions', type=Path, default=FORMAL_CONDITIONS)
@@ -978,6 +1105,16 @@ def main(argv=None):
         work = a.measurements_root.resolve()
         if not work.is_dir():
             parser.error('Completed measurement panel directory does not exist')
+        if (a.original_rpo_reference is None) != (a.output is None):
+            parser.error('Original RPO scoring requires both --original-rpo-reference and --output')
+        if a.original_rpo_reference is not None:
+            output = a.output.resolve()
+            if output.is_relative_to(work) or output.is_relative_to(a.original_rpo_reference.resolve()):
+                parser.error('Original RPO scoring requires a separate output directory')
+            with run_lock(output):
+                resume_pause(output, a.resume_paused)
+                freeze_original_rpo_scoring(work, a.original_rpo_reference, output)
+            return
         with run_lock(work):
             freeze_scoring(work, resume_paused=a.resume_paused)
         return
@@ -1009,7 +1146,7 @@ def main(argv=None):
             default_scoring = anchored_scoring
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
-        formal = scoring.get('method') == 'post_finetune_panel50'
+        formal = scoring.get('method') in FORMAL_SCORING_METHODS
         if not formal and (a.scoring == default_scoring or 'reports' in scoring.get('benchmark', {})):
             raise ValueError('Official initial observations require the frozen panel scoring method')
         if a.conditions is None:

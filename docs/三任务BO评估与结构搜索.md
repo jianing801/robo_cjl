@@ -1,16 +1,35 @@
 # 微调后的三任务评估与结构搜索
 
-先完成上楼、负重和跑步均采用水平航向速度的鲁棒选模，确认 `shared_policy/selection.json` 和 `shared_policy/completed.json` 记录了获选模型及其身份，后者的 `protocol.evaluation_velocity_frame` 为 `horizontal_heading`。下列命令在仓库根目录执行，使用迁移的 2500 结构库。使用从头生成的结构库时省去 `--migrated`。[共享策略蒸馏及产物](共享策略蒸馏详细说明.md#查看产物和下一步)
+先完成上楼、负重和跑步均采用水平航向速度的鲁棒选模，确认 `shared_policy/selection.json` 和 `shared_policy/completed.json` 记录了获选模型及其身份，后者的 `protocol.evaluation_velocity_frame` 为 `horizontal_heading`。本轮使用第 5 轮获选模型、迁移的 2500 结构库，以及已评估的[原始 RPO 配置](原始配置基准.md)。[共享策略蒸馏及产物](共享策略蒸馏详细说明.md#查看产物和下一步)
 
-## 第一步　运行固定的 50 个结构并冻结尺度
+<a name="第一步运行固定的-50-个结构并冻结尺度"></a>
+
+## 第一步　准备 50 个初始结构的测量
+
+下列命令在代码仓库根目录执行。变量使用本轮租卡上的目录。
 
 ```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py initialize --migrated --gpu 0
+entry="$PWD/robolab/experiments/multitask_morphology"
+data=/root/sj-tmp/bo-ppo100-round5-data
+experiment=/data/chenjiale/robo_cjl/robolab/logs/multitask_full2500_physical_migrated
+continuation=/root/sj-tmp/shared-distill-20261121/shared_policy_round5
+panel="$data/calibration50_single_seed_ppo100_random_200hz"
+reference="$data/rpo_original_025_030_10010l_4340p_ppo100_200hz/evaluation"
+scoring="$data/scoring_original_rpo_200hz"
+search="$data/search_single_seed_ppo100_random_200hz_original_rpo"
+```
+
+已有与原机评估一致的 `measurements_completed.json` 时，直接进入第二步。首次准备这 50 个结构时运行以下命令。已完成同协议微调的结构可通过 `--reuse-finetuned-panel <已完成的微调目录>` 只做复评。
+
+```bash
+conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
+  --root "$experiment" --shared-continuation "$continuation" \
+  --output "$panel" --measure-only --gpu 0
 ```
 
 程序按原第 21 组的既定顺序评估 50 个结构。每个结构从同一胜出共享模型独立开始，在同一仿真进程内并行运行 4096 个环境，上楼、负重、跑步分别占 1366、1365、1365 个。默认做 100 次三任务联合 PPO 更新。每次每环境采 24 步，同一批数据训练 5 个 epoch，每个 epoch 分 4 个小批。
 
-训练启动时按普通 RSL-RL 的方式，在每个环境的有效步数范围内随机初始化一次回合计数，随后直接进入 PPO。过程保留总体和三项各自的 Mean reward。随机初始计数产生的首个短回合也按普通 PPO 日志口径记录。前 50 个定标结构和后 50 个搜索候选同时冻结回合计时方式、环境分配、更新预算和优化配置。
+训练启动时按普通 RSL-RL 的方式，在每个环境的有效步数范围内随机初始化一次回合计数，随后直接进入 PPO。过程保留总体和三项各自的 Mean reward。随机初始计数产生的首个短回合也按普通 PPO 日志口径记录。前 50 个初始结构和后 50 个搜索候选采用相同的回合计时方式、环境分配、更新预算和优化配置。
 
 每个结构做 3 条正式试次。三项任务统一使用固定种子 `20261118`，每项任务跑 20 秒。初始机身位置、姿态和关节状态固定，关闭观测噪声、推力、动力学随机化和动作采样。50 个结构共 150 条正式试次。名义和鲁棒步态诊断可通过独立微调入口运行。[独立跟踪评价](候选结构微调与续训.md#独立跟踪评价与固定工况-bo)
 
@@ -26,43 +45,38 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 
 **正式 BO 和蒸馏选模都以未摔倒、且沿指令方向的水平行程达到指令行程的 20% 为成功判据。** 正式 BO 每次测量完整的 20 秒，指令固定沿世界水平 +X，实际行程取该方向的净前进距离。上楼和负重至少前进 **2 m**，AMP 跑步至少前进 **6 m**。任务失败时对应代价留空，三个任务均成功才计算综合代价并参与最终排名。三项任务代价越低越好。仿真中断、场地越界或测量无效时保留诊断记录，修复后用原命令补跑该试次。
 
-净前进行程门槛属于定标和搜索的固定工况。已有按平均速度判定的定标时，用 `initialize --output` 指定新目录，后续搜索通过 `--scoring` 使用新目录中的 `scoring.json`。
+正式评估默认每 5 ms 采样一次（200 Hz），20 秒每项有 4000 个物理步。策略每 20 ms 输出一次动作。正式评分读取 `observed.absolute_mechanical_cot`，将每个物理步、每个关节的机械功率 `|τ × q̇|` 累加再积分，以整机重量（负重时含背包）乘净水平行程为分母。`observed.cot` 保存正机械 CoT，供对照。绝对机械 CoT 描述关节的驱动与制动机械功，电耗需另行测量。[TALOS 评估，式（10）](https://pmc.ncbi.nlm.nih.gov/articles/PMC8934419/)
 
-定标按任务分别进行。每个结构在某项任务上成功时，用该项正式试次的指标参与该任务定标。在该任务的合格结构中，按结构等权，通过线性插值计算每项指标的 P10 和 P90。某任务的有效结构不足两种，或某项指标的分位差为零时，程序中止定标。
+测量完成时，`measurements_completed.json` 记录 50 份结构报告及其哈希。`evaluation_timing.json` 只累计本轮最终接受的测量进程用时。
 
-先按 `z = (x − P10) / (P90 − P10)` 把指标统一到同一尺度，再按表中权重加总。每项的 P10 对应 0、P90 对应 1，参照样本中间约 80% 落在这两端之间。有效观测超出参照区间时，按同一公式保留小于 0 或大于 1 的值。**综合代价 = 0.4 × 上楼代价 + 0.3 × 负重代价 + 0.3 × 跑步代价。** 定标产物 `bo/calibration50_single_seed_ppo100_random_200hz/scoring.json` 冻结 CoT 口径、九项指标的端点、权重和可用结构数，后续候选沿用同一套参数。
+## 第二步　用原机基准冻结评分
 
-Moharir 等的第 III.B 节式（5）给出了相同的分位数缩放公式，并保留区间外数值。《综合指标构建手册》第 5.3 节说明如何使用固定参照尺度，第 6.10 节式（31）给出了线性加权。历史专家图的原始权重和分数见[专家评估记录](Rough与AMP专家评估及评分记录.md#归一化方法与文献)。[Moharir 等，AIAA AVIATION 2026](https://doi.org/10.2514/6.2026-4497) · [作者公开全文](https://www.researchgate.net/publication/406033991_A_Unified_Objective_Layer_for_Multidisciplinary_Optimization_of_Aircraft_Arrival_Trajectories) · [OECD/JRC 手册](https://doi.org/10.1787/9789264043466-en)
+每项指标按 `候选指标 ÷ 原机同一任务的对应指标` 归一化，再按表中权重相加。**综合代价 = 0.4 × 上楼代价 + 0.3 × 负重代价 + 0.3 × 跑步代价。** 原机三项任务和综合代价均为 1。候选的综合代价为 0.8 时，按这套权重比原机低 20%。50 个初始结构的原始测量用于提供 BO 观测，九项分母始终取自原机实测。固定参照和线性加权的定义见《综合指标构建手册》。[OECD/JRC 手册](https://doi.org/10.1787/9789264043466-en)
+
+原机的 `evaluation` 目录包含 `reference_protocol.json` 和 `candidate/bo_evaluation.json`。以下命令在 CPU 上核对原机和 50 份初始报告的模型、工况和微调预算，复用其原始测量。
+
+```bash
+conda run --no-capture-output -n robo_cjl python "$entry/bo.py" freeze-scoring \
+  --measurements-root "$panel" --original-rpo-reference "$reference" --output "$scoring"
+```
+
+`$scoring` 中的 `scoring.json` 冻结九项分母、权重和数据来源，`initial_observations.json` 记录 50 个结构的可行性和新评分，`completed.json` 记录评分校验信息。初始结构的旧评分产物留在原目录。
+
+## 第三步　搜索后 50 个结构
+
+```bash
+conda run --no-capture-output -n robo_cjl python "$entry/bo.py" search \
+  --root "$experiment" --shared-continuation "$continuation" \
+  --scoring "$scoring/scoring.json" --output "$search" --trials 100 --gpu 0
+```
+
+正式总预算为 **100 个结构**。前 50 个是原第 21 组的初始观测，后 50 个由 BO 逐个提议。搜索在独立目录从 `BO_TRIAL 51 / 100` 开始。旧目标下曾被选中的结构仍可以被提议，届时按本轮协议重新微调和评估。约束 GP 用已有试次学习可行性和代价，通过约束期望改进选择下一结构。候选在任一任务失败时记录为不可行，最终报告在三项任务均成功的结构中给出最低代价候选。蒸馏选模的 200 个结构已排除这 50 个初始结构。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
 
 ### 暂停、恢复与保存产物
 
-同一轮定标中断后重复原命令，人工暂停后加 `--resume-paused`。正式 BO 使用精简留存。每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的 JSON 提交与指标、最终模型及原始评估数据。`tuning/mean_reward.csv` 每代保存总体和三个任务各自的 Mean reward，`tuning/training_reward.csv` 还保存每步均值、完成回合数及回合累计回报。`tuning/training_completed.json` 记录最终 PPO 更新、训练清单和冻结模型的身份。正式结果保存在 `bo_evaluation.json`，逐条保留已提交的正式试次，恢复时继续未完成的试次。训练更新提交后释放当次的采样批次张量和临时 actor，保留扭矩审计摘要。指定 `--output` 时，恢复须使用相同目录，后续搜索用 `--scoring` 指向该目录的 `scoring.json`。
+中断后重复原命令，沿用同一输出目录和评分文件。人工暂停后加 `--resume-paused`。恢复微调时从最后一次已提交更新加载 Actor、Critic 和 Adam。仿真重新创建，按相同的随机计时规则开始新的回合，奖励曲线由更新记录接续。评估从尚未完成的试次继续。
 
-选用已完成追加蒸馏后的胜出模型时，给 `initialize`、`search` 和 `evaluate` 加同一个 `--shared-continuation <追加轮目录>`。程序核验历史回合，并按任务成功率选择共享模型。切换起始模型时，为定标和搜索各指定新的 `--output`，搜索通过 `--scoring` 指向该定标目录。已有清单只接受其绑定的模型与工况。
-
-正式评估默认每 5 ms 采样一次（200 Hz），20 秒每项有 4000 个物理步。策略每 20 ms 输出一次动作。正式评分读取 `observed.absolute_mechanical_cot`，将每个物理步、每个关节的机械功率 `|τ × q̇|` 累加再积分，以整机重量（负重时含背包）乘净水平行程为分母。`observed.cot` 保存正机械 CoT，供对照。绝对机械 CoT 描述关节的驱动与制动机械功，电耗需另行测量。[TALOS 评估，式（10）](https://pmc.ncbi.nlm.nih.gov/articles/PMC8934419/)
-
-新单种子定标默认写入 `bo/calibration50_single_seed_ppo100_random_200hz`。已有原 50 个结构的完整模型时，在 `initialize` 命令后追加 `--reuse-finetuned-panel <旧定标目录>`，通过 PPO 身份校验后只做复评。加 `--measure-only` 将测量单独保存。该面板测完并生成 `measurements_completed.json` 后，用下面这条命令校验原始报告并冻结评分。此步骤用 CPU，复用已完成的仿真和微调。
-
-```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py freeze-scoring --measurements-root robolab/logs/multitask_full2500_physical_migrated/bo/calibration50_single_seed_ppo100_random_200hz
-```
-
-进度行同时给出已完成结构数和已接受测量的累计用时。完成后在 `evaluation_timing.json` 汇总，只累计本轮最终接受的测量进程用时。复用的训练时间、旧测量、废弃尝试及暂停时间都排除。
-
-### 训练中断
-
-恢复时从最后一次已提交更新加载 Actor、Critic 和 Adam。仿真重新创建，按相同的随机计时规则开始新的回合，奖励曲线由更新记录接续。
-
-## 第二步　在冻结尺度下运行 BO
-
-```bash
-conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py search --migrated --trials 100 --gpu 0
-```
-
-正式总预算为 **100 个结构**。前 50 个是原第 21 组的定标结构，后 50 个由 BO 逐个提议。搜索先载入定标报告及其哈希，校验起始学生、结构键、微调预算和工况。每个新候选从同一个胜出模型微调后实测。约束 GP 用已有试次学习可行性和代价，通过约束期望改进选择下一结构。最终报告在三项任务均成功的结构中给出最低代价候选。增加总预算可继续同一搜索。中断后重复原命令，人工暂停加 `--resume-paused`。
-
-蒸馏选模的 200 个结构均已排除这 50 个定标结构。历史教师参考成绩保留在独立归档中；新的尺度来自本次学生微调后的测量。[固定结构与原始记录](reference/rough_amp_expert_20261121/rough/selection.json)
+每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的记录和指标、最终模型及原始评估数据。`tuning/mean_reward.csv` 保存每代总体和分任务 Mean reward，`tuning/training_reward.csv` 还保存每步均值、完成回合数及回合累计回报。`tuning/training_completed.json` 记录最终 PPO 更新和模型身份，`bo_evaluation.json` 汇总正式评估。
 
 ## 单独评估一个候选
 
@@ -72,7 +86,11 @@ conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_m
 conda run --no-capture-output -n robo_cjl python robolab/experiments/multitask_morphology/bo.py evaluate --migrated --gpu 0 --candidate 真实结构ID
 ```
 
-`evaluate` 输出单结构的固定工况测量。已有预算、初始模型和结构身份均匹配的完整微调时，可以用 `--finetuned` 复用其输出目录。使用同预算的冻结定标文件计算分数时，运行 `bo.py score <评估目录>/bo_evaluation.json --scoring <定标目录>/scoring.json`。
+`evaluate` 输出单结构的固定工况测量。复用本轮获选模型时加上 `--shared-continuation "$continuation"`。已有预算、初始模型和结构身份均匹配的完整微调时，可以用 `--finetuned` 复用其输出目录。用 `bo.py score <评估目录>/bo_evaluation.json --scoring "$scoring/scoring.json"` 计算同协议下的原机基准评分。
+
+## 附录　复现旧版 P10/P90 评分
+
+旧版评分将候选指标按 `(x − P10) / (P90 − P10)` 缩放，再按任务内权重和任务权重相加。使用原有报告和同目录的 `scoring.json` 可复算旧结果。缺少旧版评分文件时，运行 `bo.py freeze-scoring --measurements-root <旧版测量面板目录>` 恢复该口径。历史专家成绩见独立归档。[专家评估记录](Rough与AMP专家评估及评分记录.md#归一化方法与文献) · [Moharir 等，AIAA AVIATION 2026](https://doi.org/10.2514/6.2026-4497)
 
 ## 附录　导入原始 RPO 或实机测量
 
