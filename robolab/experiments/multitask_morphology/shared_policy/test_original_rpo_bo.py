@@ -11,6 +11,39 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bo
 
 
+def test_reference_protocol_accepts_archived_trailing_newline(tmp_path, monkeypatch):
+    archive = tmp_path/'archive'
+    root = tmp_path/'run'
+    archive.mkdir()
+    root.mkdir()
+    conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
+    protocol = dict(source_plan_sha256='original', initial_actor_sha256='round5',
+                    updates=100, conditions_sha256=bo.digest(conditions))
+    live_protocol = root/'reference_protocol.json'
+    bo.freeze(live_protocol, protocol)
+    archived_protocol = archive/'reference_protocol.json'
+    archived_protocol.write_bytes(live_protocol.read_bytes() + b'\n')
+    bo.freeze(root/'reference_plan.json', {})
+    key = [.25, .30, 'DM-J10010L-2EC', 'DM-J4340P-2EC']
+    bo.freeze(archive/'manifest.json', dict(
+        design_key=key, final_actor_sha256='final', raw_source_report_sha256='raw-report',
+        files_sha256={'reference_protocol.json': bo.sha(archived_protocol)},
+    ))
+    report_path = root/'candidate/bo_evaluation.json'
+    report_path.parent.mkdir()
+    report = dict(candidate=dict(structure_key=key), student_sha256='final')
+    bo.freeze(report_path, report)
+    monkeypatch.setattr(bo, 'ORIGINAL_RPO_ARCHIVE', archive)
+    monkeypatch.setattr(bo, 'initial_report', lambda *args: report)
+    monkeypatch.setattr(bo, 'checked_candidate_measurements', lambda *args: report)
+
+    checked, source = bo.checked_original_rpo_reference(root, protocol, conditions)
+    assert checked == report and source['protocol_sha256'] == bo.sha(live_protocol)
+    archived_protocol.write_bytes(b'{}')
+    with pytest.raises(ValueError, match='archived PPO'):
+        bo.checked_original_rpo_reference(root, protocol, conditions)
+
+
 @pytest.fixture
 def original_rpo_panel(tmp_path, monkeypatch):
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)

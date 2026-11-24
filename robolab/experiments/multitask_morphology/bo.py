@@ -665,9 +665,11 @@ def checked_original_rpo_reference(root, benchmark, conditions):
     archive = read(archive_path)
     protocol_path = root/'reference_protocol.json'
     protocol = read(protocol_path)
+    archived_protocol = ORIGINAL_RPO_ARCHIVE/'reference_protocol.json'
     expected = {key: benchmark[key] for key in ('source_plan_sha256', 'initial_actor_sha256', 'updates')}
     expected['conditions_sha256'] = digest(conditions)
-    if protocol != expected or sha(protocol_path) != archive['files_sha256']['reference_protocol.json']:
+    if (protocol != expected or protocol != read(archived_protocol)
+            or sha(archived_protocol) != archive['files_sha256']['reference_protocol.json']):
         raise ValueError('Original RPO reference and initial samples must share the archived PPO and measurement protocol')
     folder = root/'candidate'
     path = folder/'bo_evaluation.json'
