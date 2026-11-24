@@ -51,9 +51,7 @@ class BaseEnv(DirectRLEnv):
     cfg: BaseEnvCfg
     def __init__(self, cfg: BaseEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        self._initialize_task()
 
-    def _initialize_task(self):
         self.reward_manager = RewardManager(self.cfg.reward, self)
         print("[INFO] Reward Manager: ", self.reward_manager)
         self.contact_sensor: ContactSensor = self.scene.sensors["contact_sensor"]
@@ -204,9 +202,6 @@ class BaseEnv(DirectRLEnv):
                 self.sim.render()
             self.scene.update(dt=self.physics_dt)
 
-        return self._finish_control_step()
-
-    def _finish_control_step(self):
         self.episode_length_buf += 1
         self.common_step_counter += 1
         self.command_generator.compute(self.step_dt)
