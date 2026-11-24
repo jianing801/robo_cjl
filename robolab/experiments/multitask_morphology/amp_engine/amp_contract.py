@@ -5,10 +5,14 @@ import math
 import random
 from collections import defaultdict
 from pathlib import Path
+from amp_rough_alignment import rough_module
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
 KIND='amp_hybrid_rotating_v1'
+_schedule=rough_module('hybrid_schedule')
+single_pass_order=_schedule.single_pass_order
+stage_count=_schedule.stage_count
 LEGACY_HYBRID_SOURCE_HASHES={
     'amp_layout.py':'c52419784de1fb6759de5783a5c5bb86855e9b521529ea0a00cba4a733ee10be',
     'amp_mixed_runtime.py':'9df29380ae7a43a0e55c8ba00b97f876c5930126d72d89118104844b6db3dad7',
@@ -37,7 +41,8 @@ def validate_config(config, bank):
                 or runtime['minibatch_sampler'] not in ('group_balanced','vectorized_balanced')):
             raise ValueError('runtime must define Boolean per_design_metrics and init_at_random_ep_len, and a supported minibatch_sampler')
     g,r=config['grid'],config['rotation']
-    if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
+    fields={'active_designs','updates_per_stage','total_updates','seed'}
+    if set(r) not in (fields,fields|{'single_pass'}):raise ValueError('unknown/missing rotation fields')
     e=positive(g['num_envs'],'grid.num_envs')
     for key in ('active_designs','updates_per_stage','total_updates'):positive(r[key],'rotation.'+key)
     if type(r['seed']) is not int:raise ValueError('rotation.seed must be integer')
@@ -48,9 +53,10 @@ def validate_config(config, bank):
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
         raise ValueError('active_designs must not exceed full training library or environment count')
-    if 'group_schedule' in config:
-        from amp_rough_alignment import rough_module
-        rough_module('hybrid_schedule').load_schedule(bank,config)
+    if 'single_pass' in r:
+        _schedule.validate_single_pass(bank,config,len(designs))
+    elif 'group_schedule' in config:
+        _schedule.load_schedule(bank,config)
     return config
 
 def cycle_groups(bank, config, cycle):
@@ -102,9 +108,12 @@ def cycle_groups(bank, config, cycle):
     rng.shuffle(groups)
     return groups
 
-def stage_spec(bank,config,index):
+def stage_spec(bank,config,index,single_pass_ids=None):
     if type(index) is not int or index<0:raise ValueError('invalid stage index')
     r=config['rotation'];first=index*r['updates_per_stage']
+    if r.get('single_pass'):
+        order=single_pass_ids if single_pass_ids is not None else single_pass_order(bank,config)
+        return _schedule.single_pass_stage(config,index,order)
     if first>=r['total_updates']:raise ValueError('stage exceeds absolute total budget')
     count=math.ceil(sum(d['split']=='train' for d in bank['designs'])/r['active_designs'])
     cycle,within=divmod(index,count)
@@ -116,7 +125,7 @@ def hybrid_source_identity(config):
     sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')}
     # Older frozen expert plans were created before the isolated large-bank
     # runtime existed. Keep their source identity stable for safe resumption.
-    if 'runtime' not in config:
+    if 'runtime' not in config and not config.get('rotation',{}).get('single_pass'):
         sources.update(LEGACY_HYBRID_SOURCE_HASHES)
     return sources
 
@@ -128,9 +137,11 @@ def experiment_identity(bank_path,config,reference_library):
         full_bank_context_is_stable=True,no_forgetting_metrics=True,reference_library_sha256=sha(reference_library),
         local_assets={'native_ground.usda':sha(HERE/'native_ground.usda')},
         shared_rough_runtime_helpers=shared_runtime_sources())
-    if 'group_schedule' in config:
-        from amp_rough_alignment import rough_module
-        result['group_schedule']=rough_module('hybrid_schedule').schedule_identity(json.loads(Path(bank_path).read_text(encoding='utf8')),config)
+    if config.get('rotation',{}).get('single_pass'):
+        result['group_schedule']=dict(binding=config['group_schedule'],order='flatten_frozen_groups_once',
+                                      loader_sha256=sha(_schedule.__file__))
+    elif 'group_schedule' in config:
+        result['group_schedule']=_schedule.schedule_identity(json.loads(Path(bank_path).read_text(encoding='utf8')),config)
     if config.get('full_body_torque'):
         from amp_rough_alignment import rough_module
         result['full_body_sources']=rough_module('full_body_torque').source_identity()

@@ -23,6 +23,8 @@ MIGRATED_ROOT = REPO / 'robolab/logs/multitask_full2500_physical_migrated'
 ALIASES = {'准备': 'prepare', '参考动作': 'references', '负重': 'backpack',
            '蒸馏': 'distill', '微调': 'finetune', '状态': 'status', '录像': 'video',
            '资产': 'assets', '迁移': 'migrate'}
+SERIAL_TASKS = {'rough-serial': ('rough', 'Rough'), 'backpack-serial': ('backpack', '负重'),
+                'amp-serial': ('amp', 'AMP')}
 
 
 def read(path):
@@ -222,31 +224,50 @@ def launch_spatial_locomotion(root, gpu, task, preview=False, started_wall=None,
     run(command)
 
 
-def launch_serial_rough(root, gpu, preview=False, resume_paused=False):
-    bank = bank_path(root, 'rough')
-    config = ENTRY/'configs'/'rough_single_pass.json'
-    output, resume = select_run(root, 'serial_rough', bank_task='rough')
-    cache = prepared_cache(root, 'rough')
+def launch_serial_expert(root, gpu, action, preview=False, resume_paused=False, restart_initial=False):
+    task, label = SERIAL_TASKS[action]
+    bank = bank_path(root, task)
+    config = ENTRY/'configs'/f'{task}_single_pass.json'
+    run_key = f'serial_{task}'
+    output, resume = select_run(root, run_key, bank_task=task)
+    cache = prepared_cache(root, task)
     if cache is None or not cache.resolve().is_relative_to(root):
-        raise FileNotFoundError('请登记该 Rough 结构库的完整 USD 缓存。')
-    if resume_paused:
-        resume_expert_pause(root, 'rough', output, preview)
+        raise FileNotFoundError(f'请登记该 {label} 结构库的完整 USD 缓存。')
+    extra = []
+    if task == 'amp':
+        library = root/'references'/'library.json'
+        if not library.is_file():
+            raise FileNotFoundError(f'缺少 AMP 参考动作库：{library}')
+        extra = ['--reference-library', str(library)]
+    if not preview:
+        reject_active_expert(output, bank)
+    if restart_initial:
+        if not resume:
+            raise RuntimeError('尚无逐形态训练计划，直接启动即可。')
+        if (output/'completed.json').exists() or any((output/'commits').glob('stage_*.json')):
+            raise RuntimeError('已有逐形态训练断点，请继续已有实验。')
+        if read(output/'plan.json')['configuration'] != read(config):
+            raise RuntimeError('原逐形态配置与当前配置不一致。')
+        output = output.with_name(f'{run_key}_restart_{datetime.now():%Y%m%d_%H%M%S_%f}')
+        resume = False
+    elif resume_paused:
+        resume_expert_pause(root, task, output, preview)
     if (output/'USER_PAUSED').exists() and not (preview and resume_paused):
         raise RuntimeError('逐形态训练已暂停，恢复请加 --resume-paused。')
-    command = [sys.executable, '-u', str(ENTRY/'train.py'), '--task', 'rough',
+    command = [sys.executable, '-u', str(ENTRY/'train.py'), '--task', task,
                '--config', str(config), '--bank', str(bank), '--output-root', str(output),
                '--asset-cache', str(cache), '--device', f'cuda:{gpu}',
-               '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100', '--execute']
+               '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100', '--execute', *extra]
     if resume:
         command.append('--resume')
-    print(f"逐形态 Rough {'续训' if resume else '新训练'}目录：{output}", flush=True)
+    print(f"逐形态 {label} {'续训' if resume else '新训练'}目录：{output}", flush=True)
     if preview:
         run(command, preview=True)
         return
     output.parent.mkdir(parents=True, exist_ok=True)
-    start_task_timer(root, 'rough-serial', output, read(config)['rotation']['total_updates'],
+    start_task_timer(root, action, output, read(config)['rotation']['total_updates'],
                      ENTRY_STARTED_WALL, ENTRY_STARTED_MONOTONIC)
-    record_run(root, 'serial_rough', output, bank_task='rough')
+    record_run(root, run_key, output, bank_task=task)
     if sys.platform != 'win32':
         os.chdir(REPO)
         os.execv(sys.executable, command)
@@ -780,7 +801,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial','rough-serial','蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial',*SERIAL_TASKS,'蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -821,14 +842,15 @@ def main(argv=None):
     action = ALIASES.get(args.操作, args.操作)
     if args.root and args.migrated:
         parser.error('--root 与 --migrated 只选一个')
-    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial','rough-spatial','backpack-spatial','rough-serial') else DEFAULT_ROOT)).resolve()
+    use_migrated = args.migrated or action in ('migrate','amp-spatial','rough-spatial','backpack-spatial',*SERIAL_TASKS)
+    root = (args.root or (MIGRATED_ROOT if use_migrated else DEFAULT_ROOT)).resolve()
     if args.source_root is not None and action != 'migrate':
         parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','rough-serial','distill','finetune'):
+    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','distill','finetune',*SERIAL_TASKS):
         parser.error('--resume-paused仅用于迁移、资产准备、专家任务、蒸馏或微调')
-    if args.restart_initial and action not in ('rough','backpack','amp'):
+    if args.restart_initial and action not in ('rough','backpack','amp',*SERIAL_TASKS):
         parser.error('--restart-initial仅用于专家任务')
     if args.resume_paused and args.restart_initial:
         parser.error('续训恢复与首组重开不能同时选择')
@@ -846,8 +868,8 @@ def main(argv=None):
         task = action.removesuffix('-spatial')
         launch_spatial_locomotion(root,args.gpu,task,args.dry_run,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
         return
-    if action == 'rough-serial':
-        launch_serial_rough(root,args.gpu,args.dry_run,args.resume_paused)
+    if action in SERIAL_TASKS:
+        launch_serial_expert(root,args.gpu,action,args.dry_run,args.resume_paused,args.restart_initial)
         return
     if action == 'status':
         print('实验目录：', root)

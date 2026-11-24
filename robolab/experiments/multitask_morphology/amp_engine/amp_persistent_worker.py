@@ -12,7 +12,7 @@ sys.path[:0] = [str(HERE), str(HERE.parents[2])]
 
 
 def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_main=None):
-    from amp_contract import load_plan, stage_spec, validate_checkpoint, sha
+    from amp_contract import load_plan, single_pass_order, stage_count, stage_spec, validate_checkpoint, sha
     from amp_bank import load_configurable_bank
     from amp_support import write_new
     from amp_continuity import learned_objects
@@ -21,7 +21,8 @@ def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_mai
     spec = importlib.util.spec_from_file_location('amp_controller', HERE/'train.py')
     controller = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(controller)
-    plan = load_plan(root/'plan.json', bank_path)
+    plan_path = root/'plan.json'
+    plan = load_plan(plan_path, bank_path)
     if plan.get('execution_protocol') != 'amp_persistent_v1':
         raise ValueError('persistent AMP plan required')
     bank = load_configurable_bank(bank_path)
@@ -31,14 +32,20 @@ def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_mai
     if stage_main is None:
         from train_stage import main as stage_main
     session = {'failure_signal': result/'cleanup_failure.json'}
+    config = plan['configuration']
+    order = None
+    if config['rotation'].get('single_pass'):
+        order = single_pass_order(bank, config)
+        session['single_pass_inputs'] = (bank_path, plan_path, bank, plan, order)
+    limit = stage_count(bank, config)
     result.mkdir(parents=True, exist_ok=False)
     failed = False
     try:
-        target = plan['configuration']['rotation']['total_updates']
-        while index*plan['configuration']['rotation']['updates_per_stage'] < target:
+        target = config['rotation']['total_updates']
+        while index < limit:
             if (root/'USER_PAUSED').exists():
                 raise RuntimeError('USER_PAUSED; no next AMP group')
-            stage = stage_spec(bank, plan['configuration'], index)
+            stage = stage_spec(bank, config, index, order)
             if previous:
                 validate_checkpoint(previous, plan['experiment'], stage['first_update'])
             output = root/'attempts'/f'group_{index:06d}_{datetime.now():%Y%m%d_%H%M%S_%f}'/'result'

@@ -494,7 +494,34 @@ def test_persistent_amp_rebind_preserves_learned_state_and_clears_replay():
     with pytest.raises(ValueError,match='shapes'):rebind_group(runner,bad,torch.arange(8))
 
 
-def test_persistent_group_loop_commit_failure_resume_and_tail(tmp_path,monkeypatch):
+def test_official_amp_single_pass_assigns_two_updates_per_structure():
+    from amp_contract import single_pass_order, stage_count
+    from amp_rough_alignment import rough_module
+    configs = HERE.parent / 'configs'
+    serial = json.loads((configs / 'amp_single_pass.json').read_text(encoding='utf8'))
+    rotating = json.loads((configs / 'amp.json').read_text(encoding='utf8'))
+    assert {k: v for k, v in serial.items() if k != 'rotation'} == {
+        k: v for k, v in rotating.items() if k != 'rotation'
+    }
+    grid = serial['grid']
+    selected = rough_module('hybrid_bank').select_grid(grid, grid['knee_pool'], grid['ankle_pool'])
+    bank = dict(configuration=grid, designs=selected['designs'], task_key='run',
+                context_schema=serial['context_schema'])
+    validate_config(serial, bank)
+    order = single_pass_order(bank, serial)
+    stages = [stage_spec(bank, serial, index, order) for index in range(stage_count(bank, serial))]
+    assert len(stages) == len(order) == len(set(order)) == 2500
+    assert [stage['design_ids'][0] for stage in stages] == order
+    assert [(stage['first_update'], stage['end_update']) for stage in stages] == [
+        (index * 2, index * 2 + 2) for index in range(2500)
+    ]
+    assert stages[-1]['end_update'] == 5000
+    with pytest.raises(ValueError, match='absolute total'):
+        stage_spec(bank, serial, len(order), order)
+
+
+@pytest.mark.parametrize('single_pass', [False, True])
+def test_persistent_group_loop_commit_failure_resume_and_tail(tmp_path,monkeypatch,single_pass):
     import amp_bank
     from amp_persistent_worker import run_groups
     from amp_continuity import rebind_group
@@ -508,6 +535,11 @@ def test_persistent_group_loop_commit_failure_resume_and_tail(tmp_path,monkeypat
         reference_library=str(tmp_path/'refs'),execution_protocol='amp_persistent_v1')
     (root/'plan.json').write_text(json.dumps(plan))
     import amp_contract
+    if single_pass:
+        bank['designs'] = bank['designs'][:3]
+        cfg['rotation'].update(active_designs=1, updates_per_stage=1, single_pass=True)
+        monkeypatch.setattr(amp_contract, 'single_pass_order', lambda b, _: [d['id'] for d in b['designs']])
+        (root/'plan.json').write_text(json.dumps(plan))
     monkeypatch.setattr(amp_contract,'load_plan',lambda *a:plan)
     monkeypatch.setattr(amp_bank,'load_configurable_bank',lambda *a:bank)
     calls=[];fail=[True];sessions=[]

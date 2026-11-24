@@ -61,6 +61,41 @@ def groups_for(bank,config,cycle):
     return [g[shift:]+g[:shift] for g in value['groups']]
 
 
+def single_pass_order(bank, config):
+    """Flatten the common frozen group order into one visit per structure."""
+    grid = config['grid']
+    group_size = 2 * grid['knee_motor_count'] * grid['ankle_motor_count']
+    grouped = dict(config, rotation=dict(config['rotation'], active_designs=group_size))
+    schedule, _ = load_schedule(bank, grouped)
+    return [design for group in schedule['groups'] for design in group]
+
+
+def validate_single_pass(bank, config, design_count):
+    rotation = config['rotation']
+    if (rotation['single_pass'] is not True or rotation['active_designs'] != 1
+            or 'group_schedule' not in config
+            or rotation['total_updates'] // design_count != rotation['updates_per_stage']):
+        raise ValueError('single-pass requires one design, a frozen order and floor(total/designs) updates per stage')
+    single_pass_order(bank, config)
+
+
+def stage_count(bank, config):
+    rotation = config['rotation']
+    if rotation.get('single_pass'):
+        return sum(design['split'] == 'train' for design in bank['designs'])
+    steps = rotation['updates_per_stage']
+    return (rotation['total_updates'] + steps - 1) // steps
+
+
+def single_pass_stage(config, index, order):
+    if index >= len(order):
+        raise ValueError('stage exceeds absolute total budget')
+    base, remainder = divmod(config['rotation']['total_updates'], len(order))
+    first = index * base + min(index, remainder)
+    return dict(index=index, cycle=0, group_in_cycle=index, first_update=first,
+                end_update=first + base + (index < remainder), design_ids=[order[index]])
+
+
 def schedule_identity(bank,config):
     value,path=load_schedule(bank,config)
     return dict(kind=value['kind'],sha256=sha(path),loader_sha256=sha(__file__),

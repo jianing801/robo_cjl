@@ -5,6 +5,7 @@ import math
 import random
 from collections import defaultdict
 from pathlib import Path
+from hybrid_schedule import single_pass_order, single_pass_stage, stage_count, validate_single_pass
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
@@ -41,10 +42,7 @@ def validate_config(config, bank):
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
         raise ValueError('active_designs must not exceed full training library or environment count')
     if 'single_pass' in r:
-        if (r['single_pass'] is not True or r['active_designs']!=1 or 'group_schedule' not in config
-                or bank.get('task_key')!='stairs' or r['total_updates']//len(designs)!=r['updates_per_stage']):
-            raise ValueError('single-pass Rough requires one design, a frozen order and floor(total/designs) updates per stage')
-        single_pass_order(bank,config)
+        validate_single_pass(bank,config,len(designs))
     elif 'group_schedule' in config:
         from hybrid_schedule import load_schedule
         load_schedule(bank,config)
@@ -99,32 +97,12 @@ def cycle_groups(bank, config, cycle):
     rng.shuffle(groups)
     return groups
 
-def single_pass_order(bank,config):
-    from hybrid_schedule import load_schedule
-    grid=config['grid']
-    group_size=2*grid['knee_motor_count']*grid['ankle_motor_count']
-    grouped=dict(config,rotation=dict(config['rotation'],active_designs=group_size))
-    schedule,_=load_schedule(bank,grouped)
-    return [key for group in schedule['groups'] for key in group]
-
-
-def stage_count(bank,config):
-    rotation=config['rotation']
-    if rotation.get('single_pass'):
-        return sum(d['split']=='train' for d in bank['designs'])
-    return math.ceil(rotation['total_updates']/rotation['updates_per_stage'])
-
-
 def stage_spec(bank,config,index,single_pass_ids=None):
     if type(index) is not int or index<0:raise ValueError('invalid stage index')
     r=config['rotation'];first=index*r['updates_per_stage']
     if r.get('single_pass'):
         order=single_pass_ids if single_pass_ids is not None else single_pass_order(bank,config)
-        if index>=len(order):raise ValueError('stage exceeds absolute total budget')
-        base,extra=divmod(r['total_updates'],len(order))
-        first=index*base+min(index,extra)
-        return dict(index=index,cycle=0,group_in_cycle=index,first_update=first,
-                    end_update=first+base+(index<extra),design_ids=[order[index]])
+        return single_pass_stage(config,index,order)
     if first>=r['total_updates']:raise ValueError('stage exceeds absolute total budget')
     count=math.ceil(sum(d['split']=='train' for d in bank['designs'])/r['active_designs'])
     cycle,within=divmod(index,count)

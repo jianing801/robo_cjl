@@ -190,9 +190,11 @@ def main(argv=None):
                 write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
                 return
             previous=json.loads(commits[-1].read_text()) if commits else None
-            while index<stage_count(bank,config):
+            order=single_pass_order(bank,config) if config['rotation'].get('single_pass') else None
+            limit=stage_count(bank,config)
+            while index<limit:
                 if (root/'USER_PAUSED').exists():raise RuntimeError('paused before next stage')
-                stage=stage_spec(bank,config,index)
+                stage=stage_spec(bank,config,index,order)
                 if previous:validate_checkpoint(previous['checkpoint'],plan['experiment'],stage['first_update'])
                 attempt=root/'attempts'/f"stage_{index:06d}_{datetime.now():%Y%m%d_%H%M%S_%f}"
                 attempt.mkdir()

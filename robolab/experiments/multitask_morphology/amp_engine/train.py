@@ -12,7 +12,7 @@ import time
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
 sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl')]
-from amp_contract import experiment_identity,load_plan,stage_spec,validate_config,validate_checkpoint,sha
+from amp_contract import experiment_identity,load_plan,single_pass_order,stage_count,stage_spec,validate_config,validate_checkpoint,sha
 from amp_bank import load_configurable_bank
 from amp_support import write_new
 
@@ -83,11 +83,13 @@ def run_child(command,folder,env):
 
 def committed(root,plan,bank):
     commits=sorted((root/'commits').glob('stage_*.json'))
+    config=plan['configuration']
+    order=single_pass_order(bank,config) if commits and config['rotation'].get('single_pass') else None
     for index,path in enumerate(commits):
         if path.name != f'stage_{index:06d}.json':
             raise ValueError('noncontiguous AMP commit filenames')
         value=json.loads(path.read_text())
-        spec=stage_spec(bank,plan['configuration'],index)
+        spec=stage_spec(bank,config,index,order)
         if value['stage']!=spec:raise ValueError('committed schedule changed')
         if sha(value['checkpoint'])!=value['checkpoint_sha256']:raise ValueError('committed checkpoint hash changed')
         summary=json.loads(Path(value['summary']).read_text())
@@ -123,6 +125,8 @@ def main(argv=None):
     if not a.resume and root.exists():raise FileExistsError(f'Output already exists; use --resume only for the same experiment: {root}')
     from amp_reference_prepare import ensure_library
     library_path=Path(a.reference_library).resolve() if a.reference_library else root.parent/'references/library.json'
+    if config['rotation'].get('single_pass') and not library_path.is_file():
+        raise FileNotFoundError(f'single-pass AMP requires an existing reference library: {library_path}')
     library=ensure_library(bank,bank_path,library_path,execute=a.execute,resume=a.resume,
         python=a.hhtools_python,env_name=a.hhtools_env,source=a.hhtools_root,
         device=a.reference_device,requested_gpu=a.device,min_free_gb=a.gpu_min_free_gb,
@@ -199,9 +203,11 @@ def main(argv=None):
                 write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
                 return
             previous=json.loads(commits[-1].read_text()) if commits else None
-            while index*config['rotation']['updates_per_stage']<target:
+            order=single_pass_order(bank,config) if config['rotation'].get('single_pass') else None
+            limit=stage_count(bank,config)
+            while index<limit:
                 if (root/'USER_PAUSED').exists():raise RuntimeError('paused before next stage')
-                stage=stage_spec(bank,config,index)
+                stage=stage_spec(bank,config,index,order)
                 if previous:validate_checkpoint(previous['checkpoint'],plan['experiment'],stage['first_update'])
                 attempt=root/'attempts'/f"stage_{index:06d}_{datetime.now():%Y%m%d_%H%M%S_%f}"
                 attempt.mkdir()

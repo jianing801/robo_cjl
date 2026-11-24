@@ -47,15 +47,22 @@ def main(argv=None, session=None):
     from amp_layout import make_layout, identity
     bank_path = Path(a.bank).resolve()
     from amp_bank import KIND, load_configurable_bank
-    if json.loads(bank_path.read_text(encoding="utf8")).get("kind") != KIND:
+    from amp_contract import load_plan, stage_spec
+    inputs = session.get("single_pass_inputs") if session is not None else None
+    order = None
+    if inputs is None:
+        bank = load_configurable_bank(bank_path)
+        frozen = load_plan(a.hybrid_plan, bank_path)
+    else:
+        expected_bank, expected_plan, bank, frozen, order = inputs
+        if (bank_path, Path(a.hybrid_plan).resolve()) != (expected_bank, expected_plan):
+            raise ValueError("single-pass AMP session inputs changed")
+    if bank.get("kind") != KIND:
         raise ValueError("hybrid worker requires its independently generated hybrid bank; old banks remain untouched")
-    bank = load_configurable_bank(bank_path)
     task = bank.get("task_key", "run")
     if task != "run":
         raise ValueError("this independent copy supports AMP only")
-    from amp_contract import load_plan, stage_spec
-    frozen = load_plan(a.hybrid_plan, bank_path)
-    stage = stage_spec(bank, frozen["configuration"], a.stage_index)
+    stage = stage_spec(bank, frozen["configuration"], a.stage_index, order)
     runtime = frozen["configuration"].get("runtime", {})
     a.per_design_metrics = runtime.get("per_design_metrics", True)
     a.spatial_minibatch_sampler = runtime.get("minibatch_sampler", "group_balanced")
