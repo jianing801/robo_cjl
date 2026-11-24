@@ -169,7 +169,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
             groups=environments%len(ids);validation=last_design_copy(environments,len(ids))
             bo = TrialCapture(raw, 'run', bo_conditions, a.seed, motor_records(raw, bank, designs[0])) if bo_conditions else None
             static=torch.tensor([[v for row in graph_features(d['urdf'],names,q0) for v in row]+
-                unified_context(bank,d,plan['schema']) for d in designs],device=raw.device)
+                unified_context(bank,d,plan['schema'],reference_structure_key=plan.get('reference_structure_key'))
+                for d in designs],device=raw.device)
             io=dict(joint_names=names,default_joint_pos=q0,action_scale=.25,step_dt=.02,
                 observation_scales={k:1. for k in ('lin_vel','ang_vel','projected_gravity','commands','joint_pos','joint_vel','actions','height_scan')},
                 history_layout='frame_major_oldest_to_newest',history_width=780,**boundary_contract())

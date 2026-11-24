@@ -54,9 +54,46 @@ def schema_for(banks):
     return schema
 
 
-def unified_context(bank,design,schema):
+def check_reference_structure_key(key, schema):
+    from robolab.morphology_context import FIELDS, SCHEMA, WIDTH
+    members = schema.get('shared_structure_keys')
+    if (type(key) is not list or len(key) != 4
+            or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in key[:2])
+            or any(type(motor) is not str for motor in key[2:])):
+        raise ValueError('Reference structure requires two positive lengths and two exact motor IDs')
+    if not members or key in members:
+        raise ValueError('Reference structure must be outside the frozen actor structure intersection')
+    if (key[2] not in schema['knees'] or key[3] not in schema['ankles']
+            or schema.get('context_schema') != SCHEMA or schema.get('context_width') != WIDTH
+            or schema.get('context_fields') != list(FIELDS)):
+        raise ValueError('Reference structure is incompatible with the frozen actor physical schema')
+
+
+def reference_context(bank, design, schema, key):
+    from robolab.morphology_context import SCHEMA, WIDTH, verified_raw_context
+    check_reference_structure_key(key, schema)
+    if (list(structure_key(design)) != key or bank.get('schema_version') != 3
+            or bank.get('context_schema') != SCHEMA or bank.get('designs') != [design]):
+        raise ValueError('Reference context requires the exact singleton physical bank')
+    norm = schema.get('context_normalization', {})
+    low, high = norm.get('minimum', []), norm.get('maximum', [])
+    if (norm.get('kind') != 'training_bank_minmax_v1' or len(low) != WIDTH or len(high) != WIDTH
+            or any(not math.isfinite(lo) or not math.isfinite(hi) or hi < lo
+                   for lo, hi in zip(low, high, strict=True))):
+        raise ValueError('Missing or invalid frozen actor physical normalization')
+    values = verified_raw_context(design, bank['motor_pairs'][design['pair_id']])
+    result = [0. if hi - lo <= 1e-12 else 2. * (value - lo) / (hi - lo) - 1.
+              for value, lo, hi in zip(values, low, high, strict=True)]
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError('Nonfinite reference physical context')
+    return result
+
+
+def unified_context(bank,design,schema,*,reference_structure_key=None):
     if design['knee_motor'] not in schema['knees'] or design['ankle_motor'] not in schema['ankles']:
         raise ValueError('Design motor is outside the shared intersection')
+    if reference_structure_key is not None:
+        return reference_context(bank, design, schema, reference_structure_key)
     if 'shared_structure_keys' in schema and list(structure_key(design)) not in schema['shared_structure_keys']:
         raise ValueError('Design is outside the shared structure intersection')
     original=design['context']
@@ -155,6 +192,11 @@ def load_plan(path):
     if list(plan['teachers'])!=plan['schema']['tasks'] or plan['task_ids']!={t:i for i,t in enumerate(plan['schema']['tasks'])}:
         raise ValueError('Task order/ID mismatch')
     if sha(plan['shared_bank'])!=plan['shared_bank_sha256']:raise ValueError('Shared design bank changed')
+    reference_key = plan.get('reference_structure_key')
+    if 'reference_structure_key' in plan:
+        check_reference_structure_key(reference_key, plan['schema'])
+        if plan['selected_structure_keys'] != [reference_key]:
+            raise ValueError('Reference plan must select exactly its external reference structure')
     for teacher in plan['teachers'].values():
         if sha(teacher['checkpoint'])!=teacher['checkpoint_sha256']:raise ValueError('Teacher changed')
         if sha(teacher['bank'])!=teacher['bank_sha256']:raise ValueError('Physical bank changed')
@@ -163,6 +205,9 @@ def load_plan(path):
         bank=json.loads(Path(teacher['bank']).read_text())
         chosen={d['id']:d for d in bank['designs'] if d['id'] in teacher['design_ids']}
         if len(chosen)!=len(teacher['design_ids']):raise ValueError('Selected native teacher design missing')
+        if reference_key is not None and (len(bank['designs']) != 1 or bank.get('schema_version') != 3
+                                          or bank.get('context_schema') != plan['schema']['context_schema']):
+            raise ValueError('Reference plan requires singleton physical banks')
         keys.append({structure_key(d) for d in chosen.values()})
     if any(k!=keys[0] for k in keys) or keys[0]!={tuple(k) for k in plan['selected_structure_keys']}:
         raise ValueError('Tasks must use exactly the same paired structure library')

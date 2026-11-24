@@ -1,0 +1,15 @@
+{
+  "context_schema": "leg_motor_inertia_v1",
+  "grid": {
+    "num_envs": 4096,
+    "length_count": 1,
+    "thigh_range_m": [0.24, 0.26],
+    "calf_range_m": [0.29, 0.31],
+    "knee_motor_count": 1,
+    "ankle_motor_count": 1,
+    "motor_seed": 42,
+    "knee_pool": ["DM-J10010L-2EC"],
+    "ankle_pool": ["DM-J4340P-2EC"],
+    "gp_extrapolation": true
+  }
+}

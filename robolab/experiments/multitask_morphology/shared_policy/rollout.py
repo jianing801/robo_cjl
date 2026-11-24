@@ -385,7 +385,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
             static=[]
             for design in designs:
                 graph=graph_features(design['urdf'],names,bank['canonical_semantic_contract']['default_joint_pos'])
-                static.append([v for row in graph for v in row]+unified_context(bank,design,plan['schema']))
+                static.append([v for row in graph for v in row]+unified_context(bank,design,plan['schema'],
+                    reference_structure_key=plan.get('reference_structure_key')))
             static=torch.tensor(static,device=raw.device,dtype=torch.float32)
             io=dict(joint_names=names,default_joint_pos=expected.cpu().tolist(),action_scale=float(raw.action_scale),
                 step_dt=raw.step_dt,observation_scales={k:float(v) for k,v in vars(raw.obs_scales).items() if isinstance(v,(int,float))},

@@ -1,0 +1,4 @@
+# Preserve the archived bytes for the SHA-256 manifest on every platform.
+*.json -text
+*.csv -text
+*.npz -text
