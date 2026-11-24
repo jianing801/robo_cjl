@@ -69,17 +69,24 @@ def main(argv=None, session=None):
     from hybrid_layout import make_layout, identity
     bank_path = Path(a.bank).resolve()
     from hybrid_bank import KIND, load_configurable_bank
-    if json.loads(bank_path.read_text(encoding="utf8")).get("kind") != KIND:
+    from hybrid_contract import load_plan, stage_spec
+    inputs = session.get("single_pass_inputs") if session is not None else None
+    order = None
+    if inputs is None:
+        bank = load_configurable_bank(bank_path)
+        frozen = load_plan(a.hybrid_plan, bank_path)
+    else:
+        expected_bank, expected_plan, bank, frozen, order = inputs
+        if (bank_path, Path(a.hybrid_plan).resolve()) != (expected_bank, expected_plan):
+            raise ValueError("single-pass session inputs changed")
+    if bank.get("kind") != KIND:
         raise ValueError("hybrid worker requires its independently generated hybrid bank; old banks remain untouched")
-    bank = load_configurable_bank(bank_path)
     task = bank.get("task_key", "stairs")
     if task not in ("stairs", "backpack"):
         raise ValueError("this independent copy supports Rough only")
-    from hybrid_contract import load_plan, stage_spec
-    frozen = load_plan(a.hybrid_plan, bank_path)
     a.torque_soft_constraint = frozen['configuration'].get('torque_soft_constraint')
     a.full_body_torque = frozen['configuration'].get('full_body_torque', False)
-    stage = stage_spec(bank, frozen["configuration"], a.stage_index)
+    stage = stage_spec(bank, frozen["configuration"], a.stage_index, order)
     if a.design_ids is not None and a.design_ids != stage["design_ids"]:
         raise ValueError("CLI design IDs differ from frozen schedule")
     a.design_ids = stage["design_ids"]

@@ -64,9 +64,9 @@ def ensure_banks(root, preview=False):
          '--template', template, '--mesh-dir', meshes, '--generate-assets'], preview=preview)
 
 
-def select_run(root, task):
+def select_run(root, task, *, bank_task=None):
     """兼容之前手动启动的目录；优先使用本入口记下的任务目录。"""
-    bank = bank_path(root, task).resolve()
+    bank = bank_path(root, bank_task or task).resolve()
     state = root / '启动记录' / f'{task}.json'
     if state.is_file():
         selected = Path(read(state)['output']).resolve()
@@ -222,9 +222,40 @@ def launch_spatial_locomotion(root, gpu, task, preview=False, started_wall=None,
     run(command)
 
 
-def record_run(root, task, output):
+def launch_serial_rough(root, gpu, preview=False, resume_paused=False):
+    bank = bank_path(root, 'rough')
+    config = ENTRY/'configs'/'rough_single_pass.json'
+    output, resume = select_run(root, 'serial_rough', bank_task='rough')
+    cache = prepared_cache(root, 'rough')
+    if cache is None or not cache.resolve().is_relative_to(root):
+        raise FileNotFoundError('请登记该 Rough 结构库的完整 USD 缓存。')
+    if resume_paused:
+        resume_expert_pause(root, 'rough', output, preview)
+    if (output/'USER_PAUSED').exists() and not (preview and resume_paused):
+        raise RuntimeError('逐形态训练已暂停，恢复请加 --resume-paused。')
+    command = [sys.executable, '-u', str(ENTRY/'train.py'), '--task', 'rough',
+               '--config', str(config), '--bank', str(bank), '--output-root', str(output),
+               '--asset-cache', str(cache), '--device', f'cuda:{gpu}',
+               '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100', '--execute']
+    if resume:
+        command.append('--resume')
+    print(f"逐形态 Rough {'续训' if resume else '新训练'}目录：{output}", flush=True)
+    if preview:
+        run(command, preview=True)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    start_task_timer(root, 'rough-serial', output, read(config)['rotation']['total_updates'],
+                     ENTRY_STARTED_WALL, ENTRY_STARTED_MONOTONIC)
+    record_run(root, 'serial_rough', output, bank_task='rough')
+    if sys.platform != 'win32':
+        os.chdir(REPO)
+        os.execv(sys.executable, command)
+    run(command)
+
+
+def record_run(root, task, output, *, bank_task=None):
     folder = root/'启动记录'; folder.mkdir(exist_ok=True)
-    value = dict(output=str(output.resolve()), bank=str(bank_path(root, task).resolve()))
+    value = dict(output=str(output.resolve()), bank=str(bank_path(root, bank_task or task).resolve()))
     tmp = folder/f'{task}.{os.getpid()}.tmp'
     tmp.write_text(json.dumps(value, ensure_ascii=False), encoding='utf8')
     os.replace(tmp, folder/f'{task}.json')
@@ -749,7 +780,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial','蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial','rough-serial','蒸馏','微调','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -790,12 +821,12 @@ def main(argv=None):
     action = ALIASES.get(args.操作, args.操作)
     if args.root and args.migrated:
         parser.error('--root 与 --migrated 只选一个')
-    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial','rough-spatial','backpack-spatial') else DEFAULT_ROOT)).resolve()
+    root = (args.root or (MIGRATED_ROOT if args.migrated or action in ('migrate','amp-spatial','rough-spatial','backpack-spatial','rough-serial') else DEFAULT_ROOT)).resolve()
     if args.source_root is not None and action != 'migrate':
         parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','distill','finetune'):
+    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','rough-serial','distill','finetune'):
         parser.error('--resume-paused仅用于迁移、资产准备、专家任务、蒸馏或微调')
     if args.restart_initial and action not in ('rough','backpack','amp'):
         parser.error('--restart-initial仅用于专家任务')
@@ -814,6 +845,9 @@ def main(argv=None):
     if action in ('rough-spatial', 'backpack-spatial'):
         task = action.removesuffix('-spatial')
         launch_spatial_locomotion(root,args.gpu,task,args.dry_run,ENTRY_STARTED_WALL,ENTRY_STARTED_MONOTONIC)
+        return
+    if action == 'rough-serial':
+        launch_serial_rough(root,args.gpu,args.dry_run,args.resume_paused)
         return
     if action == 'status':
         print('实验目录：', root)

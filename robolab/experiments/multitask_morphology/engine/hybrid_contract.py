@@ -28,7 +28,8 @@ def validate_config(config, bank):
     from hybrid_torque import validate_settings
     validate_settings(config.get('torque_soft_constraint'))
     g,r=config['grid'],config['rotation']
-    if set(r)!={'active_designs','updates_per_stage','total_updates','seed'}:raise ValueError('unknown/missing rotation fields')
+    fields={'active_designs','updates_per_stage','total_updates','seed'}
+    if set(r) not in (fields,fields|{'single_pass'}):raise ValueError('unknown/missing rotation fields')
     e=positive(g['num_envs'],'grid.num_envs')
     for key in ('active_designs','updates_per_stage','total_updates'):positive(r[key],'rotation.'+key)
     if type(r['seed']) is not int:raise ValueError('rotation.seed must be integer')
@@ -39,7 +40,12 @@ def validate_config(config, bank):
     if len({d['id'] for d in designs})!=len(designs):raise ValueError('duplicate designs')
     if not designs or r['active_designs']>len(designs) or r['active_designs']>e:
         raise ValueError('active_designs must not exceed full training library or environment count')
-    if 'group_schedule' in config:
+    if 'single_pass' in r:
+        if (r['single_pass'] is not True or r['active_designs']!=1 or 'group_schedule' not in config
+                or bank.get('task_key')!='stairs' or r['total_updates']//len(designs)!=r['updates_per_stage']):
+            raise ValueError('single-pass Rough requires one design, a frozen order and floor(total/designs) updates per stage')
+        single_pass_order(bank,config)
+    elif 'group_schedule' in config:
         from hybrid_schedule import load_schedule
         load_schedule(bank,config)
     return config
@@ -93,9 +99,32 @@ def cycle_groups(bank, config, cycle):
     rng.shuffle(groups)
     return groups
 
-def stage_spec(bank,config,index):
+def single_pass_order(bank,config):
+    from hybrid_schedule import load_schedule
+    grid=config['grid']
+    group_size=2*grid['knee_motor_count']*grid['ankle_motor_count']
+    grouped=dict(config,rotation=dict(config['rotation'],active_designs=group_size))
+    schedule,_=load_schedule(bank,grouped)
+    return [key for group in schedule['groups'] for key in group]
+
+
+def stage_count(bank,config):
+    rotation=config['rotation']
+    if rotation.get('single_pass'):
+        return sum(d['split']=='train' for d in bank['designs'])
+    return math.ceil(rotation['total_updates']/rotation['updates_per_stage'])
+
+
+def stage_spec(bank,config,index,single_pass_ids=None):
     if type(index) is not int or index<0:raise ValueError('invalid stage index')
     r=config['rotation'];first=index*r['updates_per_stage']
+    if r.get('single_pass'):
+        order=single_pass_ids if single_pass_ids is not None else single_pass_order(bank,config)
+        if index>=len(order):raise ValueError('stage exceeds absolute total budget')
+        base,extra=divmod(r['total_updates'],len(order))
+        first=index*base+min(index,extra)
+        return dict(index=index,cycle=0,group_in_cycle=index,first_update=first,
+                    end_update=first+base+(index<extra),design_ids=[order[index]])
     if first>=r['total_updates']:raise ValueError('stage exceeds absolute total budget')
     count=math.ceil(sum(d['split']=='train' for d in bank['designs'])/r['active_designs'])
     cycle,within=divmod(index,count)
@@ -109,7 +138,9 @@ def experiment_identity(bank_path,config):
     result = dict(kind=KIND,task=task,bank_sha256=sha(bank_path),configuration=config,
         native_sources=source_identity(task),hybrid_sources={p.name:sha(p) for p in sorted(HERE.glob('*.py')) if not p.name.startswith('test_')},
         full_bank_context_is_stable=True,no_forgetting_metrics=True)
-    if 'group_schedule' in config:
+    if config['rotation'].get('single_pass'):
+        result['group_schedule']=dict(binding=config['group_schedule'],order='flatten_frozen_groups_once')
+    elif 'group_schedule' in config:
         from hybrid_schedule import schedule_identity
         result['group_schedule']=schedule_identity(json.loads(Path(bank_path).read_text(encoding='utf8')),config)
     if config.get('full_body_torque'):

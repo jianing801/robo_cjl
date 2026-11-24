@@ -12,11 +12,12 @@ sys.path[:0]=[str(HERE),str(HERE.parents[2])]
 
 
 def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_main=None):
-    from hybrid_contract import load_plan,stage_spec,validate_checkpoint,sha
+    from hybrid_contract import load_plan,single_pass_order,stage_count,stage_spec,validate_checkpoint,sha
     from hybrid_bank import load_configurable_bank
     from hybrid_support import write_new
     from train import committed
-    plan=load_plan(root/'plan.json',bank_path)
+    plan_path=root/'plan.json'
+    plan=load_plan(plan_path,bank_path)
     if plan.get('execution_protocol')!='persistent_v1':raise ValueError('persistent plan required')
     bank=load_configurable_bank(bank_path)
     rows=committed(root,plan,bank)
@@ -25,12 +26,18 @@ def run_groups(root, bank_path, result, kit_args='', asset_cache=None, stage_mai
     if stage_main is None:
         from train_stage import main as stage_main
     session={'failure_signal': result/'cleanup_failure.json'}
+    config=plan['configuration']
+    serial_order=None
+    if config['rotation'].get('single_pass'):
+        serial_order=single_pass_order(bank,config)
+        session['single_pass_inputs']=(bank_path,plan_path,bank,plan,serial_order)
+    limit=stage_count(bank,config)
     failed=False
     result.mkdir(parents=True,exist_ok=False)
     try:
-        while index*plan['configuration']['rotation']['updates_per_stage']<plan['configuration']['rotation']['total_updates']:
+        while index<limit:
             if (root/'USER_PAUSED').exists():raise RuntimeError('USER_PAUSED; no next group')
-            stage=stage_spec(bank,plan['configuration'],index)
+            stage=stage_spec(bank,config,index,serial_order)
             if previous:validate_checkpoint(previous,plan['experiment'],stage['first_update'])
             output=root/'attempts'/f'group_{index:06d}_{datetime.now():%Y%m%d_%H%M%S_%f}'/'result'
             args=['--bank',str(bank_path),'--hybrid-plan',str(root/'plan.json'),'--stage-index',str(index),

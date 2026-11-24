@@ -12,7 +12,7 @@ import time
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
 sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl')]
-from hybrid_contract import experiment_identity,load_plan,stage_spec,validate_config,validate_checkpoint,sha
+from hybrid_contract import experiment_identity,load_plan,single_pass_order,stage_count,stage_spec,validate_config,validate_checkpoint,sha
 from hybrid_bank import load_configurable_bank
 from hybrid_support import write_new
 
@@ -86,10 +86,12 @@ def run_child(command,folder,env):
 
 def committed(root,plan,bank):
     commits=sorted((root/'commits').glob('stage_*.json'))
+    config=plan['configuration']
+    order=single_pass_order(bank,config) if commits and config['rotation'].get('single_pass') else None
     for index,path in enumerate(commits,start=plan.get('start_stage',0)):
         if path.name != f'stage_{index:06d}.json':raise ValueError('noncontiguous commit filenames')
         value=json.loads(path.read_text())
-        spec=stage_spec(bank,plan['configuration'],index)
+        spec=stage_spec(bank,config,index,order)
         if value['stage']!=spec:raise ValueError('committed schedule changed')
         if sha(value['checkpoint'])!=value['checkpoint_sha256']:raise ValueError('committed checkpoint hash changed')
         summary=json.loads(Path(value['summary']).read_text())
@@ -188,7 +190,7 @@ def main(argv=None):
                 write_new(root/'completed.json',dict(completed_updates=target,checkpoint=last['checkpoint'],requires_gait_evaluation=True))
                 return
             previous=json.loads(commits[-1].read_text()) if commits else None
-            while index*config['rotation']['updates_per_stage']<target:
+            while index<stage_count(bank,config):
                 if (root/'USER_PAUSED').exists():raise RuntimeError('paused before next stage')
                 stage=stage_spec(bank,config,index)
                 if previous:validate_checkpoint(previous['checkpoint'],plan['experiment'],stage['first_update'])
