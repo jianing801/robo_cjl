@@ -223,12 +223,16 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     teacher_priors = {task.name:task.training_prior['expert_prior'] for task in tasks}
     learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
                                    adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK)
+    if getattr(a,'experimental_profile','native') in ('fixed_amp_std','fixed_amp_std_pcgrad'):
+        learner.fix_expert_std(('run',))
+    learner.actor_projection = getattr(a,'experimental_profile','native') == 'fixed_amp_std_pcgrad'
     expected_hashes = {name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS}
     write_new(attempt/'expert_prior_audit.json', dict(initial_actor_sha256=sha(a.student),
         tasks=verify_expert_initialization(tasks, learner, adapter, expected_hashes)))
     print('NATIVE_EXPERT_PRIORS_VERIFIED',
           {task:float(learner.policy.std[i].detach().mean()) for i,task in enumerate(TASKS)},flush=True)
     restored = load_native_checkpoint(root, learner, digest)
+    learner.verify_fixed_std()
     if restored is not None and restored['completed_updates'] != completed:
         raise ValueError('Restored native learning state differs from its committed update')
     retain_updates = {0, a.updates, *[i for i in (100, 200, 500, 800, 1000) if i <= a.updates]}
@@ -291,6 +295,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         torch.cuda.synchronize(a.device)
         collected = time.monotonic()
         reward_summary = rewards.summarize(batches, attempt.name)
+        learner.inspect_actor_gradients = getattr(a,'experimental_profile','native') != 'native' and update % 25 == 0
         metrics = learner.compute_returns_and_update(next_obs)
         torch.cuda.synchronize(a.device)
         metrics.update(collection_seconds=collected-begin, update_seconds=time.monotonic()-collected,
@@ -310,7 +315,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
 
 
 def main():
-    from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS
+    from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, CORRECTION_PROFILES, correction_settings
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -328,6 +333,8 @@ def main():
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-paused', action='store_true')
     parser.add_argument('--compact-training-artifacts', action='store_true')
+    parser.add_argument('--experimental-profile', choices=CORRECTION_PROFILES, default='native',
+                        help='Isolated correction study; non-native settings are not valid formal BO scoring')
     AppLauncher.add_app_launcher_args(parser)
     a = parser.parse_args()
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
@@ -346,12 +353,14 @@ def main():
     manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
-              ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS,
+              ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=correction_settings(a.experimental_profile),
               teacher_checkpoint_sha256={name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS},
               init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
               compact_training_artifacts=a.compact_training_artifacts,
               sources={name: sha(HERE/name) for name in files})
+    if a.experimental_profile != 'native':
+        manifest['experimental_profile'] = a.experimental_profile
     with run_lock(root):
         if a.resume or a.resume_paused:
             if (json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest

@@ -28,6 +28,21 @@ PPO_NATIVE_CONFIG = dict(learning_rate=LEARNING_RATE, schedule='adaptive', desir
 CRITIC_HIDDEN = (512, 256, 128)
 
 
+def project_actor_gradients(gradients):
+    """PCGrad on task contributions; cyclic order avoids altering rollout RNG."""
+    if gradients.ndim != 2 or gradients.shape[0] != len(TASKS):
+        raise ValueError('Expected three flattened Actor gradients')
+    projected=[]
+    for i in range(len(TASKS)):
+        g=gradients[i]
+        for shift in range(1,len(TASKS)):
+            other=gradients[(i+shift)%len(TASKS)]
+            dot=torch.dot(g,other)
+            g=g-torch.minimum(dot,torch.zeros_like(dot))*other/torch.dot(other,other).clamp_min(1e-30)
+        projected.append(g)
+    return torch.stack(projected).sum(0)
+
+
 def _task_tuple(values):
     result = tuple(values[k] for k in TASKS) if isinstance(values, Mapping) else tuple(values)
     if len(result) != len(TASKS) or any(type(v) is not int or v < 1 for v in result):
@@ -206,6 +221,61 @@ class NativeMixedPPO(PPOAMP):
         self.task_entropy = torch.tensor(TASK_ENTROPY, device=self.device)
         self.task_ids = torch.arange(len(TASKS), device=self.device).repeat_interleave(
             torch.tensor(self.counts, device=self.device)).reshape(-1, 1)
+        self._fixed_std = None
+        self.actor_projection = False
+        self.inspect_actor_gradients = False
+        self._gradient_records = []
+
+    def fix_expert_std(self, tasks):
+        """Freeze only the requested exact expert std rows, keeping native PPO."""
+        if self._fixed_std is not None or not tasks or not set(tasks).issubset(TASKS):
+            raise ValueError('Invalid fixed exploration task selection')
+        if self.optimizer.state:
+            raise ValueError('Fixed exploration must be configured before optimizer updates or restore')
+        row_ids = [TASKS.index(task) for task in tasks]
+        parameter = self.policy.std
+        mask = torch.ones_like(parameter)
+        mask[row_ids] = 0.
+        self._fixed_std = (row_ids, parameter.detach()[row_ids].clone())
+        parameter.register_hook(lambda grad: grad * mask)
+
+    def verify_fixed_std(self):
+        if self._fixed_std is not None:
+            row_ids, expected = self._fixed_std
+            if not torch.equal(self.policy.std.detach()[row_ids], expected):
+                raise ValueError('Frozen expert exploration changed during PPO or resume')
+
+    def _backward_policy_loss(self, loss, obs_batch, surrogate_elements, mirror_pairs, original_batch_size):
+        inspect = self.inspect_actor_gradients and not self._gradient_records
+        if self.critic_only or not (self.actor_projection or inspect):
+            return super()._backward_policy_loss(loss, obs_batch, surrogate_elements, mirror_pairs, original_batch_size)
+        params = tuple(self.policy.actor.parameters())
+        ids = obs_batch['task_id'][:,0]
+        terms = surrogate_elements.reshape(-1)
+        if len(terms)!=len(ids): raise ValueError('PPO actor loss/task routing differs')
+        mirror = None if mirror_pairs is None else (mirror_pairs[0]-mirror_pairs[1]).square().mean(-1)
+        gradients=[]
+        for i in range(len(TASKS)):
+            mask=ids==i
+            if not mask.any(): raise ValueError('A mixed Actor minibatch lacks a task')
+            objective=terms[mask].sum()/len(terms)
+            if mirror is not None:
+                mirror_ids=ids[original_batch_size:]
+                if len(mirror)!=len(mirror_ids): raise ValueError('Mirror gradient/task routing differs')
+                objective=objective+self.symmetry['mirror_loss_coeff']*mirror[mirror_ids==i].sum()/len(mirror)
+            values=torch.autograd.grad(objective,params,retain_graph=True)
+            gradients.append(torch.cat([v.detach().reshape(-1) for v in values]))
+        flat=torch.stack(gradients)
+        if inspect:
+            norms=flat.norm(dim=1)
+            cosine=(flat@flat.T)/(norms[:,None]*norms[None,:]).clamp_min(1e-30)
+            self._gradient_records.append(dict(norms=norms.tolist(),cosine=cosine.tolist()))
+        replacement=project_actor_gradients(flat) if self.actor_projection else None
+        loss.backward()
+        if replacement is not None:
+            offset=0
+            for p in params:
+                p.grad.copy_(replacement[offset:offset+p.numel()].view_as(p));offset+=p.numel()
 
     def _entropy_regularization(self, obs_batch, entropy_batch):
         return (entropy_batch * self.task_entropy[obs_batch['task_id'].squeeze(-1)]).mean()
@@ -262,6 +332,7 @@ class NativeMixedPPO(PPOAMP):
             for part, target in zip(raw_advantages.split(self.counts, dim=1),
                                     self.storage.advantages.split(self.counts, dim=1), strict=True):
                 target.copy_((part - part.mean()) / (part.std(unbiased=part.numel() > 1) + 1.e-8))
+        self._gradient_records=[]
         if critic_only:
             # Native PPO's value loss/clipping and data augmentation remain
             # active. No actor, std or discriminator optimization, and a fixed
@@ -276,10 +347,13 @@ class NativeMixedPPO(PPOAMP):
                 self.schedule, self.entropy_coef, self.symmetry = schedule, entropy, symmetry
         else:
             result = PPOAMP.update(self)
+        self.verify_fixed_std()
         self.policy._require_positive_std()
         result.update(samples=self.storage.num_transitions_per_env * sum(self.counts),
             learning_rate=float(self.learning_rate), mean_action_std=float(self.policy.std.detach().mean()),
             tasks=self._task_diagnostics(), critic_only=bool(critic_only))
+        if self._gradient_records:
+            result['actor_gradient_sample']=self._gradient_records[0]
         if not all(math.isfinite(v) for v in result.values() if isinstance(v,(int,float))):
             raise ValueError('Nonfinite native PPO statistics')
         if any(not torch.isfinite(p).all() for p in self.policy.parameters()):

@@ -331,6 +331,7 @@ def main(argv=None):
     for name in ('shared','eval100','native-checkout','output'): parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--gpu',type=int,default=0);parser.add_argument('--wait-pid',type=int);parser.add_argument('--wait-create-time',type=float)
     parser.add_argument('--prepare-only',action='store_true');parser.add_argument('--resume-paused',action='store_true')
+    parser.add_argument('--corrected-selection',type=Path,help='Validated alternative 1000-update Actor; preserve the original native expert plans/checkpoints')
     a=parser.parse_args(argv)
     for name in ('shared','eval100','native_checkout','output'): setattr(a,name,getattr(a,name).resolve())
     if (a.wait_pid is None)!=(a.wait_create_time is None): parser.error('Both shared process PID and creation time are required')
@@ -339,6 +340,12 @@ def main(argv=None):
     signal.signal(signal.SIGTERM,pause);signal.signal(signal.SIGINT,pause)
     with run_lock(a.output):
         try:
+            corrected_actor=None
+            if a.corrected_selection is not None:
+                from ppo_correction_study import verified_selection
+                a.corrected_selection=a.corrected_selection.resolve()
+                if not (a.output/'manifest.json').is_file():raise ValueError('Corrected comparison must preserve an existing native expert run')
+                corrected_actor=verified_selection(a.corrected_selection,a.shared)
             resume_pause(a.output,a.resume_paused);check_pause(a.output)
             assert_no_live_workers(a.output)
             tuning=a.shared/'tuning'; origin=read(a.shared/'manifest.json');manifest=read(tuning/'manifest.json')
@@ -351,11 +358,16 @@ def main(argv=None):
             if file_sha(norm_path)!=archive['files_sha256']['normalization.json']: raise ValueError('Frozen normalization changed')
             commit=subprocess.check_output(['git','-C',str(a.native_checkout),'rev-parse','HEAD'],text=True).strip()
             controller_commit=subprocess.check_output(['git','-C',str(HERE.parents[2]),'rev-parse','HEAD'],text=True).strip()
+            previous=read(a.output/'manifest.json') if corrected_actor is not None else None
             freeze(a.output/'manifest.json',dict(kind='rpo_original_singleton_expert_comparison',shared=str(a.shared),
                    shared_manifest_sha256=file_sha(tuning/'manifest.json'),candidate_plan_sha256=file_sha(plan_path),
                    native_checkout=str(a.native_checkout),native_commit=commit,budgets=TASK_BUDGETS,
-                   controller_commit=controller_commit,
+                   controller_commit=previous['controller_commit'] if previous is not None else controller_commit,
                    normalization_sha256=file_sha(norm_path),conditions_sha256=bo.digest(bo.read_conditions(bo.PHYSICS_CONDITIONS))))
+            if corrected_actor is not None:
+                freeze(a.output/'corrected_comparison.json',dict(selection=str(a.corrected_selection),
+                       selection_sha256=file_sha(a.corrected_selection),actor_sha256=file_sha(corrected_actor),
+                       controller_commit=controller_commit))
             prepare_all(a,plan)
             if a.prepare_only: status(a.output,'prepared_no_training');return
             if (a.output/'completed.json').is_file(): status(a.output,'already_complete');return
@@ -363,6 +375,7 @@ def main(argv=None):
             actor=bo.completed_actor_from_hashes(tuning,manifest['plan_sha256'],manifest['initial_actor_sha256'],
                    manifest['candidate'],1000,ppo_schedule=bo.PPO_SCHEDULE,mixed_bo=True,ppo_algorithm=bo.NATIVE_PPO_ALGORITHM)
             if file_sha(actor)!=read(a.shared/'status.json')['final_actor_sha256']: raise ValueError('Shared final Actor identity changed')
+            if corrected_actor is not None:actor=corrected_actor
             experts={t:train_one(a,t,plan) for t in TASKS}
             expert_plan=deepcopy(plan)
             for task,record in experts.items():

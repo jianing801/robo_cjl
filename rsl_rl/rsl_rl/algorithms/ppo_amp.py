@@ -119,6 +119,10 @@ class PPOAMP(PPO):
     def _entropy_regularization(self, obs_batch: TensorDict, entropy_batch: torch.Tensor) -> torch.Tensor:
         """Default native entropy bonus; mixed-task learners may weight it by task."""
         return self.entropy_coef * entropy_batch.mean()
+
+    def _backward_policy_loss(self, loss, obs_batch, surrogate_elements, mirror_pairs, original_batch_size):
+        """Default native backward; experimental multi-task actor may override."""
+        loss.backward()
         
     def process_env_step(
         self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
@@ -259,7 +263,8 @@ class PPOAMP(PPO):
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            surrogate_elements = torch.max(surrogate, surrogate_clipped)
+            surrogate_loss = surrogate_elements.mean()
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -277,6 +282,7 @@ class PPOAMP(PPO):
             )
 
             # Symmetry loss
+            mirror_pairs = None
             if self.symmetry:
                 # Obtain the symmetric actions
                 # Note: If we did augmentation before then we don't need to augment again
@@ -306,6 +312,7 @@ class PPOAMP(PPO):
                 # Add the loss to the total loss
                 if self.symmetry["use_mirror_loss"]:
                     loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
+                    mirror_pairs = (mean_actions_batch[original_batch_size:], actions_mean_symm_batch.detach()[original_batch_size:])
                 else:
                     symmetry_loss = symmetry_loss.detach()
 
@@ -363,7 +370,7 @@ class PPOAMP(PPO):
 
             # Compute the gradients for PPO
             self.optimizer.zero_grad()
-            loss.backward()
+            self._backward_policy_loss(loss, obs_batch, surrogate_elements, mirror_pairs, original_batch_size)
             # Compute the gradients for RND
             if self.rnd:
                 self.rnd_optimizer.zero_grad()

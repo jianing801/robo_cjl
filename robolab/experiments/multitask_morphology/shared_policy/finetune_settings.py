@@ -39,3 +39,16 @@ del NATIVE_PPO_SETTINGS['initial_noise_std'], NATIVE_PPO_SETTINGS['critic_hidden
 
 NATIVE_PPO_PROFILES = {NATIVE_PPO_ALGORITHM_V3: NATIVE_PPO_SETTINGS_V3,
                        NATIVE_PPO_ALGORITHM: NATIVE_PPO_SETTINGS}
+
+CORRECTION_PROFILES = ('native', 'fixed_amp_std', 'fixed_amp_std_pcgrad')
+
+
+def correction_settings(profile):
+    """Ablation identities cannot qualify as the unchanged official BO setup."""
+    if profile == 'native':
+        return dict(NATIVE_PPO_SETTINGS)
+    if profile == 'fixed_amp_std':
+        return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'])
+    if profile == 'fixed_amp_std_pcgrad':
+        return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic')
+    raise ValueError(f'Unknown experimental PPO profile: {profile}')
