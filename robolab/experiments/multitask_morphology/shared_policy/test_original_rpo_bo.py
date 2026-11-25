@@ -1,6 +1,7 @@
 """Regression tests for frozen original-RPO ratios in the 200 Hz BO search."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 
@@ -64,6 +65,10 @@ def original_rpo_panel(tmp_path, monkeypatch):
     actor.write_bytes(b'test selected actor')
     protocol = dict(bo.read(archive/'reference_protocol.json'),
                     source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor))
+    if protocol.get('ppo_algorithm') is not None:
+        reference_report['ppo_algorithm'] = protocol['ppo_algorithm']
+        # Synthetic fixture authority, not the repository's byte-proven archive.
+        reference_path.write_text(json.dumps(reference_report), encoding='utf8')
     protocol_path = reference/'reference_protocol.json'
     bo.freeze(protocol_path, protocol)
     provenance = dict(root=str(reference), report_sha256=bo.sha(reference_path),
@@ -117,7 +122,7 @@ def test_freezes_reference_ratios_from_verified_200_hz_measurements(original_rpo
     panel, reference, output, conditions, benchmark, reports, reference_report = original_rpo_panel
     old = {path: bo.sha(path) for path in (panel/'scoring.json', panel/'completed.json',
                                          panel/'manifest.json', panel/'measurements_completed.json')}
-    bo.freeze_original_rpo_scoring(panel, reference, output)
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='three')
     scoring_path = output/'scoring.json'
     scoring = bo.read(scoring_path)
     assert scoring['method'] == bo.ORIGINAL_RPO_SCORING_METHOD
@@ -131,7 +136,7 @@ def test_freezes_reference_ratios_from_verified_200_hz_measurements(original_rpo
     baseline = bo.objective(reference_report, scoring)
     assert baseline['mean_objective'] == 1.
     assert baseline['observations'][0]['task_objectives'] == dict.fromkeys(bo.TASKS, 1.)
-    assert scoring['metrics']['stairs']['cot']['baseline'] == pytest.approx(1.4626239251672708)
+    assert scoring['metrics']['stairs']['cot']['baseline'] == pytest.approx(reference_report['pairs'][0]['tasks']['stairs']['observed']['absolute_mechanical_cot'])
     assert bo.objective(reports[0], scoring)['mean_objective'] == pytest.approx(.4*.65 + .3*.85 + .3*.95)
     failure = bo.objective(reports[-1], scoring)
     assert failure['mean_objective'] is None
@@ -156,7 +161,7 @@ FOUR_WEIGHTS = dict(stairs=(.25, .25, .40, .10), backpack=(.40, .25, .20, .15),
 def test_four_metric_profile_freezes_all_observed_ratios_without_touching_old_data(original_rpo_panel):
     panel, reference, output, conditions, benchmark, reports, reference_report = original_rpo_panel
     # Preserve the existing three-metric scoring and every native panel file.
-    bo.freeze_original_rpo_scoring(panel, reference, output)
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='three')
     old = {path: bo.sha(path) for path in (*panel.rglob('*.json'), *output.rglob('*.json'))}
     fresh = output.with_name('four_metrics')
     bo.freeze_original_rpo_scoring(panel, reference, fresh, metric_profile='four')
@@ -234,7 +239,7 @@ def test_four_metric_profile_rejects_rate_weights_scale_or_kind_changes(original
             bo.objective(reports[0], changed)
 
 
-@pytest.mark.parametrize('profile', [None, 'three', 'four'])
+@pytest.mark.parametrize('profile', [None, 'four'])
 def test_freeze_scoring_cli_metric_profile_default_is_four(original_rpo_panel, profile):
     panel, reference, output, *_ = original_rpo_panel
     flags = ['freeze-scoring', '--measurements-root', str(panel), '--original-rpo-reference', str(reference),
@@ -243,8 +248,21 @@ def test_freeze_scoring_cli_metric_profile_default_is_four(original_rpo_panel, p
         flags += ['--metric-profile', profile]
     bo.main(flags)
     scoring = bo.read(output/'scoring.json')
-    assert scoring['method'] == ('post_finetune_original_rpo' if profile == 'three'
-                                 else 'post_finetune_original_rpo_four_metrics')
+    assert scoring['method'] == 'post_finetune_original_rpo_four_metrics'
+
+
+def test_freeze_scoring_cli_retires_three_metric_formal_profile(original_rpo_panel):
+    panel, reference, output, *_ = original_rpo_panel
+    with pytest.raises(SystemExit):
+        bo.main(['freeze-scoring','--measurements-root',str(panel),'--output',str(output),'--metric-profile','three'])
+
+
+def test_freeze_scoring_cli_defaults_to_checked_in_reference(original_rpo_panel, monkeypatch):
+    panel, _, output, _, _, _, _ = original_rpo_panel
+    received = []
+    monkeypatch.setattr(bo, 'freeze_original_rpo_scoring', lambda panel,root,output,**kwargs: received.append((root,kwargs)))
+    bo.main(['freeze-scoring','--measurements-root',str(panel),'--output',str(output)])
+    assert received == [(bo.ORIGINAL_RPO_ARCHIVE,dict(metric_profile='four',metric_weights=None))]
 
 
 def test_four_metric_custom_weights_are_frozen_and_independent_of_current_default(original_rpo_panel, monkeypatch):

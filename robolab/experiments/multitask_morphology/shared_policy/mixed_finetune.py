@@ -16,7 +16,7 @@ import torch
 from contract import load_plan, sha, write_new
 from finetune_settings import MIXED_BO_ENVS, PPO_SCHEDULE
 from finetune_state import checkpoint_history, select_candidate
-from joint_finetune import STEPS_PER_TASK, check_pause, publish_training_completion
+from finetune_common import STEPS_PER_TASK, check_pause, publish_training_completion
 from mixed_batch import advance, initialize_episode_length, task_counts
 from persistence import resume_pause, run_lock
 from randomization import protocol_metadata, assert_protocol_unchanged
@@ -338,7 +338,7 @@ def main():
         raise ValueError('Mixed pilot requires the three-task student')
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = a.output.resolve()
-    files = ['mixed_finetune.py', 'mixed_scene.py', 'mixed_batch.py', 'native_ppo.py', 'native_observations.py',
+    files = ['mixed_finetune.py', 'finetune_common.py', 'mixed_scene.py', 'mixed_batch.py', 'native_ppo.py', 'native_observations.py',
              'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py',
              'finetune_settings.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
              '../../../../rsl_rl/rsl_rl/algorithms/ppo.py', '../../../../rsl_rl/rsl_rl/storage/rollout_storage.py',

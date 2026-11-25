@@ -56,7 +56,7 @@ def test_owned_source_roots_and_full_motor_curves():
     assert module(HERE/'amp_engine/setup_hhtools.py').verify_snapshot() > 500
 
 
-@pytest.mark.parametrize('entry', ['train.py','prepare.py','prepare_shared.py','distill.py','finetune.py',
+@pytest.mark.parametrize('entry', ['train.py','prepare.py','prepare_shared.py','distill.py','bo.py',
     'engine/train.py','amp_engine/train.py','validate_teacher.py'])
 def test_real_command_help_without_simulation(entry):
     result = subprocess.run([sys.executable, str(HERE/entry), '--help'], cwd=ROOT,

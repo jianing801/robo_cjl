@@ -3,8 +3,8 @@
   "task": "backpack",
   "seed": 20261118,
   "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
-  "trace": "backpack/bo_samples.npz",
-  "trace_sha256": "082d4f09855561c67c7498824b1e05cc6265ed4289c7fc1e4d8aa54b04a1e21c",
+  "trace": "/root/sj-tmp/bo-ppo100-round5-data/rpo_native_expert_prior_update100_eval/measurements/20261118_backpack/run_6dd6fd8d/native/bo_samples.npz",
+  "trace_sha256": "44b86f0b24955760890125000935be2d3fa8dd1b6ffa63a2d739294817b7bdb3",
   "motors": [
     {
       "joint": "left_thigh_yaw_joint",
@@ -1096,11 +1096,11 @@
       "steps": 4000,
       "dt_s": 0.005,
       "fell": false,
-      "forward_m": 7.781691074371338,
-      "mean_forward_mps": 0.3888536322861328,
+      "forward_m": 9.712162017822266,
+      "mean_forward_mps": 0.4849382627851446,
       "command_mps": 0.5,
       "reached_top": null,
-      "route_completed": false,
+      "route_completed": true,
       "timed_out": false,
       "protection_stop": false,
       "payload": {
@@ -1118,18 +1118,18 @@
       },
       "total_mass_kg": 43.484283447265625,
       "metrics": {
-        "cot": 0.4684643533585841,
-        "forward_rmse_mps": 0.12048633885627877,
-        "knee_ankle_max_rated_ratio": 0.8591405492682668
+        "cot": 0.45603935843610693,
+        "forward_rmse_mps": 0.05971545500186304,
+        "knee_ankle_max_rated_ratio": 0.8671060793615709
       },
       "observed": {
-        "cot": 0.4684643533585841,
-        "forward_rmse_mps": 0.12048633885627877,
-        "roll_pitch_rms_rad_s": 0.31629863121709834,
-        "knee_ankle_max_rated_ratio": 0.8591405492682668,
-        "positive_mechanical_work_j": 1555.0768672289098,
-        "absolute_mechanical_work_j": 2820.5035592259615,
-        "absolute_mechanical_cot": 0.8496720669331883
+        "cot": 0.45603935843610693,
+        "forward_rmse_mps": 0.05971545500186304,
+        "roll_pitch_rms_rad_s": 0.31983568649383687,
+        "knee_ankle_max_rated_ratio": 0.8671060793615709,
+        "positive_mechanical_work_j": 1889.3811147200963,
+        "absolute_mechanical_work_j": 3457.701707335675,
+        "absolute_mechanical_cot": 0.8345844340200236
       },
       "motors": {
         "left_thigh_yaw_joint": {
@@ -1178,9 +1178,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 2.235799784294422,
-          "peak_torque_observed_nm": 22.439205169677734,
-          "rated_ratio": 0.05589499460736055
+          "rms_torque_nm": 2.952723959038756,
+          "peak_torque_observed_nm": 22.97818946838379,
+          "rated_ratio": 0.0738180989759689
         },
         "right_thigh_yaw_joint": {
           "joint": "right_thigh_yaw_joint",
@@ -1228,9 +1228,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 4.0000051338947555,
-          "peak_torque_observed_nm": 31.05802345275879,
-          "rated_ratio": 0.10000012834736889
+          "rms_torque_nm": 4.120540959843908,
+          "peak_torque_observed_nm": 31.645709991455078,
+          "rated_ratio": 0.10301352399609769
         },
         "torso_joint": {
           "joint": "torso_joint",
@@ -1278,9 +1278,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 4.559922960588103,
-          "peak_torque_observed_nm": 8.547473907470703,
-          "rated_ratio": 0.11399807401470256
+          "rms_torque_nm": 5.100854148314448,
+          "peak_torque_observed_nm": 10.783534049987793,
+          "rated_ratio": 0.1275213537078612
         },
         "left_thigh_roll_joint": {
           "joint": "left_thigh_roll_joint",
@@ -1328,9 +1328,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 9.510072717025873,
-          "peak_torque_observed_nm": 18.92255973815918,
-          "rated_ratio": 0.2377518179256468
+          "rms_torque_nm": 10.675866941977938,
+          "peak_torque_observed_nm": 23.683162689208984,
+          "rated_ratio": 0.26689667354944846
         },
         "right_thigh_roll_joint": {
           "joint": "right_thigh_roll_joint",
@@ -1378,9 +1378,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 15.784482702321883,
-          "peak_torque_observed_nm": 39.73678970336914,
-          "rated_ratio": 0.39461206755804706
+          "rms_torque_nm": 15.230062111309573,
+          "peak_torque_observed_nm": 39.682373046875,
+          "rated_ratio": 0.3807515527827393
         },
         "left_arm_pitch_joint": {
           "joint": "left_arm_pitch_joint",
@@ -1428,9 +1428,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 3.582398794264428,
-          "peak_torque_observed_nm": 10.237756729125977,
-          "rated_ratio": 0.3980443104738253
+          "rms_torque_nm": 3.695442013251267,
+          "peak_torque_observed_nm": 10.99700927734375,
+          "rated_ratio": 0.4106046681390297
         },
         "right_arm_pitch_joint": {
           "joint": "right_arm_pitch_joint",
@@ -1478,9 +1478,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 3.36622383802277,
-          "peak_torque_observed_nm": 8.678171157836914,
-          "rated_ratio": 0.3740248708914189
+          "rms_torque_nm": 3.8690897529705057,
+          "peak_torque_observed_nm": 10.396646499633789,
+          "rated_ratio": 0.4298988614411673
         },
         "left_thigh_pitch_joint": {
           "joint": "left_thigh_pitch_joint",
@@ -1528,9 +1528,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 27.134057653256363,
-          "peak_torque_observed_nm": 51.62192916870117,
-          "rated_ratio": 0.6783514413314091
+          "rms_torque_nm": 27.266431165474234,
+          "peak_torque_observed_nm": 51.368534088134766,
+          "rated_ratio": 0.6816607791368559
         },
         "right_thigh_pitch_joint": {
           "joint": "right_thigh_pitch_joint",
@@ -1578,9 +1578,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 23.61326394735667,
-          "peak_torque_observed_nm": 47.494632720947266,
-          "rated_ratio": 0.5903315986839168
+          "rms_torque_nm": 27.377113521136618,
+          "peak_torque_observed_nm": 57.59148406982422,
+          "rated_ratio": 0.6844278380284154
         },
         "left_arm_roll_joint": {
           "joint": "left_arm_roll_joint",
@@ -1628,9 +1628,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.8217472887898097,
-          "peak_torque_observed_nm": 2.4511547088623047,
-          "rated_ratio": 0.09130525430997886
+          "rms_torque_nm": 1.0175101613167812,
+          "peak_torque_observed_nm": 2.224910020828247,
+          "rated_ratio": 0.11305668459075346
         },
         "right_arm_roll_joint": {
           "joint": "right_arm_roll_joint",
@@ -1678,9 +1678,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.7270580291045099,
-          "peak_torque_observed_nm": 1.7891103029251099,
-          "rated_ratio": 0.08078422545605665
+          "rms_torque_nm": 0.8687200046648929,
+          "peak_torque_observed_nm": 1.9359910488128662,
+          "rated_ratio": 0.09652444496276587
         },
         "left_knee_joint": {
           "joint": "left_knee_joint",
@@ -1728,9 +1728,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 33.98677462464709,
-          "peak_torque_observed_nm": 59.465736389160156,
-          "rated_ratio": 0.8496693656161772
+          "rms_torque_nm": 34.684243174462836,
+          "peak_torque_observed_nm": 61.1065788269043,
+          "rated_ratio": 0.8671060793615709
         },
         "right_knee_joint": {
           "joint": "right_knee_joint",
@@ -1778,9 +1778,9 @@
           },
           "catalog_note": "Factory 2026-09-23 mass is about 1375 g. Existing calibration inertia 0.0005556 and fitted URDF are retained; sheet rounds inertia to 0.000556.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 34.36562197073067,
-          "peak_torque_observed_nm": 59.65861511230469,
-          "rated_ratio": 0.8591405492682668
+          "rms_torque_nm": 34.63007867626141,
+          "peak_torque_observed_nm": 59.694175720214844,
+          "rated_ratio": 0.8657519669065353
         },
         "left_arm_yaw_joint": {
           "joint": "left_arm_yaw_joint",
@@ -1828,9 +1828,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.1964757973213373,
-          "peak_torque_observed_nm": 0.7549706697463989,
-          "rated_ratio": 0.021830644146815254
+          "rms_torque_nm": 0.21751314356316082,
+          "peak_torque_observed_nm": 0.7004765868186951,
+          "rated_ratio": 0.024168127062573423
         },
         "right_arm_yaw_joint": {
           "joint": "right_arm_yaw_joint",
@@ -1878,9 +1878,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.14508712808687615,
-          "peak_torque_observed_nm": 0.6192128658294678,
-          "rated_ratio": 0.016120792009652905
+          "rms_torque_nm": 0.16220801943165603,
+          "peak_torque_observed_nm": 0.6958450675010681,
+          "rated_ratio": 0.018023113270184004
         },
         "left_ankle_pitch_joint": {
           "joint": "left_ankle_pitch_joint",
@@ -1928,9 +1928,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 4.83457692068977,
-          "peak_torque_observed_nm": 17.34935188293457,
-          "rated_ratio": 0.5371752134099744
+          "rms_torque_nm": 5.116458079963661,
+          "peak_torque_observed_nm": 16.614940643310547,
+          "rated_ratio": 0.5684953422181845
         },
         "right_ankle_pitch_joint": {
           "joint": "right_ankle_pitch_joint",
@@ -1978,9 +1978,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 3.9914642993021894,
-          "peak_torque_observed_nm": 21.487380981445312,
-          "rated_ratio": 0.44349603325579884
+          "rms_torque_nm": 4.539249609086631,
+          "peak_torque_observed_nm": 20.338409423828125,
+          "rated_ratio": 0.5043610676762923
         },
         "left_elbow_pitch_joint": {
           "joint": "left_elbow_pitch_joint",
@@ -2028,9 +2028,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.3387256632805025,
-          "peak_torque_observed_nm": 0.9718003869056702,
-          "rated_ratio": 0.03763618480894473
+          "rms_torque_nm": 0.42471589420510547,
+          "peak_torque_observed_nm": 1.0874494314193726,
+          "rated_ratio": 0.047190654911678384
         },
         "right_elbow_pitch_joint": {
           "joint": "right_elbow_pitch_joint",
@@ -2078,9 +2078,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.4811263567818348,
-          "peak_torque_observed_nm": 1.3865962028503418,
-          "rated_ratio": 0.05345848408687053
+          "rms_torque_nm": 0.5895823271535672,
+          "peak_torque_observed_nm": 1.3912928104400635,
+          "rated_ratio": 0.06550914746150746
         },
         "left_ankle_roll_joint": {
           "joint": "left_ankle_roll_joint",
@@ -2128,9 +2128,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 4.238854085633654,
-          "peak_torque_observed_nm": 15.35067367553711,
-          "rated_ratio": 0.4709837872926282
+          "rms_torque_nm": 5.0707600349039765,
+          "peak_torque_observed_nm": 15.261022567749023,
+          "rated_ratio": 0.5634177816559974
         },
         "right_ankle_roll_joint": {
           "joint": "right_ankle_roll_joint",
@@ -2178,9 +2178,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 5.559743938669665,
-          "peak_torque_observed_nm": 16.316997528076172,
-          "rated_ratio": 0.6177493265188516
+          "rms_torque_nm": 4.797304856081843,
+          "peak_torque_observed_nm": 15.90650749206543,
+          "rated_ratio": 0.5330338728979825
         },
         "left_elbow_yaw_joint": {
           "joint": "left_elbow_yaw_joint",
@@ -2228,9 +2228,9 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.0939551969942799,
-          "peak_torque_observed_nm": 0.3366868197917938,
-          "rated_ratio": 0.010439466332697767
+          "rms_torque_nm": 0.11340185814638147,
+          "peak_torque_observed_nm": 0.3338521718978882,
+          "rated_ratio": 0.012600206460709052
         },
         "right_elbow_yaw_joint": {
           "joint": "right_elbow_yaw_joint",
@@ -2278,15 +2278,15 @@
           },
           "catalog_note": "Factory 2026-09-23 corrects P-version reference mass/outline to 381 g and 57 x 56.5 mm. Existing assembled SW fit, curve and legacy principal-inertia estimates are unchanged.",
           "torque_side": "joint_output",
-          "rms_torque_nm": 0.09156388112909337,
-          "peak_torque_observed_nm": 0.2759993076324463,
-          "rated_ratio": 0.010173764569899263
+          "rms_torque_nm": 0.11751191728516086,
+          "peak_torque_observed_nm": 0.34874361753463745,
+          "rated_ratio": 0.013056879698351207
         }
       }
     }
   ],
   "design_id": "tr_792ca9f47877",
   "bank_sha256": "c3c15c4eb361748992f30072a15faad5575f355914abb719c3cc1a5568410890",
-  "actor_sha256": "ba5e197ab969cca1e424667e1fe39814f7bff4d77b0fb3b95ad45ff2cbe5b27f",
+  "actor_sha256": "b36e0cf4104c909edcf8eace03bbae405735c0ba68cff40cf761d0bb580e22a9",
   "plan_sha256": "5f9e14296e5e6b1d16422e0844f8ed682e3aecb6a783183d41c4796dba5c2376"
 }

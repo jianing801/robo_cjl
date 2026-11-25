@@ -228,7 +228,7 @@ def grid_lookup(bo, plan):
 def scoring_protocol(bo, scoring, conditions):
     bo.validate_scoring(scoring, dict(domain='simulation',
                         conditions_sha256=bo.digest(conditions), conditions=conditions))
-    if (scoring['method'] not in bo.ORIGINAL_RPO_SCORING_METHODS
+    if (scoring['method'] != bo.ORIGINAL_RPO_FOUR_METRIC_METHOD
             or conditions.get('measurement_dt_s') != bo.PHYSICS_DT
             or conditions.get('reset_mode') != 'fixed'
             or bo.scoring_cot_basis(scoring) != bo.ABSOLUTE_COT_BASIS

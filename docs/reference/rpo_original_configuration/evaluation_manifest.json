@@ -1,0 +1,25 @@
+{
+  "kind": "concurrent_native_milestone_measurement",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "ppo_updates": 100,
+  "ppo_algorithm": "shared_native_ppoamp_expert_prior_v4",
+  "actor_sha256": "b36e0cf4104c909edcf8eace03bbae405735c0ba68cff40cf761d0bb580e22a9",
+  "checkpoint_sha256": "5234ed291b01891b76e7146a3a21d0e49262f5f18c01e94ce2ce27dca23cd389",
+  "training_manifest_sha256": "24d7ff661e8b150eb6eaeec6bc7efb5c74f518624ab22fa056c5ece8fbda76b2",
+  "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
+  "plan_sha256": "5f9e14296e5e6b1d16422e0844f8ed682e3aecb6a783183d41c4796dba5c2376",
+  "protected_training_pid": 409224,
+  "protected_training_create_time": 1795615129.83
+}

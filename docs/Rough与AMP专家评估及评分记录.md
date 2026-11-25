@@ -1,10 +1,10 @@
-# Rough 与 AMP 专家评估及评分记录
+# Rough 与 AMP 专家原始评估记录
 
-更新于 2026-11-21。Rough 上楼梯和 AMP 平地跑步使用同一批 50 个结构。每个任务单独计算综合分。两张最终图保留原选样顺序，同一编号对应同一套腿长和膝踝电机。
+2026-11-21 专家评估的历史记录。Rough 上楼梯和 AMP 平地跑步使用同一批 50 个结构。同一选样序号对应同一套腿长和膝踝电机。保留原始测量、汇总指标、训练配置和选样身份；旧分位数评分的派生图表及尺度文件留在 Git 历史中。
 
 ## 样本与固定工况
 
-样本来自 2,500 个结构的冻结排表第 21 组。50 个结构覆盖 25 个膝踝电机组合，每种 2 个。大腿长、小腿长各覆盖 10 档，每档各 5 个。序号 **1–50** 按 AMP 选样清单生成。[编号、结构参数和两项综合分](reference/rough_amp_expert_20261121/structure_scores.csv)
+样本来自 2,500 个结构的冻结排表第 21 组。50 个结构覆盖 25 个膝踝电机组合，每种 2 个。大腿长、小腿长各覆盖 10 档，每档各 5 个。序号 **1–50** 按[AMP 选样清单](reference/rough_amp_expert_20261121/amp/selection.json)生成。
 
 | 工况 | Rough 上楼梯 | AMP 平地跑步 |
 |---|---|---|
@@ -19,65 +19,24 @@ Rough 实际训练级高为 5–10 cm，踏面深度为 25 cm 和 35 cm 两档�
 
 两项评估均使用 20 秒、0.02 秒控制步长，每次最多 1,000 步。每个结构各跑 3 次，种子为 `20261118`、`20261119` 和 `20261120`。侧向和偏航指令固定为 0，使用确定性策略推理和训练时的观测归一化。评估使用各结构默认关节姿态和零初始速度，关闭观测噪声、随机推力、动力学随机化和初始状态扰动。AMP 使用该结构对应的已验证参考动作，固定从参考库首片段的起点开始。
 
-## 指标与权重
+## 原始指标
 
 - **整机机械 CoT（C）**用全部 23 个关节实际施加扭矩与关节角速度之积的正部，按控制步积分，再除以实际整机重量与水平前向净位移的乘积。
 - **前向速度 RMSE（R，m/s）**是实际世界坐标 +X 速度与固定指令之间的均方根误差。
 - **机身横滚与俯仰角速度 RMS（S，rad/s）**按机体坐标系计算 `sqrt(mean(ωx² + ωy²))`，用于 Rough。
 - **膝踝最大持续额定扭矩占比（T）**在双膝、双踝俯仰、双踝横滚共六个关节中，取 `实际关节侧扭矩 RMS / 关节侧持续额定扭矩` 的最大值，用于 AMP。100% 以 1.0 代入。
 
-各指标均为代价，**综合分越低越好**。
+正式 BO 的归一化参数见[原机 V4 基准](原始配置基准.md)及[现行评分说明](三任务BO评估与结构搜索.md)。
 
-| 任务 | 指标 | 权重 | P10 | P90 | 尺度乘数 | 含权重的乘数 |
-|---|---|---:|---:|---:|---:|---:|
-| Rough | C | 1/3 | 0.325508830 | 0.474525293 | 6.710667949763 | 2.236889316588 |
-| Rough | R | 1/3 | 0.087168015 | 0.112447744 | 39.557386547681 | 13.185795515894 |
-| Rough | S | 1/3 | 0.330378046 | 0.410491239 | 12.482338530526 | 4.160779510175 |
-| AMP | C | 0.4 | 0.217467459 | 0.251780874 | 29.143120796856 | 11.657248318743 |
-| AMP | R | 0.4 | 0.215685177 | 0.240409187 | 40.446514164962 | 16.178605665985 |
-| AMP | T | 0.2 | 0.715536652 | 1.296704171 | 1.720674273441 | 0.344134854688 |
-
-## 归一化方法与文献
-
-1. 各结构在对应任务中通过三次试验后，先逐指标求三次原始值的均值。将 50 个结构各自的均值作为等权样本，使用线性插值求第 10 百分位 P10 和第 90 百分位 P90。
-2. 用 `P90 − P10` 作为该指标的固定尺度。两张历史专家图使用 `原始均值 / (P90 − P10)`，再按各任务权重求和，区间外的结果沿同一斜率计分。表中的乘数和下方公式用于复现这批专家图。
-3. 正式 BO 根据共享策略微调后的测量重新定标，用 `(x − P10) / (P90 − P10)` 将每项指标的 P10 对齐到 0、P90 对齐到 1。在端点和权重相同的条件下，这个公式给每个候选的任务代价减去同一常数 `sum(w × P10 / (P90 − P10))`，因此分差和排序相同。[正式 BO 定标与评分](三任务BO评估与结构搜索.md)
-
-```text
-Rough 综合分 = 2.236889316588 × C + 13.185795515894 × R + 4.160779510175 × S
-AMP   综合分 = 11.657248318743 × C + 16.178605665985 × R + 0.344134854688 × T
-```
-
-- OECD/European Union/EC-JRC（2008），*Handbook on Constructing Composite Indicators: Methodology and User Guide*。第 5.3 节给出线性缩放及固定参照样本的做法，第 6.10 节式（31）给出归一化指标的线性加权求和。[DOI 10.1787/9789264043466-en](https://doi.org/10.1787/9789264043466-en)
-- Wang, Y., Sun, X., Li, J., Hong, S., Xiang, A., Shi, S., & Ding, T.（2026），*Optimized Dynamic Classification of Offshore Gas Wells Using Principal-Factor Screening and Cluster Analysis*，*Processes* 14(15), 2482。第 3.2 节式（12）用 P10、P90 作为线性端点，并将结果限制在 0–1。本记录采用其端点思想，最终评分对区间外的值继续线性计算，权重由本实验确定。[DOI 10.3390/pr14152482](https://doi.org/10.3390/pr14152482)
-
-## 旧专家结果按分位端点复算
-
-用各任务旧专家的 50 个结构均值，按原任务内权重和同一批 P10、P90 复算 `(x − P10) / (P90 − P10)`。负重补充对照采用 20 秒、10 kg 和 0.5 m/s 平地直行。复算的综合代价相对历史纯乘法分数减去表中固定差值，三项任务各自的 50 个结构排序均一致。此表仅记录旧专家对照结果。正式 BO 使用共享策略逐结构微调后的测量另行定标。
-
-| 旧专家任务 | 从历史分数减去 | 复算最低代价 | 复算中位代价 | 复算最高代价 |
-|---|---:|---:|---:|---:|
-| Rough 上楼梯 | 3.252137 | −0.193 | 0.436 | 2.202 |
-| 负重直行 | 3.330422 | 0.071 | 0.451 | 1.223 |
-| AMP 跑步 | 6.270799 | 0.048 | 0.435 | 1.220 |
-
-## 最终图与资料
+## 原始资料
 
 ### Rough 上楼梯
 
-50 个结构的综合分范围为 **3.059–5.454**，中位数 **3.688**。
-
-![Rough 上楼梯综合分最终图](reference/rough_amp_expert_20261121/rough/rough_50_structure_scores_by_index.png)
-
-[50 个结构指标](reference/rough_amp_expert_20261121/rough/rough_structure_metrics.csv) · [150 次试验明细](reference/rough_amp_expert_20261121/rough/rough_trial_metrics.csv) · [归一化参数](reference/rough_amp_expert_20261121/rough/rough_normalization_p10_p90.json) · [评估配置](reference/rough_amp_expert_20261121/rough/conditions.json) · [结果汇总](reference/rough_amp_expert_20261121/rough/rough_metric_summary.json)
+[50 个结构指标](reference/rough_amp_expert_20261121/rough/rough_structure_metrics.csv) · [150 次试验明细](reference/rough_amp_expert_20261121/rough/rough_trial_metrics.csv) · [评估配置](reference/rough_amp_expert_20261121/rough/conditions.json) · [结果汇总](reference/rough_amp_expert_20261121/rough/rough_metric_summary.json)
 
 ### AMP 平地跑步
 
-50 个结构的综合分范围为 **6.319–7.491**，中位数 **6.705**。
-
-![AMP 平地跑步综合分最终图](reference/rough_amp_expert_20261121/amp/amp_50_structure_scores_by_index.png)
-
-[50 个结构指标](reference/rough_amp_expert_20261121/amp/amp_structure_metrics.csv) · [150 次试验明细](reference/rough_amp_expert_20261121/amp/amp_trial_metrics.csv) · [归一化参数](reference/rough_amp_expert_20261121/amp/amp_normalization_p10_p90.json) · [评估配置](reference/rough_amp_expert_20261121/amp/conditions.json) · [结果汇总](reference/rough_amp_expert_20261121/amp/amp_metric_summary.json)
+[50 个结构指标](reference/rough_amp_expert_20261121/amp/amp_structure_metrics.csv) · [150 次试验明细](reference/rough_amp_expert_20261121/amp/amp_trial_metrics.csv) · [评估配置](reference/rough_amp_expert_20261121/amp/conditions.json) · [结果汇总](reference/rough_amp_expert_20261121/amp/amp_metric_summary.json)
 
 ## 试验数据与代码
 

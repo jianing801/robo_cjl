@@ -743,13 +743,12 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
 
 
 def finetune(root, gpu, design_id, design_task='stairs', updates=100, preview=False,
-             resume_paused=False, output=None, evaluation_profile='both', evaluation_seeds='20261118',
-             tracking_rel_tolerance=.25, min_command_progress_ratio=.5):
+             resume_paused=False, output=None, continuation=None):
     plan_path = root/'shared_plan/plan.json'
     complete_path = root/'shared_policy/completed.json'
     if not plan_path.is_file() or not complete_path.is_file():
         raise RuntimeError('请先完成共享策略蒸馏，再选择候选结构微调。')
-    plan = read(plan_path); complete = read(complete_path)
+    plan = read(plan_path)
     if design_task not in plan['teachers'] or design_id not in plan['teachers'][design_task]['design_ids']:
         raise ValueError('候选结构ID不在所选任务的共享结构库中。')
     records = read(plan['shared_bank'])['structures']
@@ -759,15 +758,11 @@ def finetune(root, gpu, design_id, design_task='stairs', updates=100, preview=Fa
     key = matches[0]['key']
     token = hashlib.sha256(json.dumps(key,separators=(',',':')).encode()).hexdigest()[:16]
     output = Path(output).resolve() if output else root/'candidate_finetuning'/token
-    command = [sys.executable, '-u', ENTRY/'finetune.py', '--plan', plan_path,
-        '--student', complete['student'], '--output', output, '--design-task', design_task,
-        '--design-id', design_id, '--updates', str(updates), '--profile', 'robust',
-        '--randomization-strength', '1', '--device', f'cuda:{gpu}',
-        '--evaluation-profile', evaluation_profile, '--evaluation-seeds', evaluation_seeds,
-        '--tracking-rel-tolerance', str(tracking_rel_tolerance),
-        '--min-command-progress-ratio', str(min_command_progress_ratio),
-        '--timeout-seconds', '1800', '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100']
-    if (output/'manifest.json').is_file(): command.append('--resume')
+    command = [sys.executable, '-u', ENTRY/'bo.py', 'evaluate', '--root', root,
+        '--output', output, '--candidate', matches[0]['design_ids']['stairs'],
+        '--updates', str(updates), '--gpu', str(gpu)]
+    if continuation is not None:
+        command.extend(['--shared-continuation', continuation])
     if resume_paused: command.append('--resume-paused')
     print('候选结构：', key, '微调输出：', output)
     run(command, preview=preview)
@@ -810,8 +805,7 @@ def main(argv=None):
     parser.add_argument('--candidate-task', choices=['stairs','backpack','run'], default='stairs')
     parser.add_argument('--finetune-updates', type=int, default=100)
     parser.add_argument('--finetune-output', type=Path, help='可选：为候选微调指定独立实验目录')
-    parser.add_argument('--finetune-evaluation-seeds', default='20261118')
-    parser.add_argument('--scoring', type=Path, help='BO：冻结的原机比值评分文件（旧三指标或新四指标）')
+    parser.add_argument('--scoring', type=Path, help='BO：新版专家先验 PPO 微调的四指标原机比值评分文件')
     parser.add_argument('--shared-continuation', type=Path, help='BO：已完成的共享策略续轮目录')
     parser.add_argument('--bo-output', type=Path, help='BO：独立连续搜索输出目录')
     parser.add_argument('--trials', type=int, default=100, help='BO：包含固定前50个观测的总结构预算')
@@ -828,7 +822,6 @@ def main(argv=None):
     parser.add_argument('--collection-profile', choices=['nominal','robust'], default='robust', help='共享蒸馏采集配置，默认按任务随机化')
     parser.add_argument('--randomization-strength', type=float, default=1., help='共享蒸馏目标随机化强度，0到1')
     parser.add_argument('--initial-randomization-strength', type=float, default=.25, help='共享BC首轮随机化强度，逐轮增加至目标')
-    parser.add_argument('--evaluation-profile', choices=['nominal','robust','both'], default='both', help='候选微调后的步态检查配置')
     parser.add_argument('--selection-seeds', default='20261117,20261119,20261120', help='三轮共用的三个选模种子，逗号分隔')
     parser.add_argument('--samples-per-design-per-epoch', type=int, default=32, help='每结构每数据源每epoch的计算预算，不截断训练数据')
     parser.add_argument('--validation-rows-per-design-shard', type=int, default=128, help='每结构每数据源的监督验证行预算')
@@ -837,7 +830,7 @@ def main(argv=None):
     parser.add_argument('--standing-speed-tolerance', type=float, default=None, help='已停用：共享策略已关闭站立指令并移除站立验收项')
     parser.add_argument('--tracking-rel-tolerance', type=float, default=.25, help=argparse.SUPPRESS)
     parser.add_argument('--min-command-progress-ratio', type=float,
-                        help='实际进度与指令进度的最小比例（蒸馏默认 0.2，常规微调报告默认 0.5）')
+                        help='蒸馏选模的最小实际行程比例（默认 0.2；正式 BO 采用固定评估条件）')
     args = parser.parse_args(argv)
     if args.tracking_abs_tolerance is not None:
         parser.error('--tracking-abs-tolerance 已停用，选模按存活和前进行程判定')
@@ -896,8 +889,7 @@ def main(argv=None):
         if not args.candidate_design_id or args.finetune_updates < 1:
             parser.error('微调需要--candidate-design-id和正数更新预算')
         finetune(root,args.gpu,args.candidate_design_id,args.candidate_task,args.finetune_updates,
-            args.dry_run,args.resume_paused,args.finetune_output,args.evaluation_profile,args.finetune_evaluation_seeds,
-            args.tracking_rel_tolerance,.5 if args.min_command_progress_ratio is None else args.min_command_progress_ratio)
+            args.dry_run,args.resume_paused,args.finetune_output,args.shared_continuation)
         return
     if action == 'bo':
         if args.trials < 50 or (args.history_budget is not None and args.history is None):

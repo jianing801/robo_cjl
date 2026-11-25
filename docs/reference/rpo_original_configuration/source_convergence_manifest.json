@@ -1,0 +1,33 @@
+{
+  "kind": "native_joint_ppo_convergence",
+  "runtime_commit": "f2f938cfb5076d62255b3ffbde337c478020e6e9",
+  "ppo_algorithm": "shared_native_ppoamp_expert_prior_v4",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "source_plan_sha256": "f04cd26293b0d5ce286b09316b98dc282a7b3ac4244af99e71fe3de570e1a3e9",
+  "initial_actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+  "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
+  "seed": 20261104,
+  "comparison_scoring_sha256": "09dce461870869e293b68e4894958e65b1aa5049e4f376c32b53f668cb573fc4",
+  "legacy_manifest_sha256": "ea1130478a6e309021e7118f7453408d2909998857a61061e837ed2b2aaab7da",
+  "requested_updates": 1000,
+  "evaluation_updates": [
+    0,
+    100,
+    200,
+    500,
+    800,
+    1000
+  ]
+}

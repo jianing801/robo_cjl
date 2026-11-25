@@ -94,6 +94,29 @@ def test_bo_launcher_passes_continuous_search_options_without_preparing_banks(tm
     assert not output.exists()
 
 
+def test_finetune_launcher_routes_to_current_bo_evaluator(tmp_path, monkeypatch):
+    folder = tmp_path/'shared_plan'; folder.mkdir()
+    bank = tmp_path/'shared_bank.json'
+    ids = {'stairs': 'stairs-id', 'backpack': 'pack-id', 'run': 'run-id'}
+    bank.write_text(json.dumps({'structures': [{'key': [.25,.30,'knee','ankle'], 'design_ids': ids}]}))
+    (folder/'plan.json').write_text(json.dumps({'shared_bank': str(bank),
+        'teachers': {task: {'design_ids': [design_id]} for task, design_id in ids.items()}}))
+    shared = tmp_path/'shared_policy'; shared.mkdir()
+    (shared/'completed.json').write_text('{}')
+    commands = []
+    monkeypatch.setattr(launcher, 'run', lambda command, **kw: commands.append((list(map(str, command)), kw)))
+    continuation = tmp_path/'round5'
+    launcher.finetune(tmp_path, 2, 'pack-id', 'backpack', preview=True, continuation=continuation)
+    (command, options), = commands
+    assert command[2:4] == [str(launcher.ENTRY/'bo.py'), 'evaluate']
+    assert command[command.index('--candidate')+1] == 'stairs-id'
+    assert command[command.index('--shared-continuation')+1] == str(continuation)
+    assert command[command.index('--updates')+1] == '100'
+    assert command[command.index('--gpu')+1] == '2'
+    assert '--evaluation-profile' not in command
+    assert options['preview'] is True
+
+
 def test_fresh_and_migration_actions_are_independent(tmp_path, monkeypatch):
     old, fresh, migrated = (tmp_path/name for name in ('old', 'fresh', 'migrated'))
     banks(old)

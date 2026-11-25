@@ -1,4 +1,4 @@
-"""The canonical BO CLI routes both original-RPO scoring profiles to continuous search."""
+"""The canonical BO CLI routes only the V4 four-metric original-RPO scoring."""
 import json
 from pathlib import Path
 import sys
@@ -11,11 +11,10 @@ import bo
 import bo_continuous
 
 
-@pytest.mark.parametrize('method', ['post_finetune_original_rpo', 'post_finetune_original_rpo_four_metrics'])
-def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypatch, method):
+def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypatch):
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
     scoring = tmp_path/'scoring.json'
-    scoring.write_text(json.dumps({'method': method, 'conditions_sha256': bo.digest(conditions),
+    scoring.write_text(json.dumps({'method': bo.ORIGINAL_RPO_FOUR_METRIC_METHOD, 'conditions_sha256': bo.digest(conditions),
         'benchmark': dict(ppo_algorithm=bo.NATIVE_PPO_ALGORITHM, native_ppo_settings=bo.NATIVE_PPO_SETTINGS)}))
     source, actor = tmp_path/'plan', tmp_path/'actor'
     plan = {'marker': 'frozen plan'}
@@ -38,10 +37,11 @@ def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypat
     assert a.history is None and a.history_budget is None and a.allowed_ankles is None
 
 
-def test_search_cli_rejects_retired_percentile_default(tmp_path):
+@pytest.mark.parametrize('method', ['post_finetune_panel50','post_finetune_original_rpo'])
+def test_search_cli_rejects_retired_percentile_default(tmp_path, method):
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
     scoring = tmp_path/'scoring.json'
-    scoring.write_text(json.dumps({'method': 'post_finetune_panel50', 'conditions_sha256': bo.digest(conditions)}))
+    scoring.write_text(json.dumps({'method': method, 'conditions_sha256': bo.digest(conditions)}))
     with pytest.raises((ValueError, SystemExit)):
         bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring), '--trials', '100'])
 

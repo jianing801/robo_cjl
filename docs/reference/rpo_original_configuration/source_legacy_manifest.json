@@ -1,0 +1,47 @@
+{
+  "kind": "original_rpo_convergence_ppo1000",
+  "runtime_commit": "8fe8b348cc535f5f4899d3c15e8c6b21fde35a1d",
+  "initial_actor": "/root/sj-tmp/shared-distill-20261121/shared_policy_round5/bc_round_5/attempt_20261122_170418_135961/student_epoch_0009.pt",
+  "initial_actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+  "source_plan": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_025_030_10010l_4340p_ppo100_200hz/evaluation/reference_plan.json",
+  "source_plan_sha256": "f04cd26293b0d5ce286b09316b98dc282a7b3ac4244af99e71fe3de570e1a3e9",
+  "donor_sha256": "6be54ff434b89da4ffab8b4a67ff0658f3cd9f053ffecf67641b8ab2614e3c3e",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
+  "scoring_sha256": "2cf57737c19c06c16c0a1ba1794387556a810f114c034ee22293a55f71ba432d",
+  "updates": 1000,
+  "evaluation_updates": [
+    100,
+    200,
+    500,
+    800,
+    1000
+  ],
+  "seed": 20261104,
+  "envs_per_task": {
+    "stairs": 1366,
+    "backpack": 1365,
+    "run": 1365
+  },
+  "ppo_schedule": {
+    "epochs": 5,
+    "minibatches": 4
+  },
+  "init_at_random_ep_len": true,
+  "profile": "robust",
+  "randomization_strength": 1.0,
+  "retained_checkpoints": "all_0_to_1000",
+  "previous_reference_result_sha256": "2557574261b23c90483549613168c7234ac8ba4b67fe903357823158033c468e"
+}

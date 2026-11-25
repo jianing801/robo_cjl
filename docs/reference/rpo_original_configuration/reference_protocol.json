@@ -2,5 +2,61 @@
   "source_plan_sha256": "6be54ff434b89da4ffab8b4a67ff0658f3cd9f053ffecf67641b8ab2614e3c3e",
   "initial_actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
   "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
-  "updates": 100
+  "updates": 100,
+  "ppo_algorithm": "shared_native_ppoamp_expert_prior_v4",
+  "native_ppo_settings": {
+    "steps_per_env": 24,
+    "epochs": 5,
+    "minibatches": 4,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip_param": 0.2,
+    "value_loss_coef": 1.0,
+    "use_clipped_value_loss": true,
+    "schedule": "adaptive",
+    "desired_kl": 0.01,
+    "initial_learning_rate": 0.0001,
+    "adaptive_learning_rate_bounds": [
+      1e-05,
+      0.01
+    ],
+    "max_grad_norm": 1.0,
+    "learn_noise_std": true,
+    "entropy_coefficients": {
+      "stairs": 0.005,
+      "backpack": 0.005,
+      "run": 0.01
+    },
+    "symmetry_augmentation": true,
+    "symmetry_tasks": [
+      "stairs",
+      "run"
+    ],
+    "mirror_loss_coef": 0.2,
+    "critic_warmup_updates": 10,
+    "critic_observation_normalization": {
+      "stairs": "identity",
+      "backpack": "identity",
+      "run": "teacher_native_prefix"
+    },
+    "amp_discriminator_training": true,
+    "amp_disc_learning_rate": 0.0001,
+    "amp_disc_buffer_size": 100,
+    "amp_style_reward_scale": 1.5,
+    "amp_task_style_lerp": 0.6,
+    "amp_loss_type": "LSGAN",
+    "amp_gradient_penalty": 10.0,
+    "amp_disc_trunk_weight_decay": 0.001,
+    "amp_disc_linear_weight_decay": 0.1,
+    "actor_initialization": "frozen_round5_shared_actor",
+    "noise_initialization": "frozen_expert_learned_std",
+    "noise_std_shape": [
+      3,
+      23
+    ],
+    "critic_initialization": "frozen_expert_critic",
+    "critic_architecture": "three_independent_teacher_native",
+    "ppo_optimizer_initialization": "fresh_adam",
+    "amp_disc_optimizer_initialization": "fresh_adam"
+  }
 }

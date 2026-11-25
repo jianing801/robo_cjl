@@ -217,120 +217,88 @@ def test_bo_ingest_defaults_to_the_formal_forward_progress_gate(tmp_path):
     assert pair['feasible'] is False
 
 
-@pytest.mark.parametrize(('updates', 'frozen_compaction', 'expect_compact', 'resume_paused', 'old_bo'), [
-    (100, None, False, False, False), (200, None, True, False, False),
-    (200, False, False, False, False), (200, True, True, False, False),
-    pytest.param(200, None, True, True, False, id='manual-resume-fresh-tuning'),
-    pytest.param(200, True, True, True, False, id='manual-resume-existing-tuning'),
-    pytest.param(200, True, True, False, 'pending', id='reuse-frozen-bo-manifest'),
-    pytest.param(200, True, True, False, 'three-seed', id='reuse-three-seed-coordinator-manifest'),
-    pytest.param(200, True, True, False, 'legacy', id='reuse-legacy-diagnostics-and-formal-measurements'),
-])
+@pytest.mark.parametrize('frozen_compaction', [None,False,True])
+@pytest.mark.parametrize('resume_paused', [False,True])
 def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
-        tmp_path, monkeypatch, updates, frozen_compaction, expect_compact, resume_paused, old_bo):
+        tmp_path, monkeypatch, frozen_compaction, resume_paused):
     import finetune_state
     from robolab import rough_gpu
 
-    source, initial, conditions_path = (tmp_path/name for name in ('shared_plan.json', 'actor.pt', 'conditions.json'))
+    source, initial = (tmp_path/name for name in ('shared_plan.json','actor.pt'))
     source.write_text('{}')
     initial.write_bytes(b'initial')
-    conditions = dict(seeds=[9, 19, 29], copies=2, duration_s=.08)
-    conditions_path.write_text(json.dumps(conditions))
+    conditions_path = bo.PHYSICS_CONDITIONS
+    conditions = bo.read_conditions(conditions_path)
+    updates = 100
     plan = dict(teachers={task: dict(design_ids=[task+'id'], bank_sha256=task, full_body_torque=True)
                           for task in bo.TASKS})
-    candidate = dict(structure_key=[.3, .35, 'K', 'A'], design_ids={t: t+'id' for t in bo.TASKS})
-    monkeypatch.setattr(finetune_state, 'select_candidate', lambda *_args, **_kw: (plan, candidate))
-    monkeypatch.setattr(bo, 'load_plan', lambda path: bo.read(path))
-    monkeypatch.setattr(bo, 'shared_input', lambda *_args, **_kw: (source, plan, initial))
-    monkeypatch.setattr(bo, 'read_conditions', bo.read)
-    monkeypatch.setattr(rough_gpu, 'query_gpus', lambda: [])
-    monkeypatch.setattr(rough_gpu, 'gpu_lease', lambda *_: nullcontext(dict(index=3, uuid='GPU-test')))
-    calls = []
-    out = tmp_path/'candidate'
-    tuning = out/'tuning'
-    manifest = dict(candidate=candidate, updates=updates, plan_sha256=bo.sha(source),
-                    initial_actor_sha256=bo.sha(initial))
-    if expect_compact:
-        manifest['compact_training_artifacts'] = True
+    candidate = dict(structure_key=[.3,.35,'K','A'], design_ids={t:t+'id' for t in bo.TASKS})
+    monkeypatch.setattr(finetune_state,'select_candidate',lambda *_args,**_kw:(plan,candidate))
+    monkeypatch.setattr(bo,'load_plan',lambda path:bo.read(path))
+    monkeypatch.setattr(bo,'shared_input',lambda *_args,**_kw:(source,plan,initial))
+    monkeypatch.setattr(rough_gpu,'query_gpus',lambda:[])
+    monkeypatch.setattr(rough_gpu,'gpu_lease',lambda *_:nullcontext(dict(index=3,uuid='GPU-test')))
+    calls=[]
+    out=tmp_path/'candidate'
+    tuning=out/'tuning'
+    expect_compact=frozen_compaction is not False
+    manifest=dict(candidate=candidate,updates=updates,plan_sha256=bo.sha(source),
+        initial_actor_sha256=bo.sha(initial),ppo_schedule=bo.PPO_SCHEDULE,
+        init_at_random_ep_len=True,envs_per_task=bo.MIXED_BO_LAYOUT,
+        ppo_algorithm=bo.NATIVE_PPO_ALGORITHM,native_ppo_settings=bo.NATIVE_PPO_SETTINGS,
+        teacher_checkpoint_sha256=dict(stairs='1'*64,backpack='2'*64,run='3'*64),
+        compact_training_artifacts=expect_compact)
     if frozen_compaction is not None:
         tuning.mkdir(parents=True)
         (tuning/'manifest.json').write_text(json.dumps(manifest))
     if resume_paused:
         out.mkdir(exist_ok=True)
         (out/'USER_PAUSED').touch()
-    if old_bo:
-        sources = {name: bo.sha(bo.SHARED/name) for name in (
-            'bo_capture.py', 'shared_bo_metrics.py', 'stair_course.py', 'rollout.py', 'rollout_amp.py')}
-        sources.update({
-            'bo.py': ('0942320ad840a49a921bf014c57d033a6322f86e34043e50c28d6310ea06879d'
-                      if old_bo == 'three-seed' else
-                      '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'),
-            'bo_capture.py': '5aacc6dc340839ed76db3a4d3e4e92f07d33b9e88911c538ceba482cad68907e',
-            'shared_bo_metrics.py': 'c064cc6b15b03eb8869a38a567b0a1bae55f8ba93246fb13fc05e3de87e9445e',
-        })
-        (out/'manifest.json').write_text(json.dumps(dict(kind='rpo_bo_candidate_v1', candidate=candidate,
-            source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial), conditions_sha256=digest(conditions),
-            updates=updates, sources=sources), indent=3))
-        original_manifest = (out/'manifest.json').read_bytes()
-    if old_bo == 'legacy':
-        (tuning/'plan.json').write_text(json.dumps(plan))
-        actor = tuning/'shared_actor_finetuned.pt'
-        actor.write_bytes(b'finetuned')
-        write_legacy_completion(tuning, candidate, updates, actor)
 
-    def worker(command, _folder, _env, _timeout, _root):
-        def arg(name):
-            return command[command.index(name)+1]
-        out = Path(arg('--output'))
-        out.mkdir(parents=True, exist_ok=True)
-        if Path(command[2]).name == 'finetune.py':
+    def worker(command,_folder,_env,_timeout,_root):
+        def arg(name): return command[command.index(name)+1]
+        dest=Path(arg('--output')); dest.mkdir(parents=True,exist_ok=True)
+        if Path(command[2]).name=='mixed_finetune.py':
             calls.append('finetune')
-            assert arg('--updates') == str(updates)
-            assert '--training-only' in command
+            assert arg('--updates')=='100' and arg('--num-envs')=='4096'
+            assert '--training-only' not in command and arg('--device')=='cuda:0'
             assert ('--compact-training-artifacts' in command) is expect_compact
             assert ('--resume' in command) is (frozen_compaction is not None)
             assert ('--resume-paused' in command) is (resume_paused and frozen_compaction is not None)
-            (out/'manifest.json').write_text(json.dumps(manifest))
-            (out/'plan.json').write_text(json.dumps(plan))
-            actor = out/'shared_actor_finetuned.pt'
-            actor.write_bytes(b'finetuned')
-            write_training_completion(out, candidate, updates, actor)
+            (dest/'manifest.json').write_text(json.dumps(manifest))
+            (dest/'plan.json').write_text(json.dumps(plan))
+            actor=dest/'shared_actor_finetuned.pt'; actor.write_bytes(b'finetuned')
+            write_training_completion(dest,candidate,updates,actor)
         else:
-            task = arg('--task') if '--task' in command else 'run'
+            task=arg('--task') if '--task' in command else 'run'
             calls.append(task)
-            assert arg('--bo-conditions') == conditions_path and arg('--profile') == 'nominal'
-            trace = out/'bo_samples.npz'
-            trace.write_bytes(b'test-trace')
-            (out/'summary.json').write_text('{}')
-            (out/'bo_trials.json').write_text(json.dumps(dict(kind=TRIAL_VERSION, task=task,
-                design_id=arg('--design-ids'), bank_sha256=task, seed=int(arg('--seed')), trace=str(trace),
-                trace_sha256=bo.sha(trace),
-                conditions_sha256=digest(conditions), actor_sha256=bo.sha(arg('--student')),
-                plan_sha256=bo.sha(arg('--plan')), trials=[dict(replica=i, **trial(task)) for i in range(2)])))
+            assert arg('--bo-conditions')==conditions_path and arg('--profile')=='nominal'
+            trace=dest/'bo_samples.npz'; trace.write_bytes(b'test-trace')
+            (dest/'summary.json').write_text('{}')
+            speed=conditions['tasks'][task]['speed_mps']
+            motors=[dict(joint=j,rated_torque_nm=4.) for j in sorted(KNEE_ANKLE)]
+            row=score_trial(task,speed=speed,dt=.005,expected_steps=4000,mass=20.,forward=speed*20,
+                vx=np.full(4000,speed),omega=np.ones((4000,2)),torque=np.ones((4000,6)),
+                joint_vel=np.ones((4000,6)),motors=motors,fell=False,min_forward_progress_ratio=.2)
+            (dest/'bo_trials.json').write_text(json.dumps(dict(kind=TRIAL_VERSION,task=task,
+                design_id=arg('--design-ids'),bank_sha256=task,seed=int(arg('--seed')),trace=str(trace),
+                trace_sha256=bo.sha(trace),conditions_sha256=digest(conditions),actor_sha256=bo.sha(arg('--student')),
+                plan_sha256=bo.sha(arg('--plan')),trials=[dict(replica=0,**row)])))
 
-    monkeypatch.setattr(bo, 'run_worker', worker)
-    args = ['evaluate', '--root', str(tmp_path), '--output', str(out), '--candidate', 'stairsid',
-            '--conditions', str(conditions_path), '--gpu', '3', '--timeout', '15']
-    args += ['--updates', str(updates)]
-    if resume_paused:
-        args.append('--resume-paused')
+    monkeypatch.setattr(bo,'run_worker',worker)
+    args=['evaluate','--root',str(tmp_path),'--output',str(out),'--candidate','stairsid','--gpu','3','--timeout','15']
+    if resume_paused: args.append('--resume-paused')
     bo.main(args)
     assert not (out/'USER_PAUSED').exists()
-    first = bo.read(out/'bo_evaluation.json')
-    if old_bo:
-        assert (out/'manifest.json').read_bytes() == original_manifest
-        assert first['evaluation_manifest_sha256'] == bo.sha(out/'manifest.json')
-    expected_calls = [] if old_bo == 'legacy' else ['finetune']
-    expected_calls.extend(task for seed in conditions['seeds'] for task in bo.TASKS)
-    assert calls == expected_calls
-    assert len(list((out/'measurements').glob('*/accepted.json'))) == 9
-    assert first['ppo_updates'] == updates
+    first=bo.read(out/'bo_evaluation.json')
+    assert first['ppo_updates']==100 and first['ppo_algorithm']==bo.NATIVE_PPO_ALGORITHM
     assert all(pair['feasible'] for pair in first['pairs'])
-    frozen_report = (out/'bo_evaluation.json').read_bytes()
-    bo.main([*args, '--finetuned', str(tuning)])
-    assert bo.read(out/'bo_evaluation.json') == first
-    assert (out/'bo_evaluation.json').read_bytes() == frozen_report
-    assert calls == expected_calls
+    assert calls==['finetune',*bo.TASKS]
+    assert len(list((out/'measurements').glob('*/accepted.json')))==3
+    frozen_report=(out/'bo_evaluation.json').read_bytes()
+    bo.main([*args,'--finetuned',str(tuning)])
+    assert (out/'bo_evaluation.json').read_bytes()==frozen_report
+    assert calls==['finetune',*bo.TASKS]
 
 
 def test_frozen_bo_manifest_only_allows_the_previous_bo_source(tmp_path):
@@ -539,13 +507,14 @@ def official_panel(tmp_path, monkeypatch):
         manifest.update(extra)
         folder.mkdir(parents=True,exist_ok=True)
         bo.freeze(folder/'manifest.json',manifest)
-        actor = (folder/'tuning/shared_actor_finetuned.pt').resolve()
+        reused = getattr(a,'finetuned',None)
+        actor = ((Path(reused) if reused else folder/'tuning')/'shared_actor_finetuned.pt').resolve()
         tuning_plan = actor.parent/'plan.json'
         teachers = {task: dict(design_ids=[candidate['design_ids'][task]], bank_sha256=f'bank-{task}')
                     for task in bo.TASKS}
         fixed_dt = conditions.get('measurement_dt_s', DT)
         physics_rate = fixed_dt == .005
-        if physics_rate:
+        if physics_rate and not reused:
             actor.parent.mkdir()
             actor.write_bytes(f'fitted {candidate_id}'.encode())
             bo.freeze(tuning_plan, dict(teachers=teachers))
@@ -554,14 +523,15 @@ def official_panel(tmp_path, monkeypatch):
                 candidate=candidate, updates=a.updates, plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial),
                 ppo_schedule=bo.PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=bo.MIXED_BO_LAYOUT, **extra, **prior))
             write_training_completion(actor.parent, candidate, a.updates, actor)
-        else:
+        elif not physics_rate:
             actor = initial
         pairs = []
         for j, seed in enumerate(conditions['seeds']):
             tasks = {t: dict(replica=0, status='success', mean_forward_mps=.5,
                              metrics={m:n+2 for m in bo.METRICS[t]},
                              dt_s=fixed_dt, steps=round(conditions['duration_s'] / fixed_dt),
-                             observed=dict(absolute_mechanical_cot=3 * (n+2) + 2 + 4 * (n == -1 and t == 'stairs')))
+                             observed=dict(absolute_mechanical_cot=3 * (n+2) + 2 + 4 * (n == -1 and t == 'stairs'),
+                                           cot=n+2,forward_rmse_mps=n+2,roll_pitch_rms_rad_s=n+2,knee_ankle_max_rated_ratio=n+2))
                      for t in bo.TASKS}
             tasks['stairs']['reached_top'] = n not in (-1,0) or j != 2
             if n == 0 and j == len(conditions['seeds']) - 1:
@@ -606,117 +576,36 @@ def official_panel(tmp_path, monkeypatch):
     return SimpleNamespace(root=tmp_path,calls=calls,selection=selection_path,student=actor,
                            fixed_ids=[ids[k]['stairs'] for k in fixed])
 
-def test_official_panel_initializes_once_and_freezes_legacy_scores(official_panel):
+def test_official_panel_initializes_once_and_only_measures(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
-    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50_native_expert_prior_ppo100_200hz/manifest.json')
-    assert manifest['updates'] == 100 and manifest['selection_velocity_frame'] == 'horizontal_heading'
-    assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
+    assert p.calls==[(k,bo.sha(p.student),100) for k in p.fixed_ids]
+    panel=p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
+    manifest=bo.read(panel/'manifest.json')
+    assert manifest['updates']==100 and manifest['selection_velocity_frame']=='horizontal_heading'
+    assert manifest['ppo_schedule']==dict(epochs=5,minibatches=4)
     assert manifest['init_at_random_ep_len'] is True
-    assert manifest['envs_per_task'] == dict(stairs=1366, backpack=1365, run=1365)
-    assert manifest['ppo_algorithm'] == bo.NATIVE_PPO_ALGORITHM
-    assert manifest['native_ppo_settings'] == bo.NATIVE_PPO_SETTINGS
+    assert manifest['envs_per_task']==dict(stairs=1366,backpack=1365,run=1365)
+    assert manifest['ppo_algorithm']==bo.NATIVE_PPO_ALGORITHM
+    assert manifest['native_ppo_settings']==bo.NATIVE_PPO_SETTINGS
     bo.main(['initialize','--migrated'])
-    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    scoring_path = p.root/'bo/calibration50_native_expert_prior_ppo100_200hz/scoring.json'
-    scoring = bo.read(scoring_path)
-    assert scoring['cot_basis'] == 'absolute_mechanical'
-    assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
-    assert scoring['metrics']['stairs']['cot']['p10'] == pytest.approx(3 * 7.8 + 2)
-    assert scoring['metrics']['backpack']['cot']['p10'] == pytest.approx(3 * 6.9 + 2)
-    assert scoring['metrics']['run']['cot']['p90'] == pytest.approx(3 * 46.1 + 2)
-    # Historical percentile scores remain readable without the obsolete discrete
-    # search. Use a new synthetic report with different stair and other task CoTs
-    # to check the frozen normalization and task weighting independently.
-    task_costs = {}
-    for task, specs in scoring['metrics'].items():
-        values = dict.fromkeys(specs, 1.)
-        values['cot'] = 9. if task == 'stairs' else 5.
-        task_costs[task] = sum(spec['weight'] * (values[metric] - spec['p10']) / spec['scale']
-                               for metric, spec in specs.items())
-    latest_report = bo.read(scoring_path.parent/'design_02/bo_evaluation.json')
-    for task, trial in latest_report['pairs'][0]['tasks'].items():
-        trial['metrics'] = dict.fromkeys(bo.METRICS[task], 1.)
-        trial['observed']['absolute_mechanical_cot'] = 9. if task == 'stairs' else 5.
-    latest = objective(latest_report, scoring)
-    assert latest['observations'][0]['task_objectives'] == pytest.approx(task_costs)
-    assert latest['mean_objective'] == pytest.approx(
-        .4 * task_costs['stairs'] + .3 * task_costs['backpack'] + .3 * task_costs['run'])
-    legacy_panel, benchmark = bo.read_search_benchmark(scoring_path, scoring, latest_report['conditions'])
-    assert legacy_panel == scoring_path.parent and len(benchmark['reports']) == 50
-
-def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
-    p = official_panel
-    legacy = ['--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
-    initialize = ['initialize', '--migrated', '--updates', '100', *legacy]
-    bo.main(initialize)
-    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    calibration = p.root/'bo/calibration50'
-    old_scoring = calibration/'scoring.json'
-    old_receipt = calibration/'completed.json'
-    data = bo.read(old_scoring)
-    for metrics in data['metrics'].values():
-        for metric in metrics.values():
-            metric.update(baseline=metric['p90']-metric['p10'], scale=None)
-    old_scoring.write_text(json.dumps(data), encoding='utf8')
-    receipt = bo.read(old_receipt)
-    old_receipt.write_text(json.dumps(dict(receipt, scoring_sha256=bo.sha(old_scoring))), encoding='utf8')
-    old_hashes = (bo.sha(old_scoring), bo.sha(old_receipt))
-    report_path = calibration/'design_02/bo_evaluation.json'
-    legacy_report = bo.read(report_path)
-    assert objective(legacy_report, data)['mean_objective'] > 0
-
-    with pytest.raises(ValueError, match='initialize'):
-        bo.read_search_benchmark(old_scoring, data, legacy_report['conditions'])
-    original_report = report_path.read_bytes()
-    report_path.write_bytes(original_report + b' ')
-    with pytest.raises(ValueError, match='Frozen initial BO report changed'):
-        bo.main(initialize)
-    report_path.write_bytes(original_report)
-
-    bo.main(initialize)
-    bo.main(initialize)
-    assert len(p.calls) == 50
-    assert (bo.sha(old_scoring), bo.sha(old_receipt)) == old_hashes
-
-    updated = calibration/'percentile_scoring/scoring.json'
-    assert objective(legacy_report, bo.read(updated))['mean_objective'] < 0
-    panel, benchmark = bo.read_search_benchmark(updated, bo.read(updated), legacy_report['conditions'])
-    assert panel == updated.parent and len(benchmark['reports']) == 50
+    assert len(p.calls)==50 and not (panel/'scoring.json').exists()
+    assert len(bo.read(panel/'measurements_completed.json')['reports'])==50
+    assert len(bo.checked_measurement_panel(panel)[0])==50
 
 
-def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
-    p = official_panel
-    args = ['initialize', '--migrated', '--updates', '100', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
-    bo.main(args)
-    manifest = p.root/'bo/calibration50/manifest.json'
-    original_manifest = manifest.read_bytes()
-    bo.main(args)
-    assert len(p.calls) == 50
-    assert manifest.read_bytes() == original_manifest
-    with pytest.raises(ValueError, match='Frozen BO identity differs'):
-        bo.main(['initialize', '--migrated', '--updates', '200', '--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)])
-    assert len(p.calls) == 50
-    assert manifest.read_bytes() == original_manifest
+@pytest.mark.parametrize('flags', [
+    ['--conditions',str(bo.LEGACY_FORMAL_CONDITIONS)],
+    ['--conditions',str(bo.FORMAL_CONDITIONS)],
+    ['--updates','200'],
+])
+def test_formal_cli_retires_old_measurement_protocols(official_panel,flags):
+    with pytest.raises(ValueError,match='V4 100-update'):
+        bo.main(['initialize','--migrated',*flags])
+    assert not official_panel.calls
 
 
-def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
-    p = official_panel
-    legacy = ['--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
-    bo.main(['initialize', '--migrated', *legacy])
-    calibration = p.root/'bo/calibration50'
-    original_manifest = (calibration/'manifest.json').read_bytes()
-    with pytest.raises(ValueError, match='Frozen BO identity differs'):
-        bo.main(['initialize', '--migrated', '--output', str(calibration)])
-    with pytest.raises(ValueError, match='different measurement conditions'):
-        bo.read_search_benchmark(calibration/'scoring.json', bo.read(calibration/'scoring.json'),
-                                 bo.read_conditions(bo.FORMAL_CONDITIONS))
-    assert len(p.calls) == 50
-    assert (calibration/'manifest.json').read_bytes() == original_manifest
-
-
-@pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
+@pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','receipt','algorithm'])
 def test_official_panel_rejects_changed_evidence_on_reuse(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
@@ -734,11 +623,11 @@ def test_official_panel_rejects_changed_evidence_on_reuse(official_panel,change)
         value['initial_actor_sha256']='different student'
         manifest.write_text(json.dumps(value))
     else:
-        scoring=calib/'scoring.json'
-        value=bo.read(scoring)
-        if change=='scale': value['metrics']['run']['cot']['baseline']*=2
-        else: value.pop('method')
-        scoring.write_text(json.dumps(value))
+        changed=calib/('measurements_completed.json' if change=='receipt' else 'manifest.json')
+        value=bo.read(changed)
+        if change=='receipt': value['conditions_sha256']='wrong'
+        else: value['ppo_algorithm']='old'
+        changed.write_text(json.dumps(value))
     with pytest.raises(ValueError):
         bo.main(args)
     assert len(p.calls)==50
@@ -881,11 +770,29 @@ def test_measurement_only_panel_defers_scoring(official_panel):
     assert not (out/'scoring.json').exists()
 
 
+def test_v4_panel_reuses_tuning_without_legacy_scoring_file(official_panel):
+    p=official_panel
+    bo.main(['initialize','--migrated'])
+    original=p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
+    frozen=bo.sha(original/'manifest.json'),bo.sha(original/'measurements_completed.json')
+    target=p.root/'remeasured'
+    assert not (original/'scoring.json').exists()
+    bo.main(['initialize','--migrated','--reuse-finetuned-panel',str(original),'--output',str(target)])
+    assert len(p.calls)==100
+    assert not (target/'design_01/tuning').exists()
+    reports,*_=bo.checked_measurement_panel(target)
+    assert Path(reports[0]['student']).is_relative_to(original/'design_01/tuning')
+    assert (bo.sha(original/'manifest.json'),bo.sha(original/'measurements_completed.json'))==frozen
+
+
 def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, monkeypatch):
     p = official_panel
     bo.main(['initialize', '--migrated', '--measure-only'])
     out = p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
-    args = ['freeze-scoring', '--measurements-root', str(out)]
+    scoring_out=p.root/'new_scoring'
+    args=['freeze-scoring','--measurements-root',str(out),'--output',str(scoring_out)]
+    reference=bo.read(out/'design_02/bo_evaluation.json')
+    monkeypatch.setattr(bo,'checked_original_rpo_reference',lambda *_:(reference,dict(root='fixture')))
 
     def forbidden(*args, **kwargs):
         pytest.fail('Freezing existing measurements must not start a simulator or train an actor')
@@ -911,7 +818,7 @@ def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, 
         changed.write_bytes(replacement)
         with pytest.raises(ValueError):
             bo.main(args)
-        assert not (out/'scoring.json').exists()
+        assert not (scoring_out/'scoring.json').exists()
         changed.write_bytes(original)
 
     frozen = {path: bo.sha(path) for path in (*changes, out/'manifest.json')}
@@ -919,15 +826,15 @@ def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, 
     paused.touch()
     with pytest.raises(RuntimeError, match='USER_PAUSED'):
         bo.main(args)
-    assert not (out/'scoring.json').exists()
+    assert not (scoring_out/'scoring.json').exists()
     assert paused.is_file()
     bo.main([*args, '--resume-paused'])
     assert not paused.exists()
     bo.main(args)
     assert len(p.calls) == 50
     assert {path: bo.sha(path) for path in frozen} == frozen
-    scoring = bo.read(out/'scoring.json')
+    scoring = bo.read(scoring_out/'scoring.json')
     assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
     assert scoring['cot_basis'] == 'absolute_mechanical'
-    assert bo.read(out/'completed.json')['scoring_sha256'] == bo.sha(out/'scoring.json')
-    assert bo.read(out/'calibration_summary.json')['trials'] == 150
+    assert bo.read(scoring_out/'completed.json')['scoring_sha256'] == bo.sha(scoring_out/'scoring.json')
+    assert len(bo.read(scoring_out/'initial_observations.json')['candidates'])==50

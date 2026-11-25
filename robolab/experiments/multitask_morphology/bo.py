@@ -57,7 +57,6 @@ from persistence import resume_pause, run_lock
 
 ORIGINAL_RPO_FOUR_METRIC_METHOD = FOUR_METRIC_SCORING_METHOD
 ORIGINAL_RPO_SCORING_METHODS = (ORIGINAL_RPO_SCORING_METHOD, ORIGINAL_RPO_FOUR_METRIC_METHOD)
-FORMAL_SCORING_METHODS = ('post_finetune_panel50', *ORIGINAL_RPO_SCORING_METHODS)
 from stair_course import COURSE, evaluation_flight, outside_flight
 
 
@@ -342,16 +341,18 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
     if any(not spec['full_body_torque'] for spec in plan['teachers'].values()):
         raise ValueError('BO measurements require the fully configured motor curves')
     mixed = uses_current_schedule(a.updates, conditions)
+    if not mixed or conditions.get('measurement_dt_s') != PHYSICS_DT:
+        raise ValueError('New BO evaluations require the V4 100-update, fixed 200 Hz protocol')
     explicit = getattr(a, 'finetuned', None)
     tuning = (explicit if explicit else work/'tuning').resolve()
-    # Standalone explicit reuse remains available for historical measurements;
-    # panel initialization and search explicitly bind the native algorithm.
+    # Historical reports remain readable but the retired learners do not
+    # produce new BO measurements. Only the current expert-prior V4 runs.
     algorithm = getattr(a, 'ppo_algorithm', NATIVE_PPO_ALGORITHM if mixed else None)
     if explicit and not hasattr(a, 'ppo_algorithm'):
         algorithm = read(tuning/'manifest.json').get('ppo_algorithm')
     settings = NATIVE_PPO_PROFILES.get(algorithm)
-    if algorithm is not None and (settings is None or not mixed):
-        raise ValueError('Unsupported PPO algorithm for candidate budget')
+    if algorithm != NATIVE_PPO_ALGORITHM or settings != NATIVE_PPO_SETTINGS:
+        raise ValueError('New BO measurements require the V4 expert-prior PPO algorithm')
     identity = dict(kind='rpo_bo_candidate_v1', source_plan_sha256=sha(source), candidate=candidate,
         initial_actor_sha256=sha(initial), conditions_sha256=digest(conditions), updates=a.updates,
         sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
@@ -364,17 +365,10 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
     if not actor_receipt(tuning).is_file():
         if getattr(a, 'finetuned', None):
             raise ValueError(f'Missing completed PPO run selected for reuse: {tuning}')
-        if mixed and algorithm != NATIVE_PPO_ALGORITHM:
-            raise ValueError('New mixed PPO runs must use the native algorithm; historical data remain read-only')
-        entry = SHARED/'mixed_finetune.py' if mixed else HERE/'finetune.py'
+        entry = SHARED/'mixed_finetune.py'
         command = [sys.executable, '-u', entry, '--plan', source, '--student', initial,
-                   '--output', tuning, '--design-id', design_id, '--updates', str(a.updates)]
-        if mixed:
-            command += ['--device', 'cuda:0', '--headless', '--num-envs', str(MIXED_BO_ENVS)]
-        else:
-            command += ['--device', f'cuda:{a.gpu}', '--training-only',
-                        '--gpu-min-free-gb', '12.5', '--gpu-max-utilization', '100',
-                        '--timeout-seconds', str(a.timeout)]
+                   '--output', tuning, '--design-id', design_id, '--updates', str(a.updates),
+                   '--device', 'cuda:0', '--headless', '--num-envs', str(MIXED_BO_ENVS)]
         tuning_manifest = tuning/'manifest.json'
         if tuning_manifest.is_file():
             if read(tuning_manifest).get('ppo_algorithm') != algorithm:
@@ -384,20 +378,17 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
                 command.append('--resume-paused')
             compact = read(tuning_manifest).get('compact_training_artifacts') is True
         else:
-            compact = a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)
+            compact = True
         if compact:
             command.append('--compact-training-artifacts')
         logs = work/'tuning_logs'/uuid4().hex[:8]
         print('BO_FINETUNING', design_id, candidate['structure_key'], logs, flush=True)
         timeout = (a.updates + 18) * a.timeout
-        if mixed:
-            from robolab.rough_gpu import candidates, child_environment, gpu_lease, query_gpus
-            choices = candidates(query_gpus(), os.environ, min_free_mib=12800,
-                                 max_utilization=100, requested=f'cuda:{a.gpu}')
-            with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as gpu:
-                run_worker(command, logs, child_environment(gpu, os.environ), timeout, pause_root)
-        else:
-            run_worker(command, logs, os.environ, timeout, pause_root)
+        from robolab.rough_gpu import candidates, child_environment, gpu_lease, query_gpus
+        choices = candidates(query_gpus(), os.environ, min_free_mib=12800,
+                             max_utilization=100, requested=f'cuda:{a.gpu}')
+        with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as gpu:
+            run_worker(command, logs, child_environment(gpu, os.environ), timeout, pause_root)
     actor = completed_actor(tuning, source, initial, candidate, a.updates,
                             ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed,
                             ppo_algorithm=algorithm)
@@ -731,6 +722,14 @@ def checked_measurement_panel(work):
 def checked_original_rpo_reference(root, benchmark, conditions):
     archive_path = ORIGINAL_RPO_ARCHIVE/'manifest.json'
     archive = read(archive_path)
+    from original_reference import ARCHIVE_KIND, check_v4_archive
+    if archive.get('kind') == ARCHIVE_KIND or benchmark.get('ppo_algorithm') == NATIVE_PPO_ALGORITHM:
+        # Formal V4 scoring has exactly one baseline: the checked-in measured
+        # update-100 milestone. Do not launch or substitute a new RPO run.
+        if (archive.get('kind') != ARCHIVE_KIND or benchmark.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM
+                or Path(root).resolve() != ORIGINAL_RPO_ARCHIVE.resolve()):
+            raise ValueError('Formal V4 BO requires the canonical archived expert-prior update-100 original RPO reference')
+        return check_v4_archive(ORIGINAL_RPO_ARCHIVE, benchmark, conditions)
     protocol_path = root/'reference_protocol.json'
     protocol = read(protocol_path)
     archived_protocol = ORIGINAL_RPO_ARCHIVE/'reference_protocol.json'
@@ -775,7 +774,7 @@ def checked_original_rpo_reference(root, benchmark, conditions):
                         report_sha256=sha(path), protocol_sha256=sha(protocol_path))
 
 
-def original_rpo_scoring(reference, source, benchmark, panel, conditions, *, metric_profile='three', metric_weights=None):
+def original_rpo_scoring(reference, source, benchmark, panel, conditions, *, metric_profile='four', metric_weights=None):
     expected = required_panel_pairs(conditions)
     check_panel_pairs(reference['pairs'], expected)
     (pair,) = reference['pairs']
@@ -835,7 +834,7 @@ def measurement_panel_source(root):
                 measurements_completed_sha256=sha(root/'measurements_completed.json'))
 
 
-def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, metric_profile='three', metric_weights=None):
+def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, metric_profile='four', metric_weights=None):
     panel, reference_root, output = (Path(path).resolve() for path in (measurements_root, reference_root, output))
     if any(output.is_relative_to(source) or source.is_relative_to(output) for source in (panel, reference_root)):
         raise ValueError('Original RPO scoring needs a separate output directory')
@@ -878,8 +877,10 @@ def read_search_benchmark(scoring_path, scoring, conditions):
     reports, _, benchmark, measured_conditions = checked_measurement_panel(panel)
     if measured_conditions != conditions:
         raise ValueError('Frozen Original RPO measurement conditions changed')
-    reference, source = checked_original_rpo_reference(
-        Path(scoring['original_rpo_reference']['root']), benchmark, conditions)
+    reference_source = scoring['original_rpo_reference']
+    root = (REPO/reference_source['root'] if reference_source.get('source_type') == 'repository_v4_milestone'
+            else Path(reference_source['root']))
+    reference, source = checked_original_rpo_reference(root, benchmark, conditions)
     metric_profile = 'four' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three'
     # Existing scores retain the selected weights even if the provisional
     # default configuration was subsequently edited for a new experiment.
@@ -894,167 +895,71 @@ def read_search_benchmark(scoring_path, scoring, conditions):
     return panel, benchmark
 
 
-def freeze_panel_scoring(work, scoring):
-    receipt = dict(manifest_sha256=sha(work/'manifest.json'))
-    if scoring_cot_basis(scoring) == ABSOLUTE_COT_BASIS:
-        receipt['measurements_completed_sha256'] = sha(work/'measurements_completed.json')
-    path = work/'scoring.json'
-    freeze(path, scoring)
-    freeze(work/'completed.json', dict(receipt, scoring_sha256=sha(path)))
-    print('BO_CALIBRATION_READY', path, flush=True)
-
-
-def write_calibration_summary(work, reports, scoring, conditions):
-    tasks = {task: [pair['tasks'][task] for report in reports for pair in report['pairs']] for task in TASKS}
-    trials_per_task = len(reports) * len(conditions['seeds']) * conditions['copies']
-    if any(len(trials) != trials_per_task for trials in tasks.values()):
-        raise ValueError('Calibration measurement count differs from the frozen conditions')
-    task_summary = {}
-    for task, trials in tasks.items():
-        speeds = [row['mean_forward_mps'] for row in trials if row['mean_forward_mps'] is not None]
-        task_summary[task] = dict(trials=len(trials), successes=sum(row['status'] == 'success' for row in trials),
-                                  mean_horizontal_mps=fmean(speeds) if speeds else None,
-                                  command_mps=conditions['tasks'][task]['speed_mps'])
-    coefficients = {}
-    for task, metrics in scoring['metrics'].items():
-        coefficients[task] = {}
-        for metric, row in metrics.items():
-            scale = row['p90'] - row['p10']
-            if not isclose(scale, row['scale'], rel_tol=1e-12) or scale <= 0.:
-                raise ValueError(f'Invalid calibration scale for {task}/{metric}')
-            coefficients[task][metric] = dict(**row, multiplier=1/scale, offset=-row['p10']/scale)
-    benchmark = scoring['benchmark']
-    summary = dict(structures=len(reports), ppo_updates=benchmark['updates'],
-                   initial_actor_sha256=benchmark['initial_actor_sha256'],
-                   scoring_sha256=sha(work/'scoring.json'), trials=sum(len(rows) for rows in tasks.values()),
-                   paired_successes=sum(pair['feasible'] is True for report in reports for pair in report['pairs']),
-                   tasks=task_summary, normalization=coefficients)
-    if scoring_cot_basis(scoring) == ABSOLUTE_COT_BASIS:
-        summary.update(cot_basis=ABSOLUTE_COT_BASIS, task_weights=scoring['task_weights'])
-    path = work/'calibration_summary.json'
-    freeze(path, summary)
-    print('BO_CALIBRATION_VERIFIED', path, flush=True)
-
-
-def freeze_scoring(work, *, resume_paused=False):
-    if (work/'USER_PAUSED').exists() and not resume_paused:
-        raise RuntimeError('USER_PAUSED; pass --resume-paused to continue this run')
-    reports, keys, benchmark, conditions = checked_measurement_panel(work)
-    scoring = panel_scoring(reports, keys, benchmark, conditions=conditions)
-    resume_pause(work, resume_paused)
-    freeze_panel_scoring(work, scoring)
-    write_calibration_summary(work, reports, scoring, conditions)
-
-
 def initialize(a, work, source, plan, actor, conditions):
-    keys = calibration_keys()
-    lookup = {tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
+    """Create the fixed V4 measurement panel, never a legacy percentile score."""
+    if a.updates != DEFAULT_BO_UPDATES or official_conditions_path(digest(conditions)) != PHYSICS_CONDITIONS:
+        raise ValueError('New BO measurements require the V4 100-update, fixed 200 Hz protocol')
+    keys=calibration_keys()
+    lookup={tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
     if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
         raise ValueError('Missing fixed calibration structures in shared plan')
-    benchmark = dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates)
-    if a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions):
-        benchmark['selection_velocity_frame'] = EVALUATION_VELOCITY_FRAME
-    if uses_current_schedule(a.updates, conditions):
-        benchmark['ppo_schedule'] = PPO_SCHEDULE
-        benchmark['init_at_random_ep_len'] = True
-        benchmark['envs_per_task'] = MIXED_BO_LAYOUT
-        saved_manifest = read(work/'manifest.json') if (work/'manifest.json').is_file() else None
-        if saved_manifest is not None and saved_manifest.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM:
-            # Existing historical panels may finish *read-only* validation or
-            # scoring, but never acquire a new observation with the new learner.
-            if not ((work/'measurements_completed.json').is_file() or (work/'scoring.json').is_file()):
-                raise ValueError('Incomplete old PPO panel; use its original frozen code or a separate native panel')
-            a.ppo_algorithm = saved_manifest.get('ppo_algorithm')
-            if a.ppo_algorithm is not None:
-                settings = NATIVE_PPO_PROFILES.get(a.ppo_algorithm)
-                if settings is None or saved_manifest.get('native_ppo_settings') != settings:
-                    raise ValueError('Unknown historical native PPO panel settings')
-                benchmark.update(ppo_algorithm=a.ppo_algorithm, native_ppo_settings=settings)
-        else:
-            a.ppo_algorithm = NATIVE_PPO_ALGORITHM
-            benchmark.update(ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS)
-    manifest = dict(**benchmark, conditions_sha256=digest(conditions), structure_keys=list(map(list, keys)))
-    reuse = getattr(a, 'reuse_finetuned_panel', None)
+    a.ppo_algorithm=NATIVE_PPO_ALGORITHM
+    benchmark=dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates,
+        selection_velocity_frame=EVALUATION_VELOCITY_FRAME,ppo_schedule=PPO_SCHEDULE,
+        init_at_random_ep_len=True,envs_per_task=MIXED_BO_LAYOUT,
+        ppo_algorithm=NATIVE_PPO_ALGORITHM,native_ppo_settings=NATIVE_PPO_SETTINGS)
+    manifest=dict(**benchmark,conditions_sha256=digest(conditions),structure_keys=list(map(list,keys)))
+    reuse=getattr(a,'reuse_finetuned_panel',None)
     if reuse is not None:
-        reuse = reuse.resolve()
+        reuse=reuse.resolve()
         if reuse == work.resolve():
             raise ValueError('Reevaluation requires a separate completed calibration panel')
-        check_panel_receipt(reuse/'scoring.json')
-        previous = read(reuse/'manifest.json')
-        if any(previous.get(key) != value for key, value in benchmark.items()) or previous.get(
+        # A V4 measurement panel deliberately has no local percentile scoring
+        # file. Authenticate its actual measured observations and tuning receipts.
+        checked_measurement_panel(reuse)
+        previous=read(reuse/'manifest.json')
+        if any(previous.get(key) != value for key,value in benchmark.items()) or previous.get(
                 'structure_keys') != manifest['structure_keys']:
             raise ValueError('Reusable panel differs in structures, shared actor or PPO setting')
-        manifest['reused_finetuned_panel'] = dict(path=str(reuse), manifest_sha256=sha(reuse/'manifest.json'))
-    freeze(work/'manifest.json', manifest)
+        if previous.get('reused_finetuned_panel'):
+            reuse=Path(previous['reused_finetuned_panel']['path']).resolve()
+        manifest['reused_finetuned_panel']=dict(path=str(reuse),manifest_sha256=sha(reuse/'manifest.json'))
+    freeze(work/'manifest.json',manifest)
     if (work/'measurements_completed.json').is_file():
-        if getattr(a, 'measure_only', False):
-            checked_measurement_panel(work)
-            resume_pause(work, a.resume_paused)
-            print('BO_CALIBRATION_MEASUREMENTS_READY', work/'measurements_completed.json', flush=True)
-        else:
-            freeze_scoring(work, resume_paused=a.resume_paused)
+        checked_measurement_panel(work)
+        resume_pause(work,a.resume_paused)
+        print('BO_CALIBRATION_MEASUREMENTS_READY',work/'measurements_completed.json',flush=True)
         return
     resume_pause(work,a.resume_paused)
-    reports, evidence = [], []
-    old_scoring_path = work/'scoring.json'
-    previous = read(old_scoring_path) if old_scoring_path.is_file() else None
-    if previous is not None and (a.updates == 100 or span_only_panel(previous)):
-        reanchor = span_only_panel(previous)
-        if reanchor or (work/'completed.json').is_file():
-            check_panel_receipt(old_scoring_path)
-        previous_benchmark = previous['benchmark']
-        if previous.get('conditions_sha256') != manifest['conditions_sha256']:
-            raise ValueError('Frozen calibration uses different measurement conditions')
-        if any(previous_benchmark.get(key) != value for key, value in benchmark.items()):
-            raise ValueError('Frozen calibration uses a different starting policy, plan or PPO budget')
-        for entry in previous_benchmark['reports']:
-            relative = Path(entry['report'])
-            path = work/relative
-            reports.append(initial_report(path, entry, benchmark))
-            evidence.append(dict(entry, report=(Path('..')/relative).as_posix()) if reanchor else entry)
-        if reanchor:
-            work = work/'percentile_scoring'
-            work.mkdir(exist_ok=True)
-            freeze(work/'manifest.json', manifest)
-    else:
-        elapsed = 0.
-        for index, key in enumerate(keys, 1):
-            folder = work/f'design_{index:02d}'
-            candidate_args = a
-            if reuse is not None:
-                candidate_args = copy(a)
-                candidate_args.finetuned = reuse/f'design_{index:02d}'/'tuning'
-            report = evaluate(candidate_args, folder, source, plan, actor, lookup[key]['design_ids']['stairs'], conditions)
-            path = folder/'bo_evaluation.json'
-            reports.append(report)
-            evidence.append(dict(report=str(path.relative_to(work)), sha256=sha(path)))
-            if 'measurement_dt_s' in conditions:
-                elapsed += calibration_evaluation_timing(work, report['measurements'])['evaluation_seconds']
-                print('CALIBRATION_PROGRESS', index, '/ 50', f'evaluation_seconds={elapsed:.2f}', flush=True)
-            else:
-                print('CALIBRATION_PROGRESS', index, '/ 50', flush=True)
-    if 'measurement_dt_s' in conditions:
-        timing = calibration_evaluation_timing(work, [row for report in reports for row in report['measurements']])
-        if timing['accepted_measurements'] != len(keys) * len(TASKS) * len(conditions['seeds']):
-            raise ValueError('Incomplete accepted measurement coverage for the fixed panel')
-        freeze(work/'evaluation_timing.json', timing)
-    if conditions.get('measurement_dt_s') == PHYSICS_DT:
-        freeze(work/'measurements_completed.json', dict(conditions_sha256=digest(conditions),
-               manifest_sha256=sha(work/'manifest.json'), reports=evidence))
-    if getattr(a, 'measure_only', False):
-        print('BO_CALIBRATION_MEASUREMENTS_READY', work/'measurements_completed.json', flush=True)
-        return
-    if conditions.get('measurement_dt_s') == PHYSICS_DT:
-        freeze_scoring(work, resume_paused=a.resume_paused)
-        return
-    scoring = panel_scoring(reports, keys, dict(benchmark, reports=evidence), conditions=conditions)
-    freeze_panel_scoring(work, scoring)
+    reports,evidence=[],[]
+    elapsed=0.
+    for index,key in enumerate(keys,1):
+        folder=work/f'design_{index:02d}'
+        candidate_args=a
+        if reuse is not None:
+            candidate_args=copy(a)
+            candidate_args.finetuned=reuse/f'design_{index:02d}'/'tuning'
+        report=evaluate(candidate_args,folder,source,plan,actor,lookup[key]['design_ids']['stairs'],conditions)
+        path=folder/'bo_evaluation.json'
+        reports.append(report)
+        evidence.append(dict(report=path.relative_to(work).as_posix(),sha256=sha(path)))
+        elapsed+=calibration_evaluation_timing(work,report['measurements'])['evaluation_seconds']
+        print('CALIBRATION_PROGRESS',index,'/ 50',f'evaluation_seconds={elapsed:.2f}',flush=True)
+    timing=calibration_evaluation_timing(work,[row for report in reports for row in report['measurements']])
+    if timing['accepted_measurements'] != len(keys)*len(TASKS)*len(conditions['seeds']):
+        raise ValueError('Incomplete accepted measurement coverage for the fixed panel')
+    freeze(work/'evaluation_timing.json',timing)
+    freeze(work/'measurements_completed.json',dict(conditions_sha256=digest(conditions),
+        manifest_sha256=sha(work/'manifest.json'),reports=evidence))
+    checked_measurement_panel(work)
+    print('BO_CALIBRATION_MEASUREMENTS_READY',work/'measurements_completed.json',flush=True)
 
 
 def search(a, work, source, plan, actor, conditions):
-    """Canonical continuous BO, shared by the three- and four-metric profiles."""
+    """Canonical continuous BO using the current four-metric ratios."""
     scoring = read(a.scoring)
-    if (scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or
+    if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD or
+            scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or
             scoring['benchmark'].get('native_ppo_settings') != NATIVE_PPO_SETTINGS):
         raise ValueError('Native PPO BO requires a newly measured native panel and original-RPO reference; old data remain historical')
     a.ppo_algorithm = NATIVE_PPO_ALGORITHM
@@ -1085,9 +990,10 @@ def main(argv=None):
         elif command == 'initialize':
             p.add_argument('--reuse-finetuned-panel', type=Path,
                            help='Use all 50 completed PPO runs from a separate calibration panel')
-            p.add_argument('--measure-only', action='store_true', help='Save both CoTs and defer freezing scores')
+            p.add_argument('--measure-only', action='store_true', default=True,
+                           help='Prepare only the 50 measured observations (the only current initialize mode)')
         elif command == 'search':
-            p.add_argument('--scoring', type=Path, help='Frozen original-RPO three- or four-metric scoring JSON')
+            p.add_argument('--scoring', type=Path, help='Frozen V4 four-metric original-RPO scoring JSON')
             p.add_argument('--seed', type=int, default=42)
             p.add_argument('--trials', type=int, default=100, help='Total evaluations including the original 50 initial observations')
             p.add_argument('--history', type=Path, help='Completed prior search to read without modifying it')
@@ -1098,10 +1004,6 @@ def main(argv=None):
             p.add_argument('--warp-cache', type=Path)
             p.add_argument('--template', type=Path)
             p.add_argument('--mesh-dir', type=Path)
-    p = sub.add_parser('calibrate')
-    p.add_argument('report', type=Path)
-    p.add_argument('--benchmark-name', required=True)
-    p.add_argument('--output', type=Path, required=True)
     p = sub.add_parser('score')
     p.add_argument('report', type=Path)
     p.add_argument('--scoring', required=True, type=Path)
@@ -1109,12 +1011,12 @@ def main(argv=None):
     p.add_argument('--measurements-root', required=True, type=Path)
     p.add_argument('--resume-paused', action='store_true')
     p.add_argument('--original-rpo-reference', type=Path,
-                   help='Validated original RPO evaluation directory for reference-ratio scoring')
-    p.add_argument('--metric-profile', choices=('three', 'four'),
-                   help='Original RPO metric profile (default: four for original-RPO scoring)')
+                   help='Canonical repository original-RPO reference directory (default when --output is set)')
+    p.add_argument('--metric-profile', choices=('four',), default='four',
+                   help='Only the four-metric original-RPO profile is active')
     p.add_argument('--metric-weights', type=Path,
                    help='Four-metric weights JSON (default: configs/bo_metric_weights_four.json)')
-    p.add_argument('--output', type=Path, help='Separate output directory for original RPO scoring')
+    p.add_argument('--output', type=Path, required=True, help='Separate output directory for original RPO scoring')
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
     p.add_argument('--conditions', type=Path, default=FORMAL_CONDITIONS)
@@ -1124,35 +1026,36 @@ def main(argv=None):
         work = a.measurements_root.resolve()
         if not work.is_dir():
             parser.error('Completed measurement panel directory does not exist')
-        if (a.original_rpo_reference is None) != (a.output is None):
-            parser.error('Original RPO scoring requires both --original-rpo-reference and --output')
-        if a.metric_profile is not None and a.original_rpo_reference is None:
-            parser.error('--metric-profile requires --original-rpo-reference and --output')
-        if a.metric_weights is not None and (a.original_rpo_reference is None or a.metric_profile == 'three'):
-            parser.error('--metric-weights requires the four-metric Original RPO profile')
-        if a.original_rpo_reference is not None:
-            output = a.output.resolve()
-            if output.is_relative_to(work) or output.is_relative_to(a.original_rpo_reference.resolve()):
-                parser.error('Original RPO scoring requires a separate output directory')
-            with run_lock(output):
-                resume_pause(output, a.resume_paused)
-                freeze_original_rpo_scoring(work, a.original_rpo_reference, output,
-                                            metric_profile=a.metric_profile or 'four',
-                                            metric_weights=read(a.metric_weights) if a.metric_weights is not None else None)
-            return
-        with run_lock(work):
-            freeze_scoring(work, resume_paused=a.resume_paused)
+        if a.original_rpo_reference is None:
+            a.original_rpo_reference = ORIGINAL_RPO_ARCHIVE
+        output = a.output.resolve()
+        if output.is_relative_to(work) or output.is_relative_to(a.original_rpo_reference.resolve()):
+            parser.error('Original RPO scoring requires a separate output directory')
+        with run_lock(work), run_lock(output):
+            resume_pause(work, a.resume_paused)
+            resume_pause(output, a.resume_paused)
+            freeze_original_rpo_scoring(work, a.original_rpo_reference, output,
+                                        metric_profile='four',
+                                        metric_weights=read(a.metric_weights) if a.metric_weights is not None else None)
         return
     if a.command == 'ingest':
         write_new(a.output, ingest_measurements(a.spec, a.conditions))
         return
-    if a.command == 'calibrate':
-        report = checked_report(a.report)
-        write_new(a.output, calibrate(report, dict(name=a.benchmark_name, report=str(a.report.resolve()),
-                                                   report_sha256=sha(a.report))))
-        return
     if a.command == 'score':
-        print(json.dumps(objective(checked_report(a.report), read(a.scoring)), indent=2, allow_nan=False))
+        scoring = read(a.scoring)
+        report = checked_report(a.report)
+        if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD
+                or scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM
+                or report.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM):
+            raise ValueError('The score CLI only accepts V4 four-metric original-RPO scoring')
+        reference, source = checked_original_rpo_reference(ORIGINAL_RPO_ARCHIVE, scoring['benchmark'], report['conditions'])
+        weights = {task:{name:row['weight'] for name,row in items.items()}
+                   for task,items in scoring['metrics'].items()}
+        expected = original_rpo_scoring(reference, source, scoring['benchmark'], scoring['measurement_panel'],
+                                        report['conditions'], metric_weights=weights)
+        if expected != scoring:
+            raise ValueError('Scoring differs from the canonical V4 original-RPO normalization')
+        print(json.dumps(objective(report, scoring), indent=2, allow_nan=False))
         return
     if min(a.updates,a.timeout) < 1 or a.gpu < 0 or (a.command == 'search' and a.trials < 50):
         parser.error('Expected a positive PPO and BO budget, timeout, and valid GPU index')
@@ -1162,6 +1065,9 @@ def main(argv=None):
     formal = a.command == 'initialize'
     conditions_path = a.conditions or PHYSICS_CONDITIONS
     conditions = read_conditions(conditions_path)
+    if a.command in ('initialize','evaluate') and (a.updates != DEFAULT_BO_UPDATES or
+            official_conditions_path(digest(conditions)) != PHYSICS_CONDITIONS):
+        raise ValueError('New BO measurements require the V4 100-update, fixed 200 Hz protocol')
     if (getattr(a, 'reuse_finetuned_panel', None) or getattr(a, 'measure_only', False)) and 'measurement_dt_s' not in conditions:
         parser.error('Panel reevaluation and measurement-only calibration require 200 Hz conditions')
     if a.command == 'search':
@@ -1174,8 +1080,8 @@ def main(argv=None):
         default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_native_expert_prior'/'scoring.json'
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
-        if scoring.get('method') not in ORIGINAL_RPO_SCORING_METHODS:
-            raise ValueError('Continuous BO requires original-RPO ratio scoring (three or four metrics); old percentile scores remain reproducible through score')
+        if scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD:
+            raise ValueError('Continuous BO requires the four-metric original-RPO ratio scoring; historical scores are read-only')
         if (scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or
                 scoring['benchmark'].get('native_ppo_settings') != NATIVE_PPO_SETTINGS):
             raise ValueError('Native PPO BO requires native original-RPO measurements and initial panel; old scoring remains available for read-only scoring')
@@ -1207,8 +1113,7 @@ def main(argv=None):
         label = ('calibration50_native_expert_prior_ppo100_200hz' if uses_current_schedule(a.updates, conditions)
                  and 'measurement_dt_s' in conditions else calibration_label(conditions, a.updates))
     elif a.command == 'search':
-        profile = 'four_metrics' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three_metrics'
-        label = f'search_continuous_{profile}'
+        label = 'search_continuous_four_metrics'
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
