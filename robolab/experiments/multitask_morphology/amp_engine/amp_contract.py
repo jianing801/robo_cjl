@@ -124,13 +124,17 @@ def load_plan(path,bank_path):
     if plan['experiment']!=experiment_identity(bank_path,plan['configuration'],plan['reference_library']):raise ValueError('bank/config/source identity changed')
     return plan
 
-def validate_checkpoint(path,experiment,expected_completed):
+def validate_checkpoint(path,experiment,expected_completed,*,within_stage=None):
     import torch
     state=torch.load(path,map_location='cpu',weights_only=False)
     if state.get('hybrid_identity')!=experiment:raise ValueError('not this hybrid experiment; old AMP checkpoints rejected')
     if type(state.get('iter')) is not int or state['iter']+1!=expected_completed:raise ValueError('checkpoint absolute update differs from scheduled boundary')
     stage=state.get('hybrid_stage',{})
-    if stage.get('end_update')!=expected_completed:raise ValueError('only complete previous-stage checkpoint may resume')
+    if within_stage is not None:
+        if (stage != within_stage or stage.get('first_update') != 0 or len(stage.get('design_ids',[])) != 1
+                or not 0 < expected_completed <= stage['end_update']):
+            raise ValueError('partial checkpoint must belong to the exact fixed singleton stage')
+    elif stage.get('end_update')!=expected_completed:raise ValueError('only complete previous-stage checkpoint may resume')
     weights=state['model_state_dict'];optimizer=state['optimizer_state_dict']
     from amp_layout import identity
     extra=weights.get('_extra_state',{})

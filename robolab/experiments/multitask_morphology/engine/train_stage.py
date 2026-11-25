@@ -56,6 +56,7 @@ def main(argv=None, session=None):
     p.add_argument("--execute", action="store_true")
     p.add_argument("--updates", type=int)
     p.add_argument("--resume-checkpoint")
+    p.add_argument("--singleton-root", help="Opt-in fixed single-structure ledger and within-stage recovery")
     p.add_argument("--asset-cache", help="Optional read-only root of previously converted USDs; copy only exact converter-hash matches")
     p.add_argument("--allow-cache-misses", action="store_true",
                    help="Internal experiment cache: convert previously unseen designs normally")
@@ -80,6 +81,11 @@ def main(argv=None, session=None):
     a.torque_soft_constraint = frozen['configuration'].get('torque_soft_constraint')
     a.full_body_torque = frozen['configuration'].get('full_body_torque', False)
     stage = stage_spec(bank, frozen["configuration"], a.stage_index)
+    if a.singleton_root:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from singleton_native import check_single_stage
+        check_single_stage(stage, frozen['configuration']['rotation']['total_updates'])
+        if len(bank['designs']) != 1: raise ValueError('Singleton requires exactly one bank design')
     if a.design_ids is not None and a.design_ids != stage["design_ids"]:
         raise ValueError("CLI design IDs differ from frozen schedule")
     a.design_ids = stage["design_ids"]
@@ -219,10 +225,15 @@ def main(argv=None, session=None):
         # instead of misleadingly showing only this group's end boundary.
         if not continuing:
             attach_global_logger(runner, frozen["configuration"]["rotation"]["total_updates"])
-        if a.execute and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
+        if a.execute and not a.singleton_root and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
             raise ValueError("exact previous completed-stage checkpoint required; no scratch restart")
         if a.resume_checkpoint and not continuing:
-            runner.restore_spatial(a.resume_checkpoint)
+            if a.singleton_root:
+                from singleton_native import restore_within_stage
+                from hybrid_contract import validate_checkpoint
+                restore_within_stage(runner, a.resume_checkpoint, experiment, stage, validate_checkpoint)
+            else:
+                runner.restore_spatial(a.resume_checkpoint)
             saved=torch.load(a.resume_checkpoint,map_location=raw.device,weights_only=False)
             def same(left,right):
                 if isinstance(left,torch.Tensor):return isinstance(right,torch.Tensor) and torch.equal(left.detach().cpu(),right.detach().cpu())
@@ -259,9 +270,21 @@ def main(argv=None, session=None):
             if len(runner.alg.optimizer.state):
                 raise RuntimeError("zero-update smoke changed optimizer")
         else:
+            if a.singleton_root:
+                from singleton_native import install_ledger
+                install_ledger(runner, output, a.singleton_root, stage)
             if task == 'backpack':
                 from hybrid_backpack import learn_payload
-                learn_payload(runner,raw,output,a.updates)
+                if a.singleton_root and a.resume_checkpoint:
+                    from hybrid_backpack import apply_payload
+                    from hybrid_payload import payload_segments
+                    for first,end,_ in payload_segments(runner.current_learning_iteration,a.updates):
+                        boundary=max(x for x in (0,1000,1500,2000,2500,3000) if x<=first)
+                        apply_payload(raw,output,boundary)
+                        runner.current_learning_iteration=first
+                        runner.learn(end-first)
+                else:
+                    learn_payload(runner,raw,output,a.updates)
             else:
                 runner.learn(remaining)
         capture_learning_rng(session)

@@ -34,6 +34,7 @@ def main(argv=None, session=None):
     p.add_argument("--execute", action="store_true")
     p.add_argument("--updates", type=int)
     p.add_argument("--resume-checkpoint")
+    p.add_argument("--singleton-root", help="Opt-in fixed single-structure ledger and within-stage recovery")
     p.add_argument("--asset-cache", help="Optional read-only root of previously converted USDs; copy only exact converter-hash matches")
     p.add_argument("--allow-cache-misses", action="store_true",
                    help="Internal experiment cache: convert previously unseen designs normally")
@@ -56,6 +57,11 @@ def main(argv=None, session=None):
     from amp_contract import load_plan, stage_spec
     frozen = load_plan(a.hybrid_plan, bank_path)
     stage = stage_spec(bank, frozen["configuration"], a.stage_index)
+    if a.singleton_root:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from singleton_native import check_single_stage
+        check_single_stage(stage, frozen['configuration']['rotation']['total_updates'])
+        if len(bank['designs']) != 1: raise ValueError('Singleton requires exactly one bank design')
     if Path(a.reference_library).resolve() != Path(frozen["reference_library"]).resolve():
         raise ValueError("reference library differs from frozen plan")
     from amp_references import validate_library
@@ -193,10 +199,15 @@ def main(argv=None, session=None):
         # instead of misleadingly showing only this group's end boundary.
         if not continuing:
             attach_global_logger(runner, frozen["configuration"]["rotation"]["total_updates"])
-        if a.execute and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
+        if a.execute and not a.singleton_root and bool(a.resume_checkpoint) != (stage["first_update"] > 0):
             raise ValueError("exact previous completed-stage checkpoint required; no scratch restart")
         if a.resume_checkpoint and not continuing:
-            runner.restore_spatial(a.resume_checkpoint)
+            if a.singleton_root:
+                from singleton_native import restore_within_stage
+                from amp_contract import validate_checkpoint
+                restore_within_stage(runner, a.resume_checkpoint, experiment, stage, validate_checkpoint, amp=True)
+            else:
+                runner.restore_spatial(a.resume_checkpoint)
             saved=torch.load(a.resume_checkpoint,map_location=raw.device,weights_only=False)
             def same(left,right):
                 if isinstance(left,torch.Tensor):return isinstance(right,torch.Tensor) and torch.equal(left.detach().cpu(),right.detach().cpu())
@@ -235,6 +246,9 @@ def main(argv=None, session=None):
             if len(runner.alg.optimizer.state):
                 raise RuntimeError("zero-update smoke changed optimizer")
         else:
+            if a.singleton_root:
+                from singleton_native import install_ledger
+                install_ledger(runner, output, a.singleton_root, stage)
             runner.learn(remaining)
         capture_rng(session)
         audit = {}
