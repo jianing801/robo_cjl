@@ -1,6 +1,6 @@
 import pytest
 
-from native_ppo_convergence import diagnostic_performance
+from native_ppo_convergence import diagnostic_performance, evaluations_enabled
 
 
 def test_performance_not_gated_by_progress_ratio_but_missing_cot_is_not_fabricated():
@@ -19,3 +19,10 @@ def test_performance_not_gated_by_progress_ratio_but_missing_cot_is_not_fabricat
     assert result['mean_objective'] is None
     assert result['tasks']['run']['task_objective'] is None
     assert result['tasks']['run']['raw']['forward_rmse_mps'] == .2
+
+
+def test_training_only_and_dynamic_skip_marker(tmp_path):
+    assert evaluations_enabled(tmp_path, False)
+    assert not evaluations_enabled(tmp_path, True)
+    (tmp_path/'SKIP_EVALUATION').touch()
+    assert not evaluations_enabled(tmp_path, False)

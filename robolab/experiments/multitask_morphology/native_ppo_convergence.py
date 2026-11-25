@@ -58,6 +58,10 @@ def check_pause(root, tuning=None):
         raise KeyboardInterrupt('USER_PAUSED')
 
 
+def evaluations_enabled(root, training_only):
+    return not training_only and not (Path(root)/'SKIP_EVALUATION').exists()
+
+
 def verify_blob(bo, tuning, record, manifest_digest):
     import torch
     folder = tuning/'checkpoints'
@@ -128,6 +132,23 @@ def write_report(bo, root, rows, scoring, legacy, tuning):
         ax.axhline(1, color='gray', linestyle=':'); ax.set_title(task); ax.set_xlabel('PPO updates')
         ax.set_ylabel('Cost / original reference'); ax.grid(alpha=.2); ax.legend()
     fig.savefig(root/'convergence_four_metrics.png', dpi=170); plt.close(fig)
+    write_training_report(bo, root, legacy, tuning)
+    fig, axes = plt.subplots(1,3,figsize=(15,5),layout='constrained')
+    for ax, task in zip(axes, TASKS, strict=True):
+        for key in keys:
+            values=[r['tasks'][task]['normalized'][key] for r in rows]
+            ax.plot([r['updates'] for r in rows],[math.nan if v is None else v for v in values],
+                    marker='o',label=key)
+        ax.axhline(1,color='gray',linestyle=':'); ax.set_title(task); ax.set_xlabel('PPO updates')
+        ax.set_ylabel('Metric / original reference'); ax.grid(alpha=.2); ax.legend(fontsize=7)
+    fig.savefig(root/'four_metric_details.png',dpi=170); plt.close(fig)
+
+
+def write_training_report(bo, root, legacy, tuning):
+    """Generate training diagnostics without invoking any simulator/evaluation."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2,2,figsize=(12,8),layout='constrained')
     for run, label in ((legacy/'tuning','Legacy simplified PPO'), (tuning,'Native joint PPOAMP')):
         with (run/'mean_reward.csv').open(encoding='utf8', newline='') as stream:
@@ -139,15 +160,6 @@ def write_report(bo, root, rows, scoring, legacy, tuning):
             ax.set_title(task); ax.set_xlabel('PPO updates'); ax.set_ylabel('Mean reward'); ax.grid(alpha=.2)
     for ax in axes.flat: ax.legend()
     fig.savefig(root/'mean_reward.png', dpi=170); plt.close(fig)
-    fig, axes = plt.subplots(1,3,figsize=(15,5),layout='constrained')
-    for ax, task in zip(axes, TASKS, strict=True):
-        for key in keys:
-            values=[r['tasks'][task]['normalized'][key] for r in rows]
-            ax.plot([r['updates'] for r in rows],[math.nan if v is None else v for v in values],
-                    marker='o',label=key)
-        ax.axhline(1,color='gray',linestyle=':'); ax.set_title(task); ax.set_xlabel('PPO updates')
-        ax.set_ylabel('Metric / original reference'); ax.grid(alpha=.2); ax.legend(fontsize=7)
-    fig.savefig(root/'four_metric_details.png',dpi=170); plt.close(fig)
     from finetune_state import checkpoint_history
     history=checkpoint_history(tuning,bo.sha(tuning/'manifest.json'))[1:]
     with (root/'ppo_diagnostics.csv').open('w',encoding='utf8',newline='') as stream:
@@ -167,6 +179,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--smoke-only', action='store_true')
+    parser.add_argument('--training-only', action='store_true', help='Run the native PPO experiment without milestone evaluation')
+    parser.add_argument('--summarize-trained', action='store_true', help='Read an already completed 1000-update run; never start training/evaluation')
     parser.add_argument('--resume-paused', action='store_true')
     a = parser.parse_args()
     root, legacy = a.output.resolve(), a.legacy_run.resolve()
@@ -198,6 +212,19 @@ def main():
             for folder in (root, root/'smoke', root/'tuning'):
                 if folder.exists(): bo.resume_pause(folder,True)
         check_pause(root)
+        if a.summarize_trained:
+            tuning=root/'tuning'
+            if not (tuning/'training_completed.json').is_file():
+                raise ValueError('Cannot summarize an incomplete training run')
+            frozen=bo.read(root/'manifest.json')
+            if (frozen['ppo_algorithm']!=NATIVE_PPO_ALGORITHM or frozen['requested_updates']!=1000
+                    or frozen['initial_actor_sha256']!=bo.sha(initial) or frozen['source_plan_sha256']!=bo.sha(source)
+                    or frozen['candidate']!=candidate):
+                raise ValueError('Training-only summary refers to a different experiment')
+            final, manifest, digest, history=run_training(bo,a,root,tuning,source,initial,candidate,1000)
+            write_training_report(bo,root,legacy,tuning)
+            status(root,'complete',updates=1000,evaluated=[],evaluation_skipped=True,final_actor_sha256=bo.sha(final))
+            return
         bo.freeze(root/'comparison_scoring.json', scoring)
         commit = subprocess.check_output(['git','-C',str(bo.REPO),'rev-parse','HEAD'], text=True).strip()
         bo.freeze(root/'manifest.json', dict(kind='native_joint_ppo_convergence',runtime_commit=commit,
@@ -223,6 +250,10 @@ def main():
         if any(not torch.equal(value,start['actor'][key]) for key,value in model.state_dict().items()):
             raise ValueError('Critic warmup changed the distilled Actor')
         del start
+        if not evaluations_enabled(root,a.training_only):
+            write_training_report(bo,root,legacy,tuning)
+            status(root,'complete',updates=1000,evaluated=[],evaluation_skipped=True,final_actor_sha256=bo.sha(final))
+            return
         rows=[]
         for update in MILESTONES:
             check_pause(root,tuning)
