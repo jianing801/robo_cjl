@@ -78,6 +78,25 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" search \
 
 每个结构保存初始和最近两次已提交更新的完整学习状态、每次更新的记录和指标、最终模型及原始评估数据。`tuning/mean_reward.csv` 保存每代总体和分任务 Mean reward，`tuning/training_reward.csv` 还保存每步均值、完成回合数及回合累计回报。`tuning/training_completed.json` 记录最终 PPO 更新和模型身份，`bo_evaluation.json` 汇总正式评估。
 
+
+## 完成 100 个结构后的紧凑踝电机补充搜索
+
+已有原机基准的 100 个完整观测时，可以继续追加 10 个结构，将新候选的踝电机限制为原版 4340P、新版 4340P V1.1 和 6216P；RS06 和 8009P V1.1 的历史观测仍参加 GP 拟合，但不再提议这两种电机。综合代价及工况、微调、三任务成功判据和原机基准均不变，不添加人为代价惩罚。约束期望改进以全部已测结构（包括此前 RS06 和 8009P V1.1）中的最佳可行代价为改善基准，随新观测更新；只限制新增候选空间，不更改优化目标或获取函数。
+
+沿用第三步的输出目录和参数，不新建初始校准点。为避免代码版本变化影响对照，在已更新至包含补充搜索入口的仓库中运行以下命令，指定此前 100 个结构实际使用的冻结代码根目录（以下为既有租卡示例）：
+
+```bash
+frozen=/root/sj-tmp/robo_bo_original_rpo_8fe8b348
+conda run --no-capture-output -n robo_cjl python "$entry/bo_compact_ankles.py" \
+  --frozen-code-root "$frozen" \
+  --root "$experiment" --shared-continuation "$continuation" \
+  --scoring "$scoring/scoring.json" --output "$search" --trials 110 --gpu 0
+```
+
+原样保留 `budget_0100.json`、原有结构全部微调检查点和原始测量。启动时在原搜索锁内核查历史观测及回执，任何历史训练或测量工作进程的重启请求均被拒绝。补充搜索的三款电机、历史证据哈希及预算冻结在 `extension_0100_0110.json`。新的训练从 `BO_TRIAL 101 / 110` 开始；中断后重复此补充搜索命令，人工暂停后加 `--resume-paused`。
+
+`budget_0110.json` 仍记录完整 110 个结构及全局最优；比较紧凑踝电机的优化效果时，将其中的已成功结构按允许的三个踝电机过滤，分别比较此前 100 个和补充搜索后的最小综合代价。不要将全局最优与紧凑范围内最优混为一谈。
+
 ## 单独评估一个候选
 
 把 `真实结构ID` 换成共同结构库里该候选的 `stairs` ID。
