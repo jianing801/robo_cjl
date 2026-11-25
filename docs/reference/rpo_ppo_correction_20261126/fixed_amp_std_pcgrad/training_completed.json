@@ -1,0 +1,21 @@
+{
+  "result": "CANDIDATE_FINETUNED",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "ppo_updates": 1000,
+  "manifest_sha256": "43bdde1287702e54046bf531d0894ba223b86c5da9ac5bb19a86fcdb592af9af",
+  "student": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_ppo_correction_study_db87f99/fixed_amp_std_pcgrad/tuning/shared_actor_finetuned.pt",
+  "student_sha256": "1ae4f797b4c5c08f7bd2d6607ee0aa30bed8c1669b011e876fb4fbbf949c7a7b",
+  "checkpoint_sha256": "66bfd47a668e5883304c58991873df760d3e6510d58aa77e32818c2531170124"
+}

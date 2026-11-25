@@ -38,3 +38,14 @@ def test_native_evaluation_returns_flat_reports_with_evidence():
     assert pairs==bo.paired_trials(reports,conditions)
     assert pairs[0]['feasible'] is True
     assert evidence==[r['evidence'] for r in reports]
+
+
+def test_expert_resumed_status_keeps_distinct_process_identity(tmp_path):
+    import json,os
+    from ppo_correction_study import record_expert_resumed
+    record_expert_resumed(tmp_path,12345,{'task':'stairs','completed_updates':336})
+    result=json.loads((tmp_path/'status.json').read_text())
+    assert result['pid']==os.getpid()
+    assert result['expert_pid']==12345
+    assert result['phase']=='expert_resumed'
+    assert result['task']=='stairs' and result['checkpoint_update']==336

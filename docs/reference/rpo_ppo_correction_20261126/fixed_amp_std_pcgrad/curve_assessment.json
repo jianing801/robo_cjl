@@ -1,0 +1,48 @@
+{
+  "passed": true,
+  "tasks": {
+    "stairs": {
+      "passed": true,
+      "checks": {
+        "baseline_floor": true,
+        "peak_retention": true,
+        "final_window_change": true,
+        "final_trend": true
+      },
+      "baseline_early": 32.322960088432026,
+      "last100": 38.0043277960457,
+      "preceding100": 37.63027730384978,
+      "best100": 38.006753607130555,
+      "last200_fitted_change": 0.5998675551845897
+    },
+    "backpack": {
+      "passed": true,
+      "checks": {
+        "baseline_floor": true,
+        "peak_retention": true,
+        "final_window_change": true,
+        "final_trend": true
+      },
+      "baseline_early": 28.266821081158117,
+      "last100": 30.51747654615438,
+      "preceding100": 30.43169772927713,
+      "best100": 30.52687674927646,
+      "last200_fitted_change": 0.1513483036548274
+    },
+    "run": {
+      "passed": true,
+      "checks": {
+        "baseline_floor": true,
+        "peak_retention": true,
+        "final_window_change": true,
+        "final_trend": true
+      },
+      "baseline_early": 28.492556290596575,
+      "last100": 31.391204757933163,
+      "preceding100": 31.309616123126922,
+      "best100": 31.452753635034988,
+      "last200_fitted_change": 0.10774131644560053
+    }
+  },
+  "tolerance": 0.05
+}

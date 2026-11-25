@@ -1,0 +1,8 @@
+{
+  "phase": "training_expert",
+  "pid": 530549,
+  "timestamp": 1795644147.621962,
+  "task": "stairs",
+  "completed_updates": 336,
+  "target": 12000
+}

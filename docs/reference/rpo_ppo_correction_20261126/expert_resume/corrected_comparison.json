@@ -1,0 +1,6 @@
+{
+  "selection": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_ppo_correction_study_db87f99/selected.json",
+  "selection_sha256": "45a9d5a039bb3c3329c8e36a16f8027d7903421d6754bc8a2258dcf3d5591392",
+  "actor_sha256": "1ae4f797b4c5c08f7bd2d6607ee0aa30bed8c1669b011e876fb4fbbf949c7a7b",
+  "controller_commit": "84d6f982992d2e3199f4ed4608da168cbff640f1"
+}

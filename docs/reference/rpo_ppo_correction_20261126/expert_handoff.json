@@ -1,0 +1,23 @@
+{
+  "pid": 530549,
+  "create_time": 1795644136.2,
+  "command": [
+    "/root/sj-tmp/envs/robo_cjl/bin/python",
+    "-B",
+    "-u",
+    "/root/sj-tmp/robo_ppo_correction_84d6f98/robolab/experiments/multitask_morphology/original_expert_comparison.py",
+    "--shared",
+    "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_native_expert_prior_ppo1000_convergence",
+    "--eval100",
+    "/root/sj-tmp/bo-ppo100-round5-data/rpo_native_expert_prior_update100_eval",
+    "--native-checkout",
+    "/root/sj-tmp/robo_singleton_native_abfa4a6",
+    "--output",
+    "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_singleton_expert_comparison_native_abfa4a6",
+    "--gpu",
+    "0",
+    "--resume-paused",
+    "--corrected-selection",
+    "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_ppo_correction_study_db87f99/selected.json"
+  ]
+}

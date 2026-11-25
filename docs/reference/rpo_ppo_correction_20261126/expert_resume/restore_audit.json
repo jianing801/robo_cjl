@@ -1,0 +1,7 @@
+{
+  "checkpoint": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_singleton_expert_comparison_native_abfa4a6/experts/stairs/attempts/1795623636589810284_36aa3eae/result/models/model_335.pt",
+  "next_update": 336,
+  "policy_and_normalization_exact": true,
+  "adam_exact": true,
+  "learning_rate": 7.593750000000002e-05
+}

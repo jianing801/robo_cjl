@@ -195,6 +195,12 @@ def run_profile(a,bo,profile,source,initial,origin,previous):
     return result
 
 
+def record_expert_resumed(root,expert_pid,current):
+    from original_expert_comparison import status
+    status(root,'expert_resumed',expert_pid=expert_pid,task=current.get('task'),
+           checkpoint_update=current.get('completed_updates'))
+
+
 def resume_experts(a):
     """The user authorized one conditional resume after a validated correction."""
     import subprocess,psutil
@@ -206,8 +212,13 @@ def resume_experts(a):
     handoff=a.output/'expert_handoff.json'
     if handoff.exists():
         previous=bo.read(handoff)
-        if matching_process(previous['pid'],previous['create_time']) is not None:
-            status(a.output,'expert_resumed',pid=previous['pid']);return
+        process=matching_process(previous['pid'],previous['create_time'])
+        if process is not None:
+            current=bo.read(a.expert_root/'status.json')
+            if (current.get('pid')!=previous['pid'] or str(selection) not in process.cmdline()
+                    or (a.expert_root/'USER_PAUSED').exists()):
+                raise RuntimeError('Existing expert handoff identity or pause state changed')
+            record_expert_resumed(a.output,previous['pid'],current);return
         raise RuntimeError('Expert handoff already attempted; inspect its status rather than duplicating it')
     if not (a.expert_root/'USER_PAUSED').exists():
         raise RuntimeError('Expected the preserved expert pause marker before the conditional handoff')
@@ -223,7 +234,7 @@ def resume_experts(a):
         if proc.poll() is not None:raise RuntimeError('Conditional expert resume exited; inspect handoff logs')
         current=bo.read(a.expert_root/'status.json')
         if current.get('pid')==proc.pid and current.get('phase')=='training_expert':
-            status(a.output,'expert_resumed',pid=proc.pid,task=current.get('task'),checkpoint_update=current.get('completed_updates'));return
+            record_expert_resumed(a.output,proc.pid,current);return
         time.sleep(2)
     raise RuntimeError('Expert resume has not reached its training launch state')
 

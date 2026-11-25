@@ -1,0 +1,24 @@
+{
+  "study_root": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_ppo_correction_study_db87f99",
+  "controller_pid": 421050,
+  "code_commit": "84d6f982992d2e3199f4ed4608da168cbff640f1",
+  "profiles": [
+    "fixed_amp_std",
+    "fixed_amp_std_pcgrad"
+  ],
+  "updates_per_profile": 1000,
+  "previous_short_pilot": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_ppo_correction_study_bdde2e7",
+  "original_expert_root": "/root/sj-tmp/bo-ppo100-round5-data/rpo_original_singleton_expert_comparison_native_abfa4a6",
+  "paused_rough_updates": 336,
+  "paused_rough_checkpoint_sha256": "5d5d4ffed389c469d63a0dd35dc1e9dea049123a1bfa7659c2c767e76ea23041",
+  "automatic_expert_resume": "Only after both ablations and selected validated three-task result",
+  "formal_bo_reference": "Unchanged",
+  "controller_create_time": 1795635126.8,
+  "previous_controller": 417872,
+  "supervisor_recovery": "A completed, all 3 reports successful, corrected flat evaluation schema; reused original A actor and trace hashes, started B independently",
+  "selected_profile": "fixed_amp_std_pcgrad",
+  "expert_supervisor_pid": 530549,
+  "expert_supervisor_create_time": 1795644136.2,
+  "expert_worker_pid": 530789,
+  "verified_resumed_update": 390
+}
