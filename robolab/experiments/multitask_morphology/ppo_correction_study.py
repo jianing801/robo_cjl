@@ -61,6 +61,11 @@ def read_csv(path):
     with Path(path).open(encoding='utf8',newline='') as stream: return list(csv.DictReader(stream))
 
 
+def measured_pairs(bo,reports,conditions):
+    """Native evaluation returns flat task reports with a separate evidence field."""
+    return bo.paired_trials(reports,conditions),[r['evidence'] for r in reports]
+
+
 def write_diagnostics(bo,folder,tuning,previous):
     from finetune_state import checkpoint_history
     from singleton_native import publish
@@ -179,13 +184,13 @@ def run_profile(a,bo,profile,source,initial,origin,previous):
             status(a.output,'retry_correction_evaluation',profile=profile,error=str(error))
             if retry==2: raise
             time.sleep(20)
-    reports=[r['report'] for r in measured];pairs=bo.paired_trials(reports,cond)
+    pairs,evidence=measured_pairs(bo,measured,cond)
     if len(pairs)!=1 or pairs[0]['feasible'] is not True:
-        publish(folder/'gait_rejected.json',dict(pairs=pairs,evidence=[r['evidence'] for r in measured]));return None
+        publish(folder/'gait_rejected.json',dict(pairs=pairs,evidence=evidence));return None
     result=dict(profile=profile,tuning=str(tuning),actor=str(actor),actor_sha256=bo.sha(actor),
                 curve_assessment_sha256=bo.sha(folder/'curve_assessment.json'),
                 manifest_sha256=bo.sha(tuning/'manifest.json'),conditions_sha256=bo.digest(cond),
-                pairs=pairs,evidence=[r['evidence'] for r in measured])
+                pairs=pairs,evidence=evidence)
     publish(folder/'accepted.json',result)
     return result
 

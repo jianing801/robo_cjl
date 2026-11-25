@@ -25,3 +25,16 @@ def test_selection_prefers_balanced_measured_performance():
         return {'profile':name,'pairs':[{'feasible':True,'tasks': {t:{'status':'success','observed':{'absolute_mechanical_cot':v,**{k:v for k in keys[1:]}}} for t,v in zip(tasks,values)}}]}
     winner=choose_best([candidate('low_average',[.5,.5,1.2]),candidate('balanced',[.9,.9,.9])],norm)
     assert winner['profile']=='balanced'
+
+
+def test_native_evaluation_returns_flat_reports_with_evidence():
+    import bo
+    from ppo_correction_study import measured_pairs
+    conditions={'seeds':[7],'copies':1}
+    reports=[dict(task=t,seed=7,trials=[dict(replica=0,status='success')],
+                  evidence=dict(report=f'{t}/bo_trials.json',sha256=t))
+             for t in ('stairs','backpack','run')]
+    pairs,evidence=measured_pairs(bo,reports,conditions)
+    assert pairs==bo.paired_trials(reports,conditions)
+    assert pairs[0]['feasible'] is True
+    assert evidence==[r['evidence'] for r in reports]
