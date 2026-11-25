@@ -400,6 +400,20 @@ def test_reference_library_binds_bank_geometry_six_bodies_and_eight_clips(tmp_pa
                  joint_names=names,key_bodies=list(KEY_BODIES),designs={'a':binding},source_clips=sources)
     manifest=tmp_path/'library.json';manifest.write_text(json.dumps(library))
     assert validate_library(bank,bank_path,manifest,['a'])==library
+    # An identical original clip in a different source checkout is valid.
+    relocated=deepcopy(library)
+    name=next(iter(weights))
+    saved_source=Path(sources[name]['path'])
+    original=tmp_path/'original_source'/saved_source.name
+    original.parent.mkdir()
+    original.write_bytes(saved_source.read_bytes())
+    relocated['source_clips'][name]['path']=str(original)
+    manifest.write_text(json.dumps(relocated))
+    assert validate_library(bank,bank_path,manifest,['a'])==relocated
+    original.write_bytes(b'changed original source')
+    with pytest.raises(ValueError,match='native AMP reference source changed'):
+        validate_library(bank,bank_path,manifest)
+    manifest.write_text(json.dumps(library))
     with pytest.raises(ValueError,match='subset'):validate_library(bank,bank_path,manifest,['unknown'])
     bad=deepcopy(library);bad['key_bodies'][2]='wrong_elbow';manifest.write_text(json.dumps(bad))
     with pytest.raises(ValueError,match='semantics'):validate_library(bank,bank_path,manifest)
