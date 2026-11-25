@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from functools import lru_cache
 import math
+import re
 
 import torch
 from tensordict import TensorDict
@@ -202,3 +203,92 @@ def native_amp_setup(agent, teacher_state, obs, *, step_dt):
         state = {key: deepcopy(teacher_state[key]) for key in
                  ("amp_discriminator_state_dict", "amp_discriminator_normalizer_state_dict")}
     return {"amp_cfg": amp, "amp_state": state, "obs_groups": groups}
+
+
+def native_expert_setup(task, checkpoint, teacher, obs, *, checkpoint_sha256):
+    """Extract the verified native value network and learned exploration prior.
+
+    The caller has already validated the checkpoint SHA in load_plan() and
+    loaded its native model_state_dict strictly into the frozen expert. Copy
+    directly from that same checkpoint, never from a randomly initialized
+    critic or by computing inverse transforms on the shared student input.
+    """
+    if task not in TASKS or not isinstance(checkpoint_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", checkpoint_sha256):
+        raise ValueError("Native expert checkpoint identity differs")
+    state = checkpoint["model_state_dict"]
+    critic = obs["critic"]
+    core = CORE_WIDTHS[TASKS.index(task)]
+    if critic.ndim != 2 or len(critic) < 1:
+        raise ValueError("Native expert critic observation shape differs")
+    width = critic.shape[-1]
+    config = state.get("_extra_state", {}).get("config", {})
+    context = config.get("context_width")
+    if (type(context) is not int or context < 20 or config.get("role") != task
+            or core + context != width):
+        raise ValueError("Native expert critic context/layout differs")
+
+    critic_prefix, normalizer_prefix = "critic.", "critic_obs_normalizer."
+    critic_state = {key[len(critic_prefix):]: value for key, value in state.items()
+                    if key.startswith(critic_prefix)}
+    norm_state = {key[len(normalizer_prefix):]: value for key, value in state.items()
+                  if key.startswith(normalizer_prefix)}
+    expected = {}
+    for layer, inputs, outputs in ((0, width, 512), (2, 512, 256), (4, 256, 128), (6, 128, 1)):
+        expected[f"{layer}.weight"] = (outputs, inputs)
+        expected[f"{layer}.bias"] = (outputs,)
+
+    def finite_tensor(value, shape):
+        return (isinstance(value, torch.Tensor) and value.shape == shape
+                and torch.is_floating_point(value) and bool(torch.isfinite(value).all()))
+
+    if set(critic_state) != set(expected) or any(
+            not finite_tensor(critic_state[key], shape) for key, shape in expected.items()):
+        raise ValueError("Native expert critic checkpoint architecture or weights differ")
+
+    # The actual RPOFlat/RPORough experts were trained without a critic
+    # normalizer. AMP has the native three-frame PrefixNormalization, which
+    # intentionally leaves the known design suffix unchanged.
+    base_width = core if task == "run" else None
+    if bool(teacher.critic_obs_normalization) != (base_width is not None):
+        raise ValueError("Native expert critic normalizer contract differs")
+    if base_width is None:
+        if norm_state:
+            raise ValueError("Native identity critic has unexpected normalizer state")
+    else:
+        keys = {"base._mean", "base._var", "base._std", "base.count"}
+        if (set(norm_state) != keys
+                or any(not finite_tensor(norm_state[k], (1, base_width)) for k in keys - {"base.count"})
+                or not isinstance(norm_state["base.count"], torch.Tensor)
+                or norm_state["base.count"].shape != ()
+                or norm_state["base.count"].dtype != torch.long
+                or bool(norm_state["base.count"] < 0)
+                or bool((norm_state["base._var"] < 0).any())
+                or bool((norm_state["base._std"] < 0).any())):
+            raise ValueError("Native AMP critic normalizer state or prefix width differs")
+
+    if getattr(teacher, "state_dependent_std", False) or ("std" in state) == ("log_std" in state):
+        raise ValueError("Native expert action std checkpoint is not a single per-joint parameter")
+    raw_std = state.get("std", state.get("log_std"))
+    if not finite_tensor(raw_std, (23,)):
+        raise ValueError("Native expert action std is not finite")
+    with torch.inference_mode(False):
+        action_std = raw_std.detach().cpu().clone()
+        if "log_std" in state:
+            action_std = action_std.exp()
+        if not finite_tensor(action_std, (23,)) or not bool((action_std > 0).all()):
+            raise ValueError("Native expert action std must be positive and finite")
+        prior = dict(
+            critic_state_dict={k: v.detach().cpu().clone() for k, v in critic_state.items()},
+            critic_normalizer_state_dict={k: v.detach().cpu().clone() for k, v in norm_state.items()},
+            critic_normalizer_base_width=base_width,
+            action_std=action_std,
+            checkpoint_sha256=checkpoint_sha256)
+    with torch.inference_mode():
+        value = teacher.evaluate(obs)
+    if not finite_tensor(value, (len(critic), 1)):
+        raise ValueError("Trusted native expert initial value output differs or is nonfinite")
+    with torch.inference_mode(False):
+        # Ordinary, independent tensor on the physical observation device for
+        # the learner's initial exact-output parity check; not a prior field.
+        value = value.detach().clone()
+    return {"expert_prior": prior, "teacher_value": value}

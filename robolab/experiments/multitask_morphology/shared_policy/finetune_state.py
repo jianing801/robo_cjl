@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from contract import sha, structure_key, write_new
-from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS
+from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, NATIVE_PPO_STATE_KIND
 from ppo_channel import publish
 
 
@@ -176,9 +176,22 @@ def _finite_state(state):
     return True
 
 
+def _v4_policy_contract(policy):
+    """Record the immutable identity of all three native expert priors."""
+    widths = list(policy.critic_widths)
+    hashes = dict(policy.teacher_checkpoint_sha256)
+    if (policy.std.shape != (3, 23) or not torch.isfinite(policy.std).all() or (policy.std <= 0).any()
+            or len(policy.critics) != 3 or len(policy.critic_normalizers) != 3
+            or len(widths) != 3 or any(type(width) != int or width <= 0 for width in widths)
+            or set(hashes) != {'stairs', 'backpack', 'run'}
+            or any(not isinstance(h, str) or not re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes.values())):
+        raise ValueError('Invalid native PPO expert-prior identity or learned standard deviations')
+    return dict(critic_widths=widths, teacher_checkpoint_sha256=hashes)
+
+
 def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, metrics=None, *,
                            warmup_completed=10, training_reward=None):
-    """Atomically commit every native learning state without mutating old v2 archives.
+    """Atomically commit the v4 native state without mutating old v2/v3 archives.
 
     Index zero is the actor's original state *after* the separate Critic-only
     warmup. The actor never changes during that warmup.
@@ -193,7 +206,8 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
         raise ValueError('Native PPO update is already committed')
     path = folder/f'update_{completed_updates:06d}_{uuid.uuid4().hex}.pt'
     actor = learner.policy.actor
-    value = dict(kind='shared_ppo_learning_state_v3', ppo_algorithm=NATIVE_PPO_ALGORITHM,
+    prior = _v4_policy_contract(learner.policy)
+    value = dict(kind=NATIVE_PPO_STATE_KIND, ppo_algorithm=NATIVE_PPO_ALGORITHM,
         actor=actor.state_dict(), policy=learner.policy.state_dict(),
         optimizer=learner.optimizer.state_dict(), learning_rate=float(learner.learning_rate),
         amp_discriminator=learner.amp_discriminator.state_dict(), disc_optimizer=learner.disc_optimizer.state_dict(),
@@ -202,12 +216,13 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
         counts=list(learner.counts), rng=_native_rng(), completed_updates=completed_updates,
         warmup_completed=warmup_completed, manifest_sha256=manifest_sha256,
         schema=actor.schema, architecture=actor.architecture, metrics=metrics,
-        simulator_state_restored=False)
+        simulator_state_restored=False, **prior)
     if training_reward is not None:
         value['training_reward'] = training_reward
     publish(path, value)
     record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
-        ppo_algorithm=NATIVE_PPO_ALGORITHM, warmup_completed=warmup_completed,
+        ppo_algorithm=NATIVE_PPO_ALGORITHM, state_kind=NATIVE_PPO_STATE_KIND,
+        teacher_checkpoint_sha256=prior['teacher_checkpoint_sha256'], warmup_completed=warmup_completed,
         path=path.name, sha256=sha(path), metrics=metrics)
     if training_reward is not None:
         record['training_reward'] = training_reward
@@ -221,18 +236,20 @@ def load_native_checkpoint(root, learner, manifest_sha256):
     if not history:
         return None
     record = history[-1]
-    if record.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM:
-        raise ValueError('Cannot resume legacy PPO state as a native PPO learner')
+    if record.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or record.get('state_kind') != NATIVE_PPO_STATE_KIND:
+        raise ValueError('Cannot resume legacy PPO or native V3 state as a native expert-prior V4 learner')
     state_path = _checkpoint_blob(folder, record)
     if sha(state_path) != record['sha256']:
         raise ValueError('Committed native PPO checkpoint changed')
     state = torch.load(state_path, map_location='cpu', weights_only=True)
     actor = learner.policy.actor
-    if (state.get('kind') != 'shared_ppo_learning_state_v3' or
+    prior = _v4_policy_contract(learner.policy)
+    if (state.get('kind') != NATIVE_PPO_STATE_KIND or
             any(state.get(name) != record.get(name) for name in (
                 'ppo_algorithm', 'completed_updates', 'manifest_sha256', 'warmup_completed',
-                'metrics', 'training_reward')) or state.get('schema') != actor.schema
+                'metrics', 'training_reward', 'teacher_checkpoint_sha256')) or state.get('schema') != actor.schema
             or state.get('architecture') != actor.architecture or state.get('counts') != list(learner.counts)
+            or any(state.get(name) != value for name, value in prior.items())
             or state.get('warmup_completed') != NATIVE_PPO_SETTINGS['critic_warmup_updates']):
         raise ValueError('Native PPO learning-state identity mismatch')
     if not _finite_state({key: state[key] for key in (
@@ -240,6 +257,7 @@ def load_native_checkpoint(root, learner, manifest_sha256):
             'disc_obs_buffer', 'disc_demo_obs_buffer')}):
         raise ValueError('Nonfinite restored native PPO learning state')
     learner.policy.load_state_dict(state['policy'], strict=True)
+    _v4_policy_contract(learner.policy)
     if any(not torch.equal(value.cpu(), state['actor'][name]) for name, value in actor.state_dict().items()):
         raise ValueError('Native PPO exported actor does not match native policy state')
     learner.optimizer.load_state_dict(state['optimizer'])

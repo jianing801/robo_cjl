@@ -200,11 +200,13 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                     latest=decode_amp_frames(o['policy'][:,:234])[:,-1]
                     return canonical_input(history.append(latest,r),plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))
                 if mixed_count is not None:
-                    from native_observations import native_amp_setup
+                    from native_observations import native_amp_setup, native_expert_setup
                     # The shared mixed learner owns the native trainable AMP
                     # discriminator; no frozen reward closure or teacher
                     # parameter mutation in this path.
                     amp_native = native_amp_setup(agent,state,obs,step_dt=raw.step_dt)
+                    amp_native.update(native_expert_setup('run',state,teacher,obs,
+                        checkpoint_sha256=spec['checkpoint_sha256']))
                     return env,raw,obs,canonical,STUDENT_ACTION_CLIP,None,metadata['collection_protocol'],amp_native
                 from rsl_rl.modules.amp import AMPDiscriminator,LossType
                 amp=agent['algorithm']['amp_cfg'];disc_cfg=amp['amp_discriminator']

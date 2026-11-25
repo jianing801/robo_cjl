@@ -33,7 +33,10 @@ class NativeTask:
     def __init__(self, name, backend, protocol):
         self.name = name
         self.wrapper, self.raw, obs, self.canonical, self.clip, self.reward_adapter, policy = backend[:7]
-        self.amp_training = backend[7] if len(backend) == 8 else None
+        if len(backend) != 8 or 'expert_prior' not in backend[7] or 'teacher_value' not in backend[7]:
+            raise ValueError(f'{name} backend did not supply the exact frozen expert prior')
+        self.training_prior = backend[7]
+        self.amp_training = self.training_prior if name == 'run' else None
         if policy != protocol:
             raise ValueError(f'{name} rollout protocol differs')
         if self.reward_adapter is not None or (name == 'run') != (self.amp_training is not None):
@@ -151,6 +154,40 @@ def collect_native(a, sim, tasks, counts, learner, adapter, root, *, steps=STEPS
     return batches, obs
 
 
+@torch.no_grad()
+def verify_expert_initialization(tasks, learner, adapter, expected_hashes):
+    """Check the initialized full Critic and raw action std against live teachers.
+
+    This occurs before restoring a training checkpoint or adapting the Critic.
+    The first real native observations, including context, are used for parity.
+    """
+    if tuple(task.name for task in tasks) != TASKS or set(expected_hashes) != set(TASKS):
+        raise ValueError('Missing or disordered expert initialization tasks')
+    audits = {}
+    for index, task in enumerate(tasks):
+        prior = task.training_prior['expert_prior']
+        if prior['checkpoint_sha256'] != expected_hashes[task.name]:
+            raise ValueError(f'{task.name} expert checkpoint identity differs')
+        expected_std = prior['action_std'].detach().cpu()
+        actual_std = learner.policy.std[index].detach().cpu()
+        if expected_std.shape != (23,) or not torch.equal(expected_std, actual_std):
+            raise ValueError(f'{task.name} initial exploration std differs from frozen teacher')
+        packed = adapter.pack(task.name, task.base, task.observation['critic'])
+        predicted = learner.policy.evaluate(packed)
+        expected = task.training_prior['teacher_value'].to(predicted.device)
+        if (predicted.shape != expected.shape or not torch.isfinite(predicted).all()
+                or not torch.isfinite(expected).all()
+                or not torch.allclose(predicted, expected, rtol=1e-5, atol=1e-6)):
+            raise ValueError(f'{task.name} initial expert critic prediction parity failed')
+        audits[task.name] = dict(checkpoint_sha256=prior['checkpoint_sha256'],
+            critic_max_abs_error=float((predicted-expected).abs().max()),
+            critic_native_normalizer_prefix=prior['critic_normalizer_base_width'],
+            action_std=expected_std.tolist(), action_std_mean=float(expected_std.mean()),
+            action_std_min=float(expected_std.min()), action_std_max=float(expected_std.max()),
+            observation_rows=len(expected))
+    return audits
+
+
 def train(a, root, attempt, plan, candidate, protocol, counts):
     from finetune_settings import NATIVE_PPO_SETTINGS
     from finetune_state import load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints
@@ -183,8 +220,14 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     widths = tuple(task.observation['critic'].shape[1] for task in tasks)
     adapter = NativeObservationAdapter(widths)
     amp = tasks[-1].amp_training
+    teacher_priors = {task.name:task.training_prior['expert_prior'] for task in tasks}
     learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
-                                   adapter.augment, a.device, steps=STEPS_PER_TASK)
+                                   adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK)
+    expected_hashes = {name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS}
+    write_new(attempt/'expert_prior_audit.json', dict(initial_actor_sha256=sha(a.student),
+        tasks=verify_expert_initialization(tasks, learner, adapter, expected_hashes)))
+    print('NATIVE_EXPERT_PRIORS_VERIFIED',
+          {task:float(learner.policy.std[i].detach().mean()) for i,task in enumerate(TASKS)},flush=True)
     restored = load_native_checkpoint(root, learner, digest)
     if restored is not None and restored['completed_updates'] != completed:
         raise ValueError('Restored native learning state differs from its committed update')
@@ -217,6 +260,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     warmup = NATIVE_PPO_SETTINGS['critic_warmup_updates']
     if restored is None:
         original_actor = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+        original_std = learner.policy.std.detach().cpu().clone()
         learner.configure_critic_only(True)
         warmup_rows = []
         for update in range(1, warmup+1):
@@ -230,6 +274,8 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         if any(not torch.equal(value.detach().cpu(), original_actor[name])
                for name, value in model.state_dict().items()):
             raise RuntimeError('Critic-only warmup unexpectedly modified the original shared Actor')
+        if not torch.equal(learner.policy.std.detach().cpu(), original_std):
+            raise RuntimeError('Critic-only warmup unexpectedly modified inherited exploration std')
         del original_actor
         write_new(attempt/'critic_warmup.json', warmup_rows)
         receipt = save_native_checkpoint(root, learner, 0, digest, warmup_completed=warmup,
@@ -301,6 +347,7 @@ def main():
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
               ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS,
+              teacher_checkpoint_sha256={name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS},
               init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
               compact_training_artifacts=a.compact_training_artifacts,

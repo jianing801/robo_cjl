@@ -2,7 +2,7 @@
 
 更新：2026-11-25。本流程从同一份获选共享 Actor 出发，给每个结构相同的 100 次三任务联合 PPO 微调预算，再用固定工况实测指标比较硬件。正式搜索分为前 50 个已测结构和后 50 个连续 BO 候选；2500 个格点是专家训练结构库，**不是 BO 的搜索边界**。
 
-**原生 PPO 微调修复：** 新方法的算法身份为 `shared_native_ppoamp_v3`，旧版手写 PPO 的观测只能用于历史复算和对照；不得直接用于新方法的代理模型或归一化分母。在原机 1000 代对照实验通过验证之前，不重启 BO。详见[共享策略原生 PPO 微调说明](共享策略原生PPO微调说明.md)。
+**原生 PPO 微调修复：** 新方法的算法身份为 `shared_native_ppoamp_expert_prior_v4`，旧版手写 PPO V2 和原生共享 Critic V3 的观测只能用于历史复算和对照；不得直接用于新方法的代理模型或归一化分母。在原机 1000 代对照实验通过验证之前，不重启 BO。详见[共享策略原生 PPO 微调说明](共享策略原生PPO微调说明.md)。
 
 [总流程](跨形态多任务共享策略训练流程.md) · [共享蒸馏与选模](共享策略蒸馏详细说明.md) · [原机实测基准](原始配置基准.md)
 
@@ -17,10 +17,10 @@ entry="$PWD/robolab/experiments/multitask_morphology"
 experiment="$PWD/robolab/logs/multitask_full2500_physical_migrated"
 continuation="$experiment/shared_policy_round5"
 data="$experiment/bo"
-panel="$data/calibration50_native_ppo100_200hz"
-reference="$data/rpo_original_025_030_10010l_4340p_native_ppo100_200hz/evaluation"
-scoring="$data/scoring_original_rpo_four_metrics_native"
-search="$data/search_continuous_four_native_100"
+panel="$data/calibration50_native_expert_prior_ppo100_200hz"
+reference="$data/rpo_original_025_030_10010l_4340p_native_expert_prior_ppo100_200hz/evaluation"
+scoring="$data/scoring_original_rpo_four_metrics_native_expert_prior"
+search="$data/search_continuous_four_native_expert_prior_100"
 ```
 
 已有 `measurements_completed.json` 且与原机基准的共享起点、原生 PPO 算法身份、微调、工况一致时，直接使用原始测量进入第二步，**无需重做微调或评估**。旧算法的 50 个观测虽保留，但不是新算法的数据。否则准备前 50 个结构：
@@ -35,7 +35,7 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
 
 ### 微调与固定工况
 
-- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor 和 Critic，恢复各任务原生 Critic 特权观测、独立归一化，AMP 判别器在独立副本上随训练同步更新，老师和物理参数不改。
+- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor，各自复制专家原生 Critic、实际归一化及 23 维动作标准差，按任务门控选择独立 Critic/探索参数；AMP 判别器在独立副本上随训练同步更新，老师和物理参数不改。
 - 普通 PPO 随机初始化回合步数计数，先做 10 次只更新 Critic 的预热（不计入正式预算），每个候选做 **100 次原生 PPO 更新**，每次每环境采 24 步，训练 5 个 epoch、4 个小批/epoch；禁止用近邻结构替代实际提议。
 - 微调后冻结 Actor，固定种子 `20261118`，每任务一条 20 秒试次（50 个结构共 150 条）。评估关闭观测噪声、推力、动力学和初态随机化及动作采样，50 Hz 控制、200 Hz 物理采样（步长 5 ms，每任务 4000 个物理步）。
 

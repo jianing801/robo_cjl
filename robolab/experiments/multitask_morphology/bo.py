@@ -6,6 +6,7 @@ from pathlib import Path
 from statistics import fmean, stdev
 from math import isclose, isfinite
 import os
+import re
 import sys
 from uuid import uuid4
 
@@ -50,7 +51,8 @@ from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from evaluation import EVALUATION_VELOCITY_FRAME
 from finetune_settings import (MIXED_BO_ENVS, MIXED_BO_LAYOUT, PPO_SCHEDULE,
-                               NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS)
+                               NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS,
+                               NATIVE_PPO_PROFILES, NATIVE_PPO_STATE_KIND)
 from persistence import resume_pause, run_lock
 
 ORIGINAL_RPO_FOUR_METRIC_METHOD = FOUR_METRIC_SCORING_METHOD
@@ -214,9 +216,10 @@ def completed_actor_from_hashes(root, source_plan_sha256, initial_actor_sha256, 
         raise ValueError('Fine-tuned candidate/actor identity or PPO budget does not match')
     if ppo_schedule is not None and manifest.get('ppo_schedule') != ppo_schedule:
         raise ValueError('Fine-tuned candidate uses a different PPO optimizer schedule')
+    settings = NATIVE_PPO_PROFILES.get(ppo_algorithm)
     if (manifest.get('ppo_algorithm') != ppo_algorithm or
-            (ppo_algorithm is not None and (ppo_algorithm != NATIVE_PPO_ALGORITHM or
-                manifest.get('native_ppo_settings') != NATIVE_PPO_SETTINGS))):
+            (ppo_algorithm is not None and (settings is None or
+                manifest.get('native_ppo_settings') != settings))):
         raise ValueError('Fine-tuned candidate uses a different PPO algorithm')
     if mixed_bo and (manifest.get('init_at_random_ep_len') is not True
                      or manifest.get('envs_per_task') != MIXED_BO_LAYOUT):
@@ -235,8 +238,15 @@ def completed_actor_from_hashes(root, source_plan_sha256, initial_actor_sha256, 
             raise ValueError('Fine-tuned PPO checkpoint changed')
         if (checkpoint.get('ppo_algorithm') != ppo_algorithm or
                 (ppo_algorithm is not None and checkpoint.get('warmup_completed') !=
-                 NATIVE_PPO_SETTINGS['critic_warmup_updates'])):
+                 settings['critic_warmup_updates'])):
             raise ValueError('Fine-tuned checkpoint uses a different PPO algorithm or Critic warmup')
+        if ppo_algorithm == NATIVE_PPO_ALGORITHM:
+            hashes = manifest.get('teacher_checkpoint_sha256', {})
+            if (checkpoint.get('state_kind') != NATIVE_PPO_STATE_KIND
+                    or checkpoint.get('teacher_checkpoint_sha256') != hashes
+                    or set(hashes) != set(TASKS)
+                    or any(not isinstance(h, str) or not re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes.values())):
+                raise ValueError('Fine-tuned V4 checkpoint has a different expert-prior identity')
     elif sha(complete['evaluation']) != complete['evaluation_sha256']:
         raise ValueError('Fine-tuned candidate evaluation changed')
     return actor
@@ -339,14 +349,15 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
     algorithm = getattr(a, 'ppo_algorithm', NATIVE_PPO_ALGORITHM if mixed else None)
     if explicit and not hasattr(a, 'ppo_algorithm'):
         algorithm = read(tuning/'manifest.json').get('ppo_algorithm')
-    if algorithm not in (None, NATIVE_PPO_ALGORITHM) or (algorithm is not None and not mixed):
+    settings = NATIVE_PPO_PROFILES.get(algorithm)
+    if algorithm is not None and (settings is None or not mixed):
         raise ValueError('Unsupported PPO algorithm for candidate budget')
     identity = dict(kind='rpo_bo_candidate_v1', source_plan_sha256=sha(source), candidate=candidate,
         initial_actor_sha256=sha(initial), conditions_sha256=digest(conditions), updates=a.updates,
         sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
                                          SHARED/'rollout.py', SHARED/'rollout_amp.py')})
     if algorithm is not None:
-        identity.update(ppo_algorithm=algorithm, native_ppo_settings=NATIVE_PPO_SETTINGS)
+        identity.update(ppo_algorithm=algorithm, native_ppo_settings=settings)
     work.mkdir(parents=True, exist_ok=True)
     freeze_candidate_manifest(work/'manifest.json', identity, fixed_reset=conditions.get('reset_mode') == 'fixed')
     resume_pause(work, a.resume_paused)
@@ -366,6 +377,8 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
                         '--timeout-seconds', str(a.timeout)]
         tuning_manifest = tuning/'manifest.json'
         if tuning_manifest.is_file():
+            if read(tuning_manifest).get('ppo_algorithm') != algorithm:
+                raise ValueError('Existing tuning belongs to a different PPO algorithm; use a new V4 output')
             command.append('--resume')
             if a.resume_paused:
                 command.append('--resume-paused')
@@ -598,7 +611,8 @@ def initial_report(path, evidence, benchmark):
     if (identity.get('ppo_algorithm') != benchmark.get('ppo_algorithm')
             or report.get('ppo_algorithm') != benchmark.get('ppo_algorithm')
             or (benchmark.get('ppo_algorithm') is not None and
-                identity.get('native_ppo_settings') != NATIVE_PPO_SETTINGS)):
+                (benchmark['ppo_algorithm'] not in NATIVE_PPO_PROFILES or
+                 identity.get('native_ppo_settings') != NATIVE_PPO_PROFILES[benchmark['ppo_algorithm']]))):
         raise ValueError('Initial BO observation has a different PPO algorithm')
     return report
 
@@ -699,10 +713,11 @@ def checked_measurement_panel(work):
             raise ValueError('Measurements use a different PPO schedule, episode timing or environment layout')
         benchmark.update(settings)
     if manifest.get('ppo_algorithm') is not None:
-        if (not mixed or manifest['ppo_algorithm'] != NATIVE_PPO_ALGORITHM
-                or manifest.get('native_ppo_settings') != NATIVE_PPO_SETTINGS):
+        algorithm = manifest['ppo_algorithm']
+        settings = NATIVE_PPO_PROFILES.get(algorithm)
+        if (not mixed or settings is None or manifest.get('native_ppo_settings') != settings):
             raise ValueError('Measurements use a different native PPO algorithm')
-        benchmark.update(ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS)
+        benchmark.update(ppo_algorithm=algorithm, native_ppo_settings=settings)
     tuning_panel = work
     if reused := manifest.get('reused_finetuned_panel'):
         tuning_panel = Path(reused['path']).resolve()
@@ -724,9 +739,11 @@ def checked_original_rpo_reference(root, benchmark, conditions):
     if benchmark.get('ppo_algorithm') is not None:
         # The new policy must be measured on the exact original structure; the
         # archived actor and raw trace hashes identify a *different* algorithm.
-        if benchmark.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or benchmark.get('native_ppo_settings') != NATIVE_PPO_SETTINGS:
+        algorithm = benchmark['ppo_algorithm']
+        settings = NATIVE_PPO_PROFILES.get(algorithm)
+        if settings is None or benchmark.get('native_ppo_settings') != settings:
             raise ValueError('Unknown native original-RPO PPO settings')
-        expected.update(ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS)
+        expected.update(ppo_algorithm=algorithm, native_ppo_settings=settings)
         if protocol != expected:
             raise ValueError('Original RPO reference and initial samples must share the native PPO protocol')
         folder = root/'candidate'
@@ -738,7 +755,7 @@ def checked_original_rpo_reference(root, benchmark, conditions):
         if (report['candidate']['structure_key'] != archive['design_key']
                 or result['candidate'] != report['candidate']
                 or result['student_sha256'] != report['student_sha256']
-                or result.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM):
+                or result.get('ppo_algorithm') != algorithm):
             raise ValueError('Native original RPO physical structure or actor differs from its measured reference')
         checked_candidate_measurements(folder, report, singleton, conditions, folder/'tuning')
         return report, dict(root=str(root), reference_result_sha256=sha(result_path),
@@ -941,12 +958,18 @@ def initialize(a, work, source, plan, actor, conditions):
         benchmark['ppo_schedule'] = PPO_SCHEDULE
         benchmark['init_at_random_ep_len'] = True
         benchmark['envs_per_task'] = MIXED_BO_LAYOUT
-        if (work/'manifest.json').is_file() and read(work/'manifest.json').get('ppo_algorithm') is None:
+        saved_manifest = read(work/'manifest.json') if (work/'manifest.json').is_file() else None
+        if saved_manifest is not None and saved_manifest.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM:
             # Existing historical panels may finish *read-only* validation or
             # scoring, but never acquire a new observation with the new learner.
             if not ((work/'measurements_completed.json').is_file() or (work/'scoring.json').is_file()):
                 raise ValueError('Incomplete old PPO panel; use its original frozen code or a separate native panel')
-            a.ppo_algorithm = None
+            a.ppo_algorithm = saved_manifest.get('ppo_algorithm')
+            if a.ppo_algorithm is not None:
+                settings = NATIVE_PPO_PROFILES.get(a.ppo_algorithm)
+                if settings is None or saved_manifest.get('native_ppo_settings') != settings:
+                    raise ValueError('Unknown historical native PPO panel settings')
+                benchmark.update(ppo_algorithm=a.ppo_algorithm, native_ppo_settings=settings)
         else:
             a.ppo_algorithm = NATIVE_PPO_ALGORITHM
             benchmark.update(ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS)
@@ -1148,7 +1171,7 @@ def main(argv=None):
             parser.error('--history-budget requires --history')
         if a.history is not None:
             a.history = a.history.resolve()
-        default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_native'/'scoring.json'
+        default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_native_expert_prior'/'scoring.json'
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
         if scoring.get('method') not in ORIGINAL_RPO_SCORING_METHODS:
@@ -1181,7 +1204,7 @@ def main(argv=None):
     if getattr(a, 'finetuned', None) and not actor_receipt(a.finetuned).is_file():
         parser.error('--finetuned needs the completed candidate run directory')
     if a.command == 'initialize':
-        label = ('calibration50_native_ppo100_200hz' if uses_current_schedule(a.updates, conditions)
+        label = ('calibration50_native_expert_prior_ppo100_200hz' if uses_current_schedule(a.updates, conditions)
                  and 'measurement_dt_s' in conditions else calibration_label(conditions, a.updates))
     elif a.command == 'search':
         profile = 'four_metrics' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three_metrics'
@@ -1189,7 +1212,7 @@ def main(argv=None):
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
-        label += '_native_ppo100'
+        label += '_native_expert_prior_ppo100'
     if a.command != 'initialize' and 'measurement_dt_s' in conditions:
         label += '_200hz'
     work = (a.output or a.root/'bo'/label).resolve()

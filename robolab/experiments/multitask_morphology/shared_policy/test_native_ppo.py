@@ -1,6 +1,7 @@
 """CPU integration tests of the native mixed PPO learner (no simulator)."""
 import sys
 from pathlib import Path
+from copy import deepcopy
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[3] / 'rsl_rl'))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent/'amp_engine'))
 
 
 class Actor(nn.Module):
@@ -21,6 +23,24 @@ class Actor(nn.Module):
 
     def forward(self, obs):
         return self.network(obs)
+
+
+def teacher_priors(widths=(4,6,3)):
+    """Synthetic complete native expert state, with distinguishable task stds."""
+    from amp_policy import PrefixNormalization
+    from rsl_rl.networks import MLP
+    result={}
+    for i,(task,width) in enumerate(zip(('stairs','backpack','run'),widths,strict=True)):
+        critic=MLP(width,1,[512,256,128],'elu')
+        base_width=(243 if width==271 else width-1) if task=='run' else None
+        normalizer=PrefixNormalization(base_width) if base_width else nn.Identity()
+        if base_width:
+            normalizer.update(torch.randn(5,width)*2.+1.)
+        result[task]=dict(critic_state_dict=deepcopy(critic.state_dict()),
+            critic_normalizer_state_dict=deepcopy(normalizer.state_dict()),
+            critic_normalizer_base_width=base_width,
+            action_std=torch.linspace(.1+.1*i,.2+.1*i,23),checkpoint_sha256=str(i+1)*64)
+    return result
 
 
 def observation(counts=(2, 2, 2), widths=(4, 6, 3)):
@@ -54,7 +74,8 @@ def amp_obs(n=2, value=1.):
 def test_shared_actor_unchanged_by_privileged_critic():
     from native_ppo import NativeSharedPolicy
     actor = Actor()
-    policy = NativeSharedPolicy(actor, (4, 6, 3), 'cpu')
+    priors=teacher_priors()
+    policy = NativeSharedPolicy(actor, (4, 6, 3), 'cpu',teacher_priors=priors)
     obs = observation()
     original = actor(obs['policy'])
     torch.testing.assert_close(policy.act_inference(obs), original, rtol=0, atol=0)
@@ -63,10 +84,13 @@ def test_shared_actor_unchanged_by_privileged_critic():
     assert not torch.allclose(policy.evaluate(obs), policy.evaluate(changed))
     assert policy.evaluate(obs).shape == (6, 1)
     policy.act(obs)
-    torch.testing.assert_close(policy.action_std, torch.ones(6, 23))
-    assert policy.log_std.requires_grad
+    expected_std=torch.stack([priors[task]['action_std'] for task in ('stairs','backpack','run')]).repeat_interleave(2,dim=0)
+    torch.testing.assert_close(policy.action_std,expected_std,rtol=0,atol=0)
+    assert policy.std.requires_grad and policy.std.shape==(3,23)
     policy.update_normalization(obs)
-    assert [int(norm.count) for norm in policy.critic_normalizers] == [2,2,2]
+    assert isinstance(policy.critic_normalizers[0],nn.Identity)
+    assert isinstance(policy.critic_normalizers[1],nn.Identity)
+    assert int(policy.critic_normalizers[2].base.count)==7
     pad_edit = obs.clone(); pad_edit['critic'][:2,4:] += 1000.
     torch.testing.assert_close(policy.evaluate(obs),policy.evaluate(pad_edit),atol=0,rtol=0)
 
@@ -75,7 +99,7 @@ def learner(symmetry=None):
     from native_ppo import build_native_learner
     cfg, state = amp_settings()
     return build_native_learner(Actor(), (2,2,2), (4,6,3), cfg, state, symmetry, 'cpu',
-                               steps=2, num_epochs=1, num_minibatches=1)
+                               teacher_priors=teacher_priors(),steps=2, num_epochs=1, num_minibatches=1)
 
 
 def fill_rollout(alg):
@@ -101,18 +125,21 @@ def test_native_amp_updates_only_amp_disc_buffer_and_all_task_actor():
     from rsl_rl.algorithms.ppo_amp import PPOAMP
     alg = learner()
     assert isinstance(alg, PPOAMP)
+    assert not alg.optimizer.state and not alg.disc_optimizer.state
     final_obs = fill_rollout(alg)
     raw_actor = {k:v.clone() for k,v in alg.policy.actor.state_dict().items()}
     raw_disc = alg.amp_discriminator.disc_linear.weight.clone()
+    raw_std=alg.policy.std.detach().clone()
     result = alg.compute_returns_and_update(final_obs)
     assert result['samples'] == 12
     assert alg.storage.step == 0
     assert 'amp/disc_loss' in result
     assert 'learning_rate' in result and result['learning_rate'] == alg.learning_rate
     assert set(result['tasks']) == {'stairs','backpack','run'}
-    assert all('kl' in d and 'clip_fraction' in d and 'explained_variance' in d for d in result['tasks'].values())
+    assert all('kl' in d and 'clip_fraction' in d and 'explained_variance' in d and 'mean_action_std' in d for d in result['tasks'].values())
     assert any(not torch.equal(v, raw_actor[k]) for k,v in alg.policy.actor.state_dict().items())
     assert not torch.equal(raw_disc,alg.amp_discriminator.disc_linear.weight)
+    assert all(not torch.equal(a,b) for a,b in zip(raw_std,alg.policy.std,strict=True))
     for section in alg.storage.advantages.split((2,2,2),dim=1):
         assert abs(float(section.mean())) < 1e-5
         assert float(section.std()) == pytest.approx(1., abs=1e-5)
@@ -123,8 +150,8 @@ def test_critic_warmup_keeps_actor_std_discriminator_and_lr_unchanged():
     alg.configure_critic_only(True)
     actor = {k:v.clone() for k,v in alg.policy.actor.state_dict().items()}
     disc = {k:v.clone() for k,v in alg.amp_discriminator.state_dict().items()}
-    critic = {k:v.clone() for k,v in alg.policy.critic_trunk.state_dict().items()}
-    std = alg.policy.log_std.clone()
+    critic = {k:v.clone() for k,v in alg.policy.critics.state_dict().items()}
+    std = alg.policy.std.clone()
     lr = alg.learning_rate
     obs = fill_rollout(alg)
     result = alg.compute_returns_and_update(obs,critic_only=True)
@@ -133,11 +160,12 @@ def test_critic_warmup_keeps_actor_std_discriminator_and_lr_unchanged():
         torch.testing.assert_close(v,actor[k],rtol=0,atol=0)
     for k,v in alg.amp_discriminator.state_dict().items():
         torch.testing.assert_close(v,disc[k],rtol=0,atol=0)
-    assert any(not torch.equal(v,critic[k]) for k,v in alg.policy.critic_trunk.state_dict().items())
-    torch.testing.assert_close(alg.policy.log_std,std,rtol=0,atol=0)
+    assert all(any(not torch.equal(v,critic[k]) for k,v in alg.policy.critics.state_dict().items()
+                   if k.startswith(f'{i}.')) for i in range(3))
+    torch.testing.assert_close(alg.policy.std,std,rtol=0,atol=0)
     assert alg.learning_rate==lr
     alg.configure_critic_only(False)
-    assert alg.policy.log_std.requires_grad
+    assert alg.policy.std.requires_grad
 
 
 def test_native_entropy_coefficients_are_task_specific():
@@ -155,7 +183,7 @@ def test_amp_teacher_copy_and_native_timeout_bootstrapping():
     cfg,state=amp_settings()
     teacher={k:v.clone() for k,v in state['amp_discriminator_state_dict'].items()}
     alg=build_native_learner(Actor(),(2,2,2),(4,6,3),cfg,state,None,'cpu',
-                             steps=2,num_epochs=1,num_minibatches=1)
+                             teacher_priors=teacher_priors(),steps=2,num_epochs=1,num_minibatches=1)
     for key,value in alg.amp_discriminator.state_dict().items():
         torch.testing.assert_close(value,teacher[key],rtol=0,atol=0)
     obs=fill_rollout(alg)
@@ -206,7 +234,7 @@ def test_native_ppo_with_exact_observation_widths_and_real_symmetry_adapter():
                                for task,width in zip(TASKS,widths,strict=True)])
     cfg, state=amp_settings()
     alg=build_native_learner(WideActor(),(2,2,2),widths,cfg,state,adapter.augment,'cpu',
-                             steps=2,num_epochs=1,num_minibatches=1)
+                             teacher_priors=teacher_priors(widths),steps=2,num_epochs=1,num_minibatches=1)
     obs=current_obs()
     for _ in range(2):
         with torch.inference_mode():
@@ -230,3 +258,85 @@ def test_corrupt_amp_demonstration_is_rejected_before_storage():
         alg.process_mixed_env_step(observation(),torch.ones(6),torch.zeros(6,dtype=torch.bool),
                                    torch.zeros(6,dtype=torch.bool),native)
     assert alg.storage.step==0 and alg.disc_obs_buffer._buffer is None
+
+
+def test_exact_teacher_critics_and_noise_on_shuffled_and_mirrored_rows():
+    from amp_policy import PrefixNormalization
+    from rsl_rl.networks import MLP
+    from native_ppo import NativeSharedPolicy,TASKS
+    widths=(4,6,3)
+    priors=teacher_priors(widths)
+    actor=Actor()
+    policy=NativeSharedPolicy(actor,widths,'cpu',teacher_priors=priors)
+    obs=observation()[torch.tensor([5,0,3,1,4,2])]
+    doubled=torch.cat((obs,obs.clone()))
+    expected=torch.empty(len(doubled),1)
+    expected_noise=torch.empty(len(doubled),23)
+    for i,(task,width) in enumerate(zip(TASKS,widths,strict=True)):
+        prior=priors[task]
+        critic=MLP(width,1,[512,256,128],'elu')
+        critic.load_state_dict(prior['critic_state_dict'],strict=True)
+        normalizer=PrefixNormalization(prior['critic_normalizer_base_width']) if task=='run' else nn.Identity()
+        normalizer.load_state_dict(prior['critic_normalizer_state_dict'],strict=True)
+        rows=doubled['task_id'].squeeze(-1)==i
+        x=doubled['critic'][rows,:width]
+        expected[rows]=critic(normalizer(x))
+        expected_noise[rows]=prior['action_std']
+        for key,value in policy.critics[i].state_dict().items():
+            torch.testing.assert_close(value,prior['critic_state_dict'][key],rtol=0,atol=0)
+        for key,value in policy.critic_normalizers[i].state_dict().items():
+            torch.testing.assert_close(value,prior['critic_normalizer_state_dict'][key],rtol=0,atol=0)
+    torch.testing.assert_close(policy.evaluate(doubled),expected,rtol=0,atol=0)
+    policy.act(doubled)
+    torch.testing.assert_close(policy.action_std,expected_noise,rtol=0,atol=0)
+    torch.testing.assert_close(policy.act_inference(doubled),actor(doubled['policy']),rtol=0,atol=0)
+    assert policy.teacher_checkpoint_sha256=={t:priors[t]['checkpoint_sha256'] for t in TASKS}
+
+
+@pytest.mark.parametrize('corruption',('missing_task','critic_shape','std_shape','std_negative','std_nan',
+                                       'norm_shape','wrong_prefix','identity_state','missing_hash'))
+def test_bad_or_missing_teacher_prior_is_rejected(corruption):
+    from native_ppo import NativeSharedPolicy
+    priors=teacher_priors()
+    if corruption=='missing_task': del priors['stairs']
+    if corruption=='critic_shape': priors['stairs']['critic_state_dict']['0.weight']=torch.ones(512,3)
+    if corruption=='std_shape': priors['run']['action_std']=torch.ones(22)
+    if corruption=='std_negative': priors['stairs']['action_std'][1]=-1.
+    if corruption=='std_nan': priors['run']['action_std'][0]=float('nan')
+    if corruption=='norm_shape': priors['run']['critic_normalizer_state_dict']['base._mean']=torch.ones(1,1)
+    if corruption=='wrong_prefix': priors['run']['critic_normalizer_base_width']=None
+    if corruption=='identity_state': priors['backpack']['critic_normalizer_state_dict']={'base.count':torch.zeros(())}
+    if corruption=='missing_hash': del priors['run']['checkpoint_sha256']
+    with pytest.raises(ValueError):
+        NativeSharedPolicy(Actor(),(4,6,3),'cpu',teacher_priors=priors)
+
+
+def test_teacher_prior_is_required_and_bad_updated_std_is_not_silently_clamped():
+    from native_ppo import NativeSharedPolicy
+    with pytest.raises(TypeError): NativeSharedPolicy(Actor(),(4,6,3),'cpu')
+    policy=NativeSharedPolicy(Actor(),(4,6,3),'cpu',teacher_priors=teacher_priors())
+    with torch.no_grad(): policy.std[1,0]=-1.
+    with pytest.raises(ValueError,match='positive'):
+        policy.act(observation())
+
+
+def test_amp_prefix_uses_exact_native_statistics_update_and_preserves_context():
+    from native_ppo import NativeSharedPolicy
+    from amp_policy import PrefixNormalization
+    widths=(4,6,3)
+    priors=teacher_priors(widths)
+    original=PrefixNormalization(2)
+    original.load_state_dict(priors['run']['critic_normalizer_state_dict'],strict=True)
+    policy=NativeSharedPolicy(Actor(),widths,'cpu',teacher_priors=priors)
+    obs=observation()[torch.tensor([4,1,2,5,3,0])]
+    run_rows=obs['task_id'].squeeze(-1)==2
+    native=obs['critic'][run_rows,:3]
+    for _ in range(3):
+        original.update(native)
+        policy.update_normalization(obs)
+    for key,value in original.state_dict().items():
+        torch.testing.assert_close(value,policy.critic_normalizers[2].state_dict()[key],rtol=0,atol=0)
+    normalized=policy.critic_normalizers[2](native)
+    torch.testing.assert_close(normalized,original(native),rtol=0,atol=0)
+    torch.testing.assert_close(normalized[:,2:],native[:,2:],rtol=0,atol=0)
+    assert int(priors['run']['critic_normalizer_state_dict']['base.count'])==5

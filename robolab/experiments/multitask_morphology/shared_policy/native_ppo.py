@@ -5,6 +5,7 @@ AMP-only discriminator collection differ from the native optimizer.
 """
 from copy import deepcopy
 import math
+import re
 from collections.abc import Mapping
 
 import torch
@@ -14,13 +15,12 @@ from torch.distributions import Normal
 
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.algorithms.ppo_amp import PPOAMP
-from rsl_rl.networks import EmpiricalNormalization
+from rsl_rl.networks import EmpiricalNormalization, MLP
 from rsl_rl.storage import CircularBuffer, RolloutStorage
 
 
 TASKS = ('stairs', 'backpack', 'run')
 TASK_ENTROPY = (.005, .005, .01)
-ACTOR_INITIAL_STD = 1.
 LEARNING_RATE = 1.e-4
 PPO_NATIVE_CONFIG = dict(learning_rate=LEARNING_RATE, schedule='adaptive', desired_kl=.01,
     gamma=.99, lam=.95, clip_param=.2, value_loss_coef=1., use_clipped_value_loss=True,
@@ -35,40 +35,119 @@ def _task_tuple(values):
     return result
 
 
+class NativePrefixNormalization(nn.Module):
+    """Exact spatial teacher normalization: dynamic prefix, unchanged context.
+
+    Matches PrefixNormalization in the native AMP expert, including its
+    EmpiricalNormalization epsilon, count, and continuing update semantics.
+    """
+    def __init__(self, base_width):
+        super().__init__()
+        self.base_width = base_width
+        self.base = EmpiricalNormalization(base_width)
+
+    def forward(self, x):
+        return torch.cat((self.base(x[..., :self.base_width]), x[..., self.base_width:]), -1)
+
+    def update(self, x):
+        self.base.update(x[..., :self.base_width])
+
+
+def _load_exact_prior(module, state, task, role):
+    target = module.state_dict()
+    if not isinstance(state, Mapping) or set(state) != set(target):
+        raise ValueError(f'{task}: {role} teacher state keys differ')
+    for key, expected in target.items():
+        value = state[key]
+        if (not isinstance(value, torch.Tensor) or value.shape != expected.shape
+                or value.dtype != expected.dtype or not torch.isfinite(value).all()):
+            raise ValueError(f'{task}: invalid {role} teacher tensor {key}')
+    module.load_state_dict(state, strict=True)
+
+
 class NativeSharedPolicy(nn.Module):
-    """RSL-RL actor/critic interface without altering the distilled Actor."""
+    """One distilled Actor and three native teacher-initialized critics."""
     is_recurrent = False
 
-    def __init__(self, actor, critic_widths, device):
+    def __init__(self, actor, critic_widths, device, *, teacher_priors):
         super().__init__()
         self.actor = actor
         self.critic_widths = _task_tuple(critic_widths)
-        self.critic_normalizers = nn.ModuleList(EmpiricalNormalization(width) for width in self.critic_widths)
-        self.critic_encoders = nn.ModuleList(nn.Sequential(nn.Linear(width, CRITIC_HIDDEN[0]), nn.ELU())
-            for width in self.critic_widths)
-        self.critic_trunk = nn.Sequential(nn.Linear(CRITIC_HIDDEN[0], CRITIC_HIDDEN[1]), nn.ELU(),
-            nn.Linear(CRITIC_HIDDEN[1], CRITIC_HIDDEN[2]), nn.ELU(), nn.Linear(CRITIC_HIDDEN[2], 1))
-        self.log_std = nn.Parameter(torch.full((23,), math.log(ACTOR_INITIAL_STD)))
+        if not isinstance(teacher_priors, Mapping) or set(teacher_priors) != set(TASKS):
+            raise ValueError('Exact teacher priors for all three tasks are required')
+        self.critics = nn.ModuleList()
+        self.critic_normalizers = nn.ModuleList()
+        self.teacher_checkpoint_sha256 = {}
+        stds = []
+        fields = {'critic_state_dict','critic_normalizer_state_dict','critic_normalizer_base_width',
+                  'action_std','checkpoint_sha256'}
+        for task, width in zip(TASKS,self.critic_widths,strict=True):
+            prior = teacher_priors[task]
+            if not isinstance(prior,Mapping) or not fields.issubset(prior):
+                raise ValueError(f'{task}: incomplete teacher prior')
+            digest = prior['checkpoint_sha256']
+            if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+                raise ValueError(f'{task}: invalid teacher checkpoint identity')
+            self.teacher_checkpoint_sha256[task] = digest
+            # Use precisely the same native ELU MLP layout as the independently
+            # trained teachers; strict load rejects all shape/key changes.
+            critic = MLP(width,1,CRITIC_HIDDEN,activation='elu')
+            _load_exact_prior(critic,prior['critic_state_dict'],task,'critic')
+            base_width = prior['critic_normalizer_base_width']
+            if task == 'run':
+                if (type(base_width) is not int or not 0 < base_width < width
+                        or (width > 243 and base_width != 243)):
+                    raise ValueError('run: teacher AMP critic prefix differs')
+                normalizer = NativePrefixNormalization(base_width)
+            else:
+                if base_width is not None:
+                    raise ValueError(f'{task}: native critic normalization must be Identity')
+                normalizer = nn.Identity()
+            _load_exact_prior(normalizer,prior['critic_normalizer_state_dict'],task,'critic normalizer')
+            if task == 'run' and (normalizer.base.count < 0
+                    or (normalizer.base._var < 0).any() or (normalizer.base._std < 0).any()):
+                raise ValueError('run: invalid teacher critic normalization statistics')
+            std = prior['action_std']
+            if (not isinstance(std,torch.Tensor) or std.shape != (23,) or std.dtype != critic[0].weight.dtype
+                    or not torch.isfinite(std).all() or (std <= 0).any()):
+                raise ValueError(f'{task}: teacher action std must be a positive finite native 23-vector')
+            self.critics.append(critic)
+            self.critic_normalizers.append(normalizer)
+            stds.append(std.detach().cpu().clone())
+        # Native experts use a direct scalar std parameter per joint. Keep
+        # exactly that parameterization and the bitwise teacher values.
+        self.std = nn.Parameter(torch.stack(stds))
         self.obs_groups = {'policy': ['policy'], 'critic': ['critic'], 'discriminator': ['disc'],
                            'discriminator_demonstration': ['disc_demo']}
         self.distribution = None
         self.to(device)
 
-    def _critic_inputs(self, obs):
-        native = obs['critic']
+    def _task_ids(self, obs):
         ids = obs['task_id']
-        if native.ndim != 2 or native.shape[1] != max(self.critic_widths) or ids.shape != (len(native), 1):
-            raise ValueError('Invalid mixed native critic observations')
-        if ids.dtype != torch.long:
+        if ids.shape != (len(obs),1) or ids.dtype != torch.long:
             raise ValueError('Task identities must be integer indices')
         ids = ids.squeeze(-1)
         if torch.any((ids < 0) | (ids >= len(TASKS))):
             raise ValueError('Unknown task identity')
-        return native, ids
+        return ids
+
+    def _critic_inputs(self, obs):
+        native = obs['critic']
+        if native.ndim != 2 or native.shape[1] != max(self.critic_widths):
+            raise ValueError('Invalid mixed native critic observations')
+        return native,self._task_ids(obs)
+
+    def _require_positive_std(self):
+        if not torch.isfinite(self.std).all() or (self.std <= 0).any():
+            raise ValueError('Native learned action std must remain positive and finite')
+
+    def action_std_for(self, obs):
+        self._require_positive_std()
+        return self.std[self._task_ids(obs)]
 
     def _update_distribution(self, obs):
         mean = self.actor(obs['policy'])
-        self.distribution = Normal(mean, self.log_std.exp().expand_as(mean), validate_args=False)
+        self.distribution = Normal(mean,self.action_std_for(obs),validate_args=False)
 
     def act(self, obs, **kwargs):
         self._update_distribution(obs)
@@ -79,12 +158,12 @@ class NativeSharedPolicy(nn.Module):
 
     def evaluate(self, obs, **kwargs):
         native, ids = self._critic_inputs(obs)
-        encoded = native.new_zeros((len(native), CRITIC_HIDDEN[0]))
-        for i, (width, normalizer, encoder) in enumerate(zip(self.critic_widths, self.critic_normalizers,
-                self.critic_encoders, strict=True)):
+        values = native.new_zeros((len(native),1))
+        for i, (width,normalizer,critic) in enumerate(zip(self.critic_widths,self.critic_normalizers,
+                self.critics,strict=True)):
             rows = ids == i
-            encoded[rows] = encoder(normalizer(native[rows, :width]))
-        return self.critic_trunk(encoded)
+            values[rows] = critic(normalizer(native[rows,:width]))
+        return values
 
     @property
     def action_mean(self):
@@ -105,9 +184,10 @@ class NativeSharedPolicy(nn.Module):
     def update_normalization(self, obs):
         native, ids = self._critic_inputs(obs)
         for i, (width, normalizer) in enumerate(zip(self.critic_widths, self.critic_normalizers, strict=True)):
-            rows = native[ids == i, :width]
-            if len(rows):
-                normalizer.update(rows)
+            if isinstance(normalizer,NativePrefixNormalization):
+                rows = native[ids == i,:width]
+                if len(rows):
+                    normalizer.update(rows)
 
     def reset(self, dones=None):
         pass
@@ -134,7 +214,7 @@ class NativeMixedPPO(PPOAMP):
         self.critic_only = bool(enabled)
         self.policy.train()
         self.policy.actor.requires_grad_(not self.critic_only)
-        self.policy.log_std.requires_grad_(not self.critic_only)
+        self.policy.std.requires_grad_(not self.critic_only)
         self.amp_discriminator.requires_grad_(not self.critic_only)
         self.amp_discriminator.train(not self.critic_only)
 
@@ -196,8 +276,9 @@ class NativeMixedPPO(PPOAMP):
                 self.schedule, self.entropy_coef, self.symmetry = schedule, entropy, symmetry
         else:
             result = PPOAMP.update(self)
+        self.policy._require_positive_std()
         result.update(samples=self.storage.num_transitions_per_env * sum(self.counts),
-            learning_rate=float(self.learning_rate), mean_action_std=float(self.policy.log_std.detach().exp().mean()),
+            learning_rate=float(self.learning_rate), mean_action_std=float(self.policy.std.detach().mean()),
             tasks=self._task_diagnostics(), critic_only=bool(critic_only))
         if not all(math.isfinite(v) for v in result.values() if isinstance(v,(int,float))):
             raise ValueError('Nonfinite native PPO statistics')
@@ -216,7 +297,7 @@ class NativeMixedPPO(PPOAMP):
         for t in range(st.num_transitions_per_env):
             obs = st.observations[t]
             mu = self.policy.act_inference(obs)
-            sigma = self.policy.log_std.exp().expand_as(mu)
+            sigma = self.policy.action_std_for(obs)
             old_mu, old_sigma = st.mu[t], st.sigma[t]
             kl = (torch.log(sigma/old_sigma) + (old_sigma.square() + (old_mu-mu).square())
                     / (2.*sigma.square())-.5).sum(-1).clamp_min(0.)
@@ -229,24 +310,25 @@ class NativeMixedPPO(PPOAMP):
                 summaries[task]['kl'].append(kl_part.mean())
                 summaries[task]['clip_fraction'].append(clip_part.mean())
                 summaries[task]['value'].append(val_part)
-        for task, returns in zip(TASKS, st.returns.split(self.counts,dim=1), strict=True):
+        for task,returns,std in zip(TASKS,st.returns.split(self.counts,dim=1),self.policy.std,strict=True):
             summary = summaries[task]
             value = torch.stack(summary.pop('value'))
             var = returns.var(unbiased=False)
             variance = (1.-(returns-value).var(unbiased=False)/var) if var > 1.e-10 else None
             summary.update(kl=float(torch.stack(summary['kl']).mean()),
                 clip_fraction=float(torch.stack(summary['clip_fraction']).mean()),
-                explained_variance=None if variance is None else float(variance))
+                explained_variance=None if variance is None else float(variance),
+                mean_action_std=float(std.mean()),min_action_std=float(std.min()),max_action_std=float(std.max()))
             if not all(math.isfinite(v) for v in summary.values() if v is not None):
                 raise ValueError(f'Nonfinite {task} diagnostics')
         return summaries
 
 
 def build_native_learner(actor, counts, critic_widths, amp_cfg, amp_state, symmetry_callback, device,
-        *, steps=24, symmetry_env=None, num_epochs=5, num_minibatches=4, critic_warmup_updates=10):
-    """Create the candidate-local native learner and clone the teacher AMP prior."""
+        *, teacher_priors, steps=24, symmetry_env=None, num_epochs=5, num_minibatches=4, critic_warmup_updates=10):
+    """Create fresh candidate optimizer with exact native teacher learning priors."""
     counts, widths = _task_tuple(counts), _task_tuple(critic_widths)
-    policy = NativeSharedPolicy(actor, widths, device)
+    policy = NativeSharedPolicy(actor,widths,device,teacher_priors=teacher_priors)
     n = sum(counts)
     if steps < 1 or steps*n % num_minibatches or steps*counts[-1] % num_minibatches:
         raise ValueError('Rollout samples must divide evenly across the native minibatches')

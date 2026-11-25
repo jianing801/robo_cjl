@@ -373,8 +373,12 @@ def write_training_completion(root, candidate, updates, actor):
     manifest_hash = bo.sha(root/'manifest.json')
     receipt = dict(completed_updates=updates, manifest_sha256=manifest_hash,
                    path=blob.name, sha256=bo.sha(blob))
-    if bo.read(root/'manifest.json').get('ppo_algorithm') is not None:
-        receipt.update(ppo_algorithm=bo.NATIVE_PPO_ALGORITHM, warmup_completed=10)
+    manifest = bo.read(root/'manifest.json')
+    if manifest.get('ppo_algorithm') is not None:
+        receipt.update(ppo_algorithm=manifest['ppo_algorithm'], warmup_completed=10)
+    if manifest.get('ppo_algorithm') == bo.NATIVE_PPO_ALGORITHM:
+        receipt.update(state_kind=bo.NATIVE_PPO_STATE_KIND,
+                       teacher_checkpoint_sha256=manifest['teacher_checkpoint_sha256'])
     checkpoint.write_text(json.dumps(receipt))
     (root/'training_completed.json').write_text(json.dumps(dict(result='CANDIDATE_FINETUNED',
         candidate=candidate, ppo_updates=updates, manifest_sha256=manifest_hash, student=str(actor),
@@ -545,9 +549,10 @@ def official_panel(tmp_path, monkeypatch):
             actor.parent.mkdir()
             actor.write_bytes(f'fitted {candidate_id}'.encode())
             bo.freeze(tuning_plan, dict(teachers=teachers))
+            prior = dict(teacher_checkpoint_sha256=dict(stairs='1'*64,backpack='2'*64,run='3'*64)) if native else {}
             bo.freeze(actor.parent/'manifest.json', dict(
                 candidate=candidate, updates=a.updates, plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(initial),
-                ppo_schedule=bo.PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=bo.MIXED_BO_LAYOUT, **extra))
+                ppo_schedule=bo.PPO_SCHEDULE, init_at_random_ep_len=True, envs_per_task=bo.MIXED_BO_LAYOUT, **extra, **prior))
             write_training_completion(actor.parent, candidate, a.updates, actor)
         else:
             actor = initial
@@ -605,7 +610,7 @@ def test_official_panel_initializes_once_and_freezes_legacy_scores(official_pane
     p=official_panel
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    manifest = bo.read(p.root/'bo/calibration50_native_ppo100_200hz/manifest.json')
+    manifest = bo.read(p.root/'bo/calibration50_native_expert_prior_ppo100_200hz/manifest.json')
     assert manifest['updates'] == 100 and manifest['selection_velocity_frame'] == 'horizontal_heading'
     assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
     assert manifest['init_at_random_ep_len'] is True
@@ -614,7 +619,7 @@ def test_official_panel_initializes_once_and_freezes_legacy_scores(official_pane
     assert manifest['native_ppo_settings'] == bo.NATIVE_PPO_SETTINGS
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    scoring_path = p.root/'bo/calibration50_native_ppo100_200hz/scoring.json'
+    scoring_path = p.root/'bo/calibration50_native_expert_prior_ppo100_200hz/scoring.json'
     scoring = bo.read(scoring_path)
     assert scoring['cot_basis'] == 'absolute_mechanical'
     assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
@@ -715,7 +720,7 @@ def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
 def test_official_panel_rejects_changed_evidence_on_reuse(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50_native_ppo100_200hz'
+    calib=p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
     args=['initialize','--root',str(p.root),'--output',str(calib)]
     if change=='actor':
         p.student.write_bytes(b'changed')
@@ -870,7 +875,7 @@ def test_calibration_evaluation_timer_counts_only_accepted_new_measurements(tmp_
 def test_measurement_only_panel_defers_scoring(official_panel):
     p = official_panel
     bo.main(['initialize', '--migrated', '--measure-only'])
-    out = p.root/'bo/calibration50_native_ppo100_200hz'
+    out = p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
     assert len(bo.read(out/'measurements_completed.json')['reports']) == 50
     assert bo.read(out/'evaluation_timing.json') == dict(accepted_measurements=150, evaluation_seconds=450.)
     assert not (out/'scoring.json').exists()
@@ -879,7 +884,7 @@ def test_measurement_only_panel_defers_scoring(official_panel):
 def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, monkeypatch):
     p = official_panel
     bo.main(['initialize', '--migrated', '--measure-only'])
-    out = p.root/'bo/calibration50_native_ppo100_200hz'
+    out = p.root/'bo/calibration50_native_expert_prior_ppo100_200hz'
     args = ['freeze-scoring', '--measurements-root', str(out)]
 
     def forbidden(*args, **kwargs):

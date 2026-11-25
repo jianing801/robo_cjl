@@ -46,11 +46,15 @@ def test_search_cli_rejects_retired_percentile_default(tmp_path):
         bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring), '--trials', '100'])
 
 
-def test_search_cli_rejects_old_ppo_before_any_worker(tmp_path, monkeypatch):
+@pytest.mark.parametrize('old_native', [False, True])
+def test_search_cli_rejects_old_ppo_before_any_worker(tmp_path, monkeypatch, old_native):
+    from finetune_settings import NATIVE_PPO_ALGORITHM_V3, NATIVE_PPO_SETTINGS_V3
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
     scoring = tmp_path/'scoring.json'
+    benchmark = (dict(ppo_algorithm=NATIVE_PPO_ALGORITHM_V3,
+                      native_ppo_settings=NATIVE_PPO_SETTINGS_V3) if old_native else {})
     scoring.write_text(json.dumps({'method': bo.ORIGINAL_RPO_FOUR_METRIC_METHOD,
-                                  'conditions_sha256': bo.digest(conditions), 'benchmark': {}}))
+                                  'conditions_sha256': bo.digest(conditions), 'benchmark': benchmark}))
     monkeypatch.setattr(bo, 'shared_input', lambda *args, **kwargs: pytest.fail('old scoring cannot launch new BO'))
     with pytest.raises(ValueError, match='Native PPO BO'):
         bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring)])

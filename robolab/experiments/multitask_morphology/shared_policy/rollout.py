@@ -415,7 +415,13 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                 def canonical(o,r):
                     return canonical_input(student_base(o,r),plan['task_ids'][args.task],groups,static,len(plan['schema']['tasks']))
                 if mixed_count is not None:
-                    return env,raw,obs,canonical,action_clip,None,metadata['collection_protocol']
+                    from native_observations import native_expert_setup
+                    # Extract the actual native critic/std from the same strictly
+                    # loaded teacher checkpoint, not a randomly initialized
+                    # value function. Later learner owns independent copies.
+                    expert = native_expert_setup(args.task,state,teacher,obs,
+                        checkpoint_sha256=spec['checkpoint_sha256'])
+                    return env,raw,obs,canonical,action_clip,None,metadata['collection_protocol'],expert
                 serve(args.ppo_channel,args.task,env,raw,obs,canonical,action_clip,protocol=metadata['collection_protocol'])
                 exit_code=0
                 return exit_code

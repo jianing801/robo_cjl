@@ -7,8 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from tensordict import TensorDict
 
-from native_observations import NativeObservationAdapter, amp_native_observations, native_amp_setup
+from native_observations import (
+    NativeObservationAdapter, amp_native_observations, native_amp_setup, native_expert_setup,
+)
 
 
 TASKS = ("stairs", "backpack", "run")
@@ -172,6 +175,72 @@ def test_symmetry_cache_safe_for_diagnostics_before_gradient_update():
     torch.testing.assert_close(action.grad, 2 * action.detach())
 
 
+def _verified_teacher(task, n=3):
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(here.parents[3] / "rsl_rl"))
+    sys.path.insert(0, str(here.parent / "engine"))
+    sys.path.insert(0, str(here.parent / "amp_engine"))
+    from hybrid_policy import SpatialActorCritic as Direct
+    from amp_policy import SpatialActorCritic as AMP
+    cls = AMP if task == "run" else Direct
+    width = WIDTHS[TASKS.index(task)]
+    policy_width = (234 if task == "run" else 780) + 28
+    obs = TensorDict(dict(policy=torch.randn(n, policy_width), critic=torch.randn(n, width)), [n])
+    teacher = cls(obs, {"policy": ["policy"], "critic": ["critic"]}, 23,
+                  native_config={"role": task, "context_width": 28},
+                  critic_obs_normalization=task == "run",
+                  actor_obs_normalization=task == "run",
+                  actor_hidden_dims=[512, 256, 128], critic_hidden_dims=[512, 256, 128])
+    with torch.no_grad():
+        teacher.std.copy_(torch.linspace(.2, .8, 23))
+        teacher.update_normalization(obs)
+    teacher.eval().requires_grad_(False)
+    return teacher, {"model_state_dict": teacher.state_dict()}, obs
+
+
+@pytest.mark.parametrize("task", TASKS)
+def test_expert_prior_extracts_exact_verified_native_critic_std_and_value(task):
+    teacher, checkpoint, obs = _verified_teacher(task)
+    model = checkpoint["model_state_dict"]
+    native_value = teacher.evaluate(obs)
+    with torch.inference_mode():
+        setup = native_expert_setup(task, checkpoint, teacher, obs, checkpoint_sha256="a" * 64)
+    prior = setup["expert_prior"]
+    assert prior["checkpoint_sha256"] == "a" * 64
+    assert prior["critic_normalizer_base_width"] == (243 if task == "run" else None)
+    assert set(prior["critic_state_dict"]) == set(teacher.critic.state_dict())
+    for name, value in prior["critic_state_dict"].items():
+        torch.testing.assert_close(value, model["critic." + name], rtol=0, atol=0)
+    for name, value in prior["critic_normalizer_state_dict"].items():
+        torch.testing.assert_close(value, model["critic_obs_normalizer." + name], rtol=0, atol=0)
+    assert set(prior["critic_normalizer_state_dict"]) == (
+        {"base._mean", "base._var", "base._std", "base.count"} if task == "run" else set())
+    torch.testing.assert_close(prior["action_std"], model["std"], rtol=0, atol=0)
+    torch.testing.assert_close(setup["teacher_value"], native_value, rtol=0, atol=0)
+    # Output tensors are mutable copies rather than aliases or inference-only
+    # checkpoint tensors. The frozen expert model remains byte-for-byte intact.
+    expected_std = model["std"].clone()
+    expected_weight = model["critic.0.weight"].clone()
+    prior["action_std"].zero_()
+    prior["critic_state_dict"]["0.weight"].zero_()
+    torch.testing.assert_close(model["std"], expected_std, atol=0, rtol=0)
+    torch.testing.assert_close(model["critic.0.weight"], expected_weight, atol=0, rtol=0)
+
+
+def test_expert_prior_refuses_invalid_state_and_native_context():
+    teacher, checkpoint, obs = _verified_teacher("run")
+    good = checkpoint["model_state_dict"]
+    def rejected(change, match):
+        with pytest.raises(ValueError, match=match):
+            native_expert_setup("run", {"model_state_dict": {**good, **change}}, teacher, obs,
+                                checkpoint_sha256="b" * 64)
+    rejected({"std": torch.zeros(23)}, "std")
+    rejected({"std": torch.full((23,), float("nan"))}, "std")
+    rejected({"critic.0.weight": good["critic.0.weight"][:, :-1]}, "critic")
+    rejected({"critic_obs_normalizer.base._mean": torch.zeros(1, 271)}, "normalizer")
+    rejected({"_extra_state": {"config": {"context_width": 27, "role": "run"}}}, "context")
+
+
 def test_real_native_ppo_and_ppoamp_callback_sequence_routes_backpack_unchanged():
     # Both the critic-only native PPO and the regular native PPOAMP path use
     # an observations/actions call followed by an actions-only target call.
@@ -179,6 +248,7 @@ def test_real_native_ppo_and_ppoamp_callback_sequence_routes_backpack_unchanged(
     sys.path.insert(0, str(here.parents[3] / "rsl_rl"))
     from native_ppo import build_native_learner
     from rsl_rl.modules.amp import AMPDiscriminator
+    from test_native_ppo import teacher_priors
 
     class Actor(torch.nn.Module):
         width = 1161
@@ -216,7 +286,8 @@ def test_real_native_ppo_and_ppoamp_callback_sequence_routes_backpack_unchanged(
     torch.set_num_threads(1)
     try:
         learner = build_native_learner(Actor(), counts, WIDTHS, cfg, state, symmetry,
-                                       "cpu", steps=2, num_epochs=1, num_minibatches=2)
+                                       "cpu", teacher_priors=teacher_priors(WIDTHS),
+                                       steps=2, num_epochs=1, num_minibatches=2)
         for critic_only in (True, False):
             learner.configure_critic_only(critic_only)
             obs = adapter.concat(inputs)

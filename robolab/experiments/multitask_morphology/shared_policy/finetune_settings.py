@@ -5,10 +5,10 @@ LEGACY_PPO_SCHEDULE = {'epochs': 4, 'minibatches': 3}
 MIXED_BO_ENVS = 4096
 MIXED_BO_LAYOUT = {'stairs': 1366, 'backpack': 1365, 'run': 1365}
 
-# New native PPOAMP learner. Keep PPO_SCHEDULE and the original layout names
-# unchanged so that historical 100-update hand-written PPO evidence is readable.
-NATIVE_PPO_ALGORITHM = 'shared_native_ppoamp_v3'
-NATIVE_PPO_SETTINGS = dict(
+# Preserve the exact v3 historical identity for independent evaluation/audit.
+# It had a randomly initialized shared Critic and a single std initialized at 1.
+NATIVE_PPO_ALGORITHM_V3 = 'shared_native_ppoamp_v3'
+NATIVE_PPO_SETTINGS_V3 = dict(
     steps_per_env=24, epochs=5, minibatches=4, gamma=.99, lam=.95,
     clip_param=.2, value_loss_coef=1., use_clipped_value_loss=True,
     schedule='adaptive', desired_kl=.01, initial_learning_rate=1e-4,
@@ -22,3 +22,20 @@ NATIVE_PPO_SETTINGS = dict(
     amp_task_style_lerp=.6, amp_loss_type='LSGAN', amp_gradient_penalty=10.,
     amp_disc_trunk_weight_decay=1e-3, amp_disc_linear_weight_decay=1e-1,
 )
+
+# V4 copies each teacher's native critic and 23 learned action standard
+# deviations, then fits those critic priors to the distilled student. PPO
+# updates a single shared actor and three independent native value networks.
+NATIVE_PPO_ALGORITHM = 'shared_native_ppoamp_expert_prior_v4'
+NATIVE_PPO_STATE_KIND = 'shared_ppo_learning_state_v4'
+NATIVE_PPO_SETTINGS = dict(NATIVE_PPO_SETTINGS_V3,
+    actor_initialization='frozen_round5_shared_actor',
+    noise_initialization='frozen_expert_learned_std', noise_std_shape=[3, 23],
+    critic_initialization='frozen_expert_critic', critic_architecture='three_independent_teacher_native',
+    critic_observation_normalization={'stairs': 'identity', 'backpack': 'identity', 'run': 'teacher_native_prefix'},
+    ppo_optimizer_initialization='fresh_adam', amp_disc_optimizer_initialization='fresh_adam',
+)
+del NATIVE_PPO_SETTINGS['initial_noise_std'], NATIVE_PPO_SETTINGS['critic_hidden_dims']
+
+NATIVE_PPO_PROFILES = {NATIVE_PPO_ALGORITHM_V3: NATIVE_PPO_SETTINGS_V3,
+                       NATIVE_PPO_ALGORITHM: NATIVE_PPO_SETTINGS}

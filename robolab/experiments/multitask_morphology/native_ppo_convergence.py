@@ -64,12 +64,13 @@ def evaluations_enabled(root, training_only):
 
 def verify_blob(bo, tuning, record, manifest_digest):
     import torch
+    from finetune_settings import NATIVE_PPO_STATE_KIND
     folder = tuning/'checkpoints'
     path = folder/record['path']
     if path.parent != folder or path.is_symlink() or record['manifest_sha256'] != manifest_digest or bo.sha(path) != record['sha256']:
         raise ValueError('Native milestone checkpoint identity changed')
     state = torch.load(path, map_location='cpu', weights_only=True)
-    if (state['kind'] != 'shared_ppo_learning_state_v3' or state['manifest_sha256'] != manifest_digest
+    if (state['kind'] != NATIVE_PPO_STATE_KIND or state['manifest_sha256'] != manifest_digest
             or state['completed_updates'] != record['completed_updates']):
         raise ValueError('Native milestone checkpoint metadata differs')
     return state
@@ -164,13 +165,13 @@ def write_training_report(bo, root, legacy, tuning):
     history=checkpoint_history(tuning,bo.sha(tuning/'manifest.json'))[1:]
     with (root/'ppo_diagnostics.csv').open('w',encoding='utf8',newline='') as stream:
         keys=['learning_rate','mean_action_std','value','surrogate','entropy','collection_seconds','update_seconds','torch_peak_mib']
-        task_keys=('kl','clip_fraction','explained_variance')
+        task_keys=('kl','clip_fraction','explained_variance','mean_action_std')
         fields=['update',*keys,*[f'{task}_{k}' for task in TASKS for k in task_keys]]
         writer=csv.DictWriter(stream,fieldnames=fields);writer.writeheader()
         for receipt in history:
             metrics=receipt['metrics']
             writer.writerow(dict(update=receipt['completed_updates'],**{key:metrics.get(key) for key in keys},
-                **{f'{task}_{key}':metrics['tasks'][task][key] for task in TASKS for key in task_keys}))
+                **{f'{task}_{key}':metrics['tasks'][task].get(key) for task in TASKS for key in task_keys}))
 
 
 def main():
