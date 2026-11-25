@@ -23,7 +23,12 @@ def validate_library(bank, bank_path, manifest_path, design_ids=None):
         raise ValueError('missing native source clip identity')
     for name, record in library['source_clips'].items():
         source=ROOT/'data/motions/rpo_lab'/(name+'.pkl')
-        if Path(record['path']).resolve()!=source.resolve() or record['sha256']!=sha(source):
+        recorded = Path(record['path']).resolve()
+        # Frozen Git checkouts can contain byte-identical native motion assets.
+        # Keep both the recorded source and current source bound to the same hash.
+        if (recorded.name != source.name or not recorded.is_file()
+                or record['sha256'] != sha(source)
+                or (recorded != source.resolve() and record['sha256'] != sha(recorded))):
             raise ValueError('native AMP reference source changed')
     active=set(design_ids) if design_ids is not None else set(library['designs'])
     if not active or not active<=set(library['designs']):
