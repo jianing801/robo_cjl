@@ -113,9 +113,6 @@ class AmpEnv(AnimationEnv):
             # update buffers at sim dt
             self.scene.update(dt=self.physics_dt)
 
-        return self._finish_control_step()
-
-    def _finish_control_step(self):
         # post-step:
         # -- update animation manager
         self.animation_manager.update(dt=self.step_dt)
