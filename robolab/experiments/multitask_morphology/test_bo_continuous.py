@@ -209,7 +209,20 @@ def test_initial50_only_and_new_trial_51_then_resume(tmp_path,monkeypatch):
     assert bo.read(out/'manifest.json')['historical_trials']==50
     extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
     assert calls==['propose','prepare','evaluate']
-
+    # Same scientific/source fields with an exact old coordinator identity can
+    # replay a pre-quota smoke run without introducing its new policy.
+    manifest=bo.read(out/'manifest.json')
+    assert 'ankle_quota' not in manifest
+    manifest['coordinator_sha256']=sorted(extension.PRE_QUOTA_COORDINATOR_SHA256)[0]
+    path=out/'manifest.json'
+    path.write_text(json.dumps(manifest))
+    old=path.read_bytes()
+    extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
+    assert path.read_bytes()==old and calls==['propose','prepare','evaluate']
+    manifest['coordinator_sha256']='0'*64
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError,match='identity differs'):
+        extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
 
 def test_completed_history_import_same_protocol_read_only(tmp_path,monkeypatch):
     a,source,plan,actor,conditions,grid,reports=synthetic_initial(tmp_path,monkeypatch)
@@ -319,3 +332,158 @@ def test_resume_new_manifest_requires_existing_matching_receipt(tmp_path,monkeyp
     with pytest.raises(ValueError,match='Frozen BO history'):
         extension.search(bo,a,out,source,plan,actor,conditions)
     assert {p:bo.sha(p) for p in out.iterdir()}==before
+
+
+def test_fresh_formal_ankle_quota_minimum_then_capped_ce_i():
+    allowed = SCHEMA['ankles']
+    policy = extension.ankle_quota_policy(50,100,allowed,imported=False)
+    assert policy['minimum_per_ankle']==5 and policy['maximum_per_ankle']==20
+    assert policy['coverage_trials']==25
+    counts = dict.fromkeys(allowed,0)
+    for ordinal in range(50):
+        gate = extension.quota_gate(policy,allowed,counts,ordinal)
+        assert gate['completed_counts']==counts
+        assert gate['phase']==('minimum_coverage' if ordinal<25 else 'capped_improvement')
+        threshold = 5 if ordinal<25 else 20
+        assert gate['eligible_ankles']==[a for a in allowed if counts[a]<threshold]
+        if ordinal==25:
+            assert counts==dict.fromkeys(allowed,5)
+        counts[gate['eligible_ankles'][0]]+=1  # simulate maximal acquisition tie preference
+    assert counts==dict(zip(allowed,[20,15,5,5,5]))
+    assert sum(counts.values())==50
+
+
+def test_ankle_quota_only_formal_fresh_and_feasible_subsets():
+    assert extension.ankle_quota_policy(50,51,SCHEMA['ankles'],imported=False) is None
+    assert extension.ankle_quota_policy(100,110,SCHEMA['ankles'],imported=True) is None
+    assert extension.ankle_quota_policy(50,100,SCHEMA['ankles'],imported=True) is None
+    for n in (1,2):
+        with pytest.raises(ValueError,match='quota'):
+            extension.ankle_quota_policy(50,100,SCHEMA['ankles'][:n],imported=False)
+    allowed=SCHEMA['ankles'][:3]
+    policy=extension.ankle_quota_policy(50,100,allowed,imported=False)
+    assert policy['coverage_trials']==15
+    counts=dict.fromkeys(allowed,0)
+    for ordinal in range(50):
+        gate=extension.quota_gate(policy,allowed,counts,ordinal)
+        counts[gate['eligible_ankles'][0]]+=1
+    assert counts==dict(zip(allowed,[20,20,10]))
+
+
+def test_frozen_quota_prefix_reconstructs_completed_counts_and_rejects_bad_pending(tmp_path):
+    allowed=SCHEMA['ankles']
+    policy=extension.ankle_quota_policy(50,100,allowed,imported=False)
+    counts=dict.fromkeys(allowed,0)
+    for ordinal in range(6):
+        trial=tmp_path/f'trial_{50+ordinal:04d}';trial.mkdir()
+        gate=extension.quota_gate(policy,allowed,counts,ordinal)
+        motor=gate['eligible_ankles'][0]
+        proposal=dict(trial_number=51+ordinal,structure_key=[.4,.31,'k0',motor],ankle_quota=gate,
+                      acquisition=dict(allowed_ankles=gate['eligible_ankles']))
+        bo.freeze(trial/'proposal.json',proposal)
+        if ordinal<5:
+            bo.freeze(trial/'observation.json',dict(proposal,complete=True))
+            counts[motor]+=1
+    assert extension.verify_quota_prefix(bo,tmp_path,50,100,policy,allowed)==counts
+    p=tmp_path/'trial_0055/proposal.json'
+    frozen=bo.read(p);frozen['structure_key'][3]=allowed[0]
+    p.write_text(json.dumps(frozen))
+    with pytest.raises(ValueError,match='quota'):
+        extension.verify_quota_prefix(bo,tmp_path,50,100,policy,allowed)
+
+def test_full_formal_quota_search_resumes_and_counts_only_committed_new_trials(tmp_path,monkeypatch):
+    a,source,plan,actor,conditions,grid,reports=synthetic_initial(tmp_path,monkeypatch)
+    a.trials=100
+    out=tmp_path/'formal';out.mkdir()
+    proposed,prepared,accepted=[],[],[]
+    interrupted=False
+    allowed=SCHEMA['ankles']
+    policy=extension.ankle_quota_policy(50,100,allowed,imported=False)
+
+    def propose(schema,obs,seen,seed,allowed_ankles=None):
+        assert len(obs)==len(seen)==50+len(proposed)
+        counts=dict.fromkeys(allowed,0)
+        for k in proposed:
+            counts[k[3]]+=1
+        gate=extension.quota_gate(policy,allowed,counts,len(proposed))
+        assert allowed_ankles==gate['eligible_ankles']
+        k=(.4,round(.31+len(proposed)*.0001,10),'k4',allowed_ankles[0])
+        proposed.append(k)
+        return k,dict(allowed_ankles=allowed_ankles,global_best_observed_composite_cost=min(o['objective'] for o in obs))
+
+    def prepare(bo_,args,where,donor,donor_plan,k):
+        prepared.append(k)
+        where.mkdir(exist_ok=True)
+        number=where.parent.name
+        p=where/'candidate_plan.json'
+        native_plan=dict(schema=SCHEMA,selected_structure_keys=[list(k)],
+                         teachers={task:{'design_ids':[task+number]} for task in bo.TASKS})
+        bo.freeze(p,native_plan)
+        return p,native_plan,'stairs'+number
+
+    def evaluate(args,folder,source,native_plan,actor,design_id,conditions):
+        nonlocal interrupted
+        if len(accepted)==17 and not interrupted:
+            interrupted=True
+            raise RuntimeError('simulated interruption with frozen pending proposal')
+        ids={t:spec['design_ids'][0] for t,spec in native_plan['teachers'].items()}
+        k=native_plan['selected_structure_keys'][0]
+        assert design_id==ids['stairs']
+        report=dict(candidate=dict(structure_key=k,design_ids=ids),ppo_updates=100,
+                    objective=.9+.001*len(accepted))
+        folder.mkdir()
+        bo.freeze(folder/'bo_evaluation.json',report)
+        accepted.append(tuple(k))
+        return report
+
+    def verified(bo_,trial,*args):
+        p=trial/'assets/candidate_plan.json'
+        native_plan=bo.read(p)
+        return p,native_plan,native_plan['teachers']['stairs']['design_ids'][0]
+
+    monkeypatch.setattr(extension,'propose',propose)
+    monkeypatch.setattr(bo,'load_plan',bo.read)
+    monkeypatch.setattr(bo,'evaluate',evaluate)
+    monkeypatch.setattr(extension,'native_usd_evidence',lambda *args:{'valid':True})
+    monkeypatch.setattr(extension,'verify_materialized',verified)
+    monkeypatch.setattr(extension,'verify_candidate',lambda bo_,folder,*args:bo.read(folder/'bo_evaluation.json'))
+    with pytest.raises(RuntimeError,match='simulated interruption'):
+        extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
+    assert len(accepted)==17 and len(proposed)==18
+    assert bo.read(out/'manifest.json')['ankle_quota']==policy
+    pending=out/'trial_0067/proposal.json'
+    before=pending.read_bytes()
+    original=bo.read(pending)
+    original['structure_key'][3]='a0' # first motor already at five; in coverage phase ineligible
+    pending.write_text(json.dumps(original))
+    before_calls=(len(proposed),len(prepared),len(accepted))
+    with pytest.raises(ValueError,match='quota'):
+        extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
+    assert (len(proposed),len(prepared),len(accepted))==before_calls
+    pending.write_bytes(before)
+    extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
+    assert len(proposed)==len(accepted)==50 and proposed==accepted
+    assert len(prepared)==51 # only one pending candidate prepares again
+    budget=bo.read(out/'budget_0100.json')
+    assert budget['trials']==100
+    assert budget['ankle_quota']['completed_counts']==dict(zip(allowed,[20,15,5,5,5]))
+    assert len([r for r in budget['candidates'][:50] if r['structure_key'][3]=='a0'])==50
+    final_calls=(len(proposed),len(prepared),len(accepted))
+    extension.search(bo,a,out,source,plan,actor,conditions,prepare=prepare)
+    assert (len(proposed),len(prepared),len(accepted))==final_calls
+
+def test_quota_prefix_rejects_gap_or_observation_without_proposal(tmp_path):
+    allowed=SCHEMA['ankles']
+    policy=extension.ankle_quota_policy(50,100,allowed,imported=False)
+    trial=tmp_path/'trial_0051';trial.mkdir()
+    gate=extension.quota_gate(policy,allowed,dict.fromkeys(allowed,0),0)
+    proposal=dict(trial_number=52,structure_key=[.4,.31,'k0',allowed[0]],ankle_quota=gate,
+                  acquisition=dict(allowed_ankles=gate['eligible_ankles']))
+    request=trial/'proposal.json'
+    bo.freeze(request,proposal)
+    with pytest.raises(ValueError,match='unfinished trial'):
+        extension.verify_quota_prefix(bo,tmp_path,50,100,policy,allowed)
+    request.unlink()
+    bo.freeze(trial/'observation.json',proposal)
+    with pytest.raises(ValueError,match='without its frozen proposal'):
+        extension.verify_quota_prefix(bo,tmp_path,50,100,policy,allowed)

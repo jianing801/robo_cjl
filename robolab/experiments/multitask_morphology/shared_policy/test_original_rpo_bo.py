@@ -149,8 +149,8 @@ def test_freezes_reference_ratios_from_verified_200_hz_measurements(original_rpo
 
 
 FOUR_FIELDS = ('cot', 'forward_rmse_mps', 'roll_pitch_rms_rad_s', 'knee_ankle_max_rated_ratio')
-FOUR_WEIGHTS = dict(stairs=(.25, .20, .35, .20), backpack=(.35, .25, .15, .25),
-                    run=(.25, .35, .15, .25))
+FOUR_WEIGHTS = dict(stairs=(.25, .25, .40, .10), backpack=(.40, .25, .20, .15),
+                    run=(.25, .40, .15, .20))
 
 
 def test_four_metric_profile_freezes_all_observed_ratios_without_touching_old_data(original_rpo_panel):

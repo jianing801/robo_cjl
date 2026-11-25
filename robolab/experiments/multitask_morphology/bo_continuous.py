@@ -6,6 +6,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 INITIAL_PANEL_SIZE = 50
+# Exact LF and CRLF coordinator identities from pre-quota main b694a15.
+PRE_QUOTA_COORDINATOR_SHA256 = {
+    '7753035c3154838158f70c8ac45bd66a1ce7e1edc5807af879b4d6f5bafeff27',
+    '53ffe6fa8c65f150bf2a7f39c10a7b1824914706d60146320a94f89450e422be',
+}
 FIELDS = ('thigh_m', 'calf_m', 'knee_motor', 'ankle_motor')
 SUMMARY_KEYS = ('design_id', 'structure_key', 'evaluation', 'valid_pairs',
                 'joint_successes', 'complete_objectives', 'mean_objective')
@@ -53,6 +58,72 @@ def allowed_choices(schema, allowed_ankles=None):
         raise ValueError('Allowed ankle motor IDs must be a nonempty, unique subset of the original pool')
     return [motor for motor in schema['ankles'] if motor in requested]
 
+
+def ankle_quota_policy(start, total, allowed, *, imported):
+    """Only a fresh formal 50+50 BO run receives the fixed ankle quotas."""
+    if imported or start != INITIAL_PANEL_SIZE or total != 100:
+        return None
+    minimum, maximum, new_trials = 5, 20, total-start
+    coverage_trials = minimum*len(allowed)
+    if not coverage_trials <= new_trials <= maximum*len(allowed):
+        raise ValueError('Ankle quota cannot fit 50 new trials with these allowed motors')
+    return dict(kind='ankle_coverage_then_capped_cei_v1', scope='new_committed_observations',
+                minimum_per_ankle=minimum, maximum_per_ankle=maximum,
+                coverage_trials=coverage_trials, new_trials=new_trials)
+
+
+def quota_gate(policy, allowed, counts, ordinal):
+    """Compute the eligible acquisition domain from completed new trials only."""
+    minimum, maximum = policy['minimum_per_ankle'], policy['maximum_per_ankle']
+    if (set(counts) != set(allowed) or type(ordinal) is not int
+            or not 0 <= ordinal < policy['new_trials']
+            or any(type(v) is not int or not 0 <= v <= maximum for v in counts.values())
+            or sum(counts.values()) != ordinal):
+        raise ValueError('Invalid completed ankle quota state')
+    if ordinal < policy['coverage_trials']:
+        phase, threshold = 'minimum_coverage', minimum
+        if any(v > minimum for v in counts.values()):
+            raise ValueError('Ankle quota coverage phase exceeded its minimum target')
+    else:
+        phase, threshold = 'capped_improvement', maximum
+        if any(v < minimum for v in counts.values()):
+            raise ValueError('Ankle quota coverage phase did not reach every minimum')
+    eligible = [motor for motor in allowed if counts[motor] < threshold]
+    if not eligible:
+        raise ValueError('Ankle quota has no eligible motor for the next proposal')
+    return dict(phase=phase, new_completed_before=ordinal,
+                completed_counts=dict(counts), eligible_ankles=eligible)
+
+
+def verify_quota_prefix(bo, work, start, total, policy, allowed):
+    """Read-only preflight: no gap or inconsistent frozen proposal may launch work."""
+    counts = dict.fromkeys(allowed,0)
+    ended = False
+    for i in range(start,total):
+        trial = work/f'trial_{i:04d}'
+        request, observation = trial/'proposal.json', trial/'observation.json'
+        if not request.is_file():
+            if observation.exists() or (trial.is_dir() and any(trial.iterdir())):
+                raise ValueError('Ankle quota trial has artifacts without its frozen proposal')
+            ended = True
+            continue
+        if ended:
+            raise ValueError('Ankle quota has a proposal after an unfinished trial')
+        proposal = bo.read(request)
+        gate = quota_gate(policy,allowed,counts,i-start)
+        if (proposal.get('trial_number') != i+1 or proposal.get('ankle_quota') != gate
+                or proposal.get('acquisition',{}).get('allowed_ankles') != gate['eligible_ankles']
+                or len(proposal.get('structure_key',[])) != 4
+                or proposal['structure_key'][3] not in gate['eligible_ankles']):
+            raise ValueError(f'Frozen ankle quota proposal is inconsistent: {request}')
+        if observation.is_file():
+            committed = bo.read(observation)
+            if any(committed.get(k) != v for k,v in proposal.items()):
+                raise ValueError(f'Ankle quota proposal and observation differ: {observation}')
+            counts[proposal['structure_key'][3]]+=1
+        else:
+            ended = True
+    return counts
 
 def propose(schema, observations, seen, seed, allowed_ankles=None):
     """Constrained EI, fitted on every observation, over requested motor pairs."""
@@ -444,6 +515,11 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
     start = len(results)
     if a.trials < start:
         raise ValueError('Total BO trial budget cannot be below imported completed history count')
+    legacy_no_quota = (existing_manifest is not None
+                       and existing_manifest.get('coordinator_sha256') in PRE_QUOTA_COORDINATOR_SHA256
+                       and 'ankle_quota' not in existing_manifest)
+    quota = None if legacy_no_quota else ankle_quota_policy(start, a.trials, allowed_ankles,
+                                     imported=getattr(a,'history',None) is not None)
     recorded_history = work/f'verified_history_{start:04d}.json'
     # An incompatible resume must not create even a new history receipt in an
     # existing run. If the coordinator was interrupted just before publishing
@@ -467,8 +543,16 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
                     acquisition='sobol_local_refined_global_incumbent_constrained_EI',
                     coordinator_sha256=bo.sha(Path(__file__)),
                     asset_builder_sha256=bo.sha(HERE/'bo_continuous_assets.py'))
+    if quota is not None:
+        manifest['ankle_quota'] = quota
+        verify_quota_prefix(bo,work,start,a.trials,quota,allowed_ankles)
+    if legacy_no_quota:
+        # Accept only the exact old coordinator with every other manifest field
+        # unchanged; never silently introduce quotas into a pre-quota run.
+        manifest['coordinator_sha256'] = existing_manifest['coordinator_sha256']
     bo.freeze(manifest_path, manifest)
     bo.resume_pause(work, a.resume_paused)
+    counts = dict.fromkeys(allowed_ankles,0)
     seen = {tuple(r['structure_key']) for r in results}
     print('BO_CONTINUOUS_HISTORY_VERIFIED', start, '/', start, flush=True)
 
@@ -476,21 +560,30 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
         trial = work/f'trial_{i:04d}'
         trial.mkdir(exist_ok=True)
         request, observation = trial/'proposal.json', trial/'observation.json'
-        if request.is_file():
+        gate = quota_gate(quota,allowed_ankles,counts,i-start) if quota is not None else None
+        eligible = gate['eligible_ankles'] if gate is not None else allowed_ankles
+        existing_request = request.is_file()
+        if existing_request:
             proposal = bo.read(request)
             k = checked_key(proposal['structure_key'], schema, seen)
         else:
             if any(trial.iterdir()):
                 raise ValueError('Unexpected uncommitted candidate without a frozen proposal')
-            k, audit = propose(schema, observations, seen, a.seed, allowed_ankles=allowed_ankles)
+            k, audit = propose(schema, observations, seen, a.seed, allowed_ankles=eligible)
             proposal = dict(kind='continuous_bo_proposal_v1', trial_number=i+1,
                             structure_key=list(k), acquisition=audit,
                             existing_grid_design_id=grid[k]['design_ids']['stairs'] if k in grid else None)
-            bo.freeze(request, proposal)
-        if (k[3] not in allowed_ankles or proposal['kind'] != 'continuous_bo_proposal_v1'
+            if gate is not None:
+                proposal['ankle_quota'] = gate
+        if (k[3] not in eligible or proposal['kind'] != 'continuous_bo_proposal_v1'
                 or proposal['trial_number'] != i+1
                 or proposal['existing_grid_design_id'] != (grid[k]['design_ids']['stairs'] if k in grid else None)):
-            raise ValueError('Frozen continuous proposal identity changed')
+            raise ValueError('Frozen continuous proposal identity or ankle quota eligibility changed')
+        if gate is not None and (proposal.get('ankle_quota') != gate
+                or proposal.get('acquisition',{}).get('allowed_ankles') != eligible):
+            raise ValueError('Frozen continuous proposal ankle quota state changed')
+        if not existing_request:
+            bo.freeze(request, proposal)
         if (work/'USER_PAUSED').exists():
             raise KeyboardInterrupt
         target = trial/'candidate'
@@ -525,10 +618,17 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
         results.append(result)
         append_observations(observations, result)
         seen.add(k)
+        if quota is not None:
+            counts[k[3]]+=1
     complete = [r for r in results if r['mean_objective'] is not None
                 and r['complete_objectives'] == len(bo.required_panel_pairs(conditions))]
     best = min(complete, key=lambda r:r['mean_objective']) if complete else None
     output = work/f'budget_{a.trials:04d}.json'
-    bo.freeze(output, dict(trials=len(results), best_observed=best,
-                          candidates=[summary(r) for r in results]))
+    budget = dict(trials=len(results), best_observed=best, candidates=[summary(r) for r in results])
+    if quota is not None:
+        if (sum(counts.values()) != quota['new_trials'] or any(
+                not quota['minimum_per_ankle'] <= n <= quota['maximum_per_ankle'] for n in counts.values())):
+            raise ValueError('Completed BO ankle quota not satisfied')
+        budget['ankle_quota'] = dict(policy=quota, completed_counts=counts)
+    bo.freeze(output,budget)
     print('BO_CONTINUOUS_COMPLETE', output, flush=True)
