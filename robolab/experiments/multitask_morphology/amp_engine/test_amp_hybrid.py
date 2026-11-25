@@ -599,3 +599,25 @@ def test_child_rejects_masked_zero_exit(tmp_path):
         controller.run_child(command,tmp_path/'child',os.environ)
     result=json.loads((tmp_path/'child/exit.json').read_text())
     assert result['raw_returncode']==0 and result['returncode']==1
+
+
+def test_amp_controller_can_import_lazy_shared_cache_helpers(tmp_path):
+    import subprocess
+    script = """
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location('isolated_amp_controller', sys.argv[1])
+controller = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(controller)
+from amp_rough_alignment import rough_module
+try:
+    rough_module('hybrid_native_cache').validate_training_cache(
+        Path(sys.argv[2]) / 'missing_cache', Path(sys.argv[2]) / 'missing_bank', ['a'])
+except FileNotFoundError:
+    pass  # Cache input is intentionally absent; helper imports must succeed.
+"""
+    result = subprocess.run([sys.executable, '-I', '-c', script, str(HERE / 'train.py'), str(tmp_path)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

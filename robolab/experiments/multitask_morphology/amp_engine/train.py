@@ -11,7 +11,9 @@ import time
 
 HERE=Path(__file__).resolve().parent
 ROOT=HERE.parents[2]
-sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl')]
+# Shared cache helpers can import sibling modules at call time, after
+# amp_rough_alignment has restored the temporary import search path.
+sys.path[:0]=[str(HERE),str(ROOT),str(ROOT.parent/'rsl_rl'),str(HERE.parent/'engine')]
 from amp_contract import experiment_identity,load_plan,single_pass_order,stage_count,stage_spec,validate_config,validate_checkpoint,sha
 from amp_bank import load_configurable_bank
 from amp_support import write_new
