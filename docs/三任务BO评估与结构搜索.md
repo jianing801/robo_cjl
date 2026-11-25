@@ -2,6 +2,8 @@
 
 更新：2026-11-25。本流程从同一份获选共享 Actor 出发，给每个结构相同的 100 次三任务联合 PPO 微调预算，再用固定工况实测指标比较硬件。正式搜索分为前 50 个已测结构和后 50 个连续 BO 候选；2500 个格点是专家训练结构库，**不是 BO 的搜索边界**。
 
+**原生 PPO 微调修复：** 新方法的算法身份为 `shared_native_ppoamp_v3`，旧版手写 PPO 的观测只能用于历史复算和对照；不得直接用于新方法的代理模型或归一化分母。在原机 1000 代对照实验通过验证之前，不重启 BO。详见[共享策略原生 PPO 微调说明](共享策略原生PPO微调说明.md)。
+
 [总流程](跨形态多任务共享策略训练流程.md) · [共享蒸馏与选模](共享策略蒸馏详细说明.md) · [原机实测基准](原始配置基准.md)
 
 <a name="第一步运行固定的-50-个结构并冻结尺度"></a>
@@ -15,13 +17,13 @@ entry="$PWD/robolab/experiments/multitask_morphology"
 experiment="$PWD/robolab/logs/multitask_full2500_physical_migrated"
 continuation="$experiment/shared_policy_round5"
 data="$experiment/bo"
-panel="$data/calibration50_single_seed_ppo100_random_200hz"
-reference="$data/rpo_original_025_030_10010l_4340p_ppo100_200hz/evaluation"
-scoring="$data/scoring_original_rpo_four_metrics"
-search="$data/search_continuous_four_100"
+panel="$data/calibration50_native_ppo100_200hz"
+reference="$data/rpo_original_025_030_10010l_4340p_native_ppo100_200hz/evaluation"
+scoring="$data/scoring_original_rpo_four_metrics_native"
+search="$data/search_continuous_four_native_100"
 ```
 
-已有 `measurements_completed.json` 且与原机基准的共享起点、微调、工况一致时，直接使用原始测量进入第二步，**无需重做微调或评估**。否则准备前 50 个结构：
+已有 `measurements_completed.json` 且与原机基准的共享起点、原生 PPO 算法身份、微调、工况一致时，直接使用原始测量进入第二步，**无需重做微调或评估**。旧算法的 50 个观测虽保留，但不是新算法的数据。否则准备前 50 个结构：
 
 ```bash
 conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
@@ -33,8 +35,8 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
 
 ### 微调与固定工况
 
-- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor 和 Critic，保留原生奖励和冻结的物理量归一化。
-- 普通 PPO 随机初始化回合步数计数，直接开始更新。每个候选做 **100 次 PPO 更新**，每次每环境采 24 步，训练 5 个 epoch、4 个小批/epoch；禁止用近邻结构替代实际提议。
+- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor 和 Critic，恢复各任务原生 Critic 特权观测、独立归一化，AMP 判别器在独立副本上随训练同步更新，老师和物理参数不改。
+- 普通 PPO 随机初始化回合步数计数，先做 10 次只更新 Critic 的预热（不计入正式预算），每个候选做 **100 次原生 PPO 更新**，每次每环境采 24 步，训练 5 个 epoch、4 个小批/epoch；禁止用近邻结构替代实际提议。
 - 微调后冻结 Actor，固定种子 `20261118`，每任务一条 20 秒试次（50 个结构共 150 条）。评估关闭观测噪声、推力、动力学和初态随机化及动作采样，50 Hz 控制、200 Hz 物理采样（步长 5 ms，每任务 4000 个物理步）。
 
 | 任务 | 20 秒工况 | 成功所需最小净行程 |
@@ -130,12 +132,12 @@ conda run --no-capture-output -n robo_cjl python start.py bo --gpu 0 \
 
 ## 暂停恢复与保存产物
 
-普通故障后重复原命令，沿用相同预算、评分、配额、允许电机名单、输入身份和输出目录。人工暂停后明确加 `--resume-paused`。候选 PPO 从最近完整提交恢复 Actor、Critic、Adam、学习率及协调器随机数状态；半次更新重做。PhysX 场景、回合状态及 GPU 采样随机状态不恢复，重启仿真仍使用相同的随机回合计时方式。训练结束但测量未完成时仅补测；原始历史和已提交数据不可修改。
+普通故障后重复原命令，沿用相同预算、算法、评分、配额、允许电机名单、输入身份和输出目录。人工暂停后明确加 `--resume-paused`。候选原生 PPO 从最近完整提交恢复 Actor、Critic、归一化器、可学习动作标准差、两个 Adam、判别器、判别器归一化与采样缓冲区、实际学习率和随机数状态；半次更新重做。PhysX 场景及回合状态不恢复，重启仿真仍使用相同的随机回合计时方式。预热中断而尚未提交第 0 代则从原始 Actor 重做预热。训练结束但测量未完成时仅补测；原始历史和已提交数据不可修改。
 
 | 产物 | 用途 |
 |---|---|
 | `proposal.json`、`observation.json` | 候选参数、获取函数记录、原始报告索引、分项与综合代价、可行性 |
-| `candidate/tuning/checkpoints/`、`training_completed.json` | 完整学习状态、最后一次 PPO 提交和最终 Actor 校验身份；正式 BO 保留初始及最近两次完整状态 |
+| `candidate/tuning/checkpoints/`、`training_completed.json` | 完整学习状态、最后一次 PPO 提交和最终 Actor 校验身份；保留初始、指定里程碑和最近两次完整状态，每代轻量提交记录都保留 |
 | `candidate/tuning/mean_reward.csv`、`training_reward.csv` | 总体与分任务 Mean reward；按各任务自己的尺度看趋势，结合回合和终止计数。Mean reward 用最近结束的最多 100 个回合，重启接续已保存的窗口 |
 | `candidate/bo_evaluation.json`、原始 200 Hz 采样及 `native_asset_evidence.json`（库外） | 三任务固定工况实测、原始物理量、模型与 USD 身份 |
 | `budget_*.json` | 完成预算汇总、可行性和最优设计 |

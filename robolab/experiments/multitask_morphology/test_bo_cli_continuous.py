@@ -15,7 +15,8 @@ import bo_continuous
 def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypatch, method):
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
     scoring = tmp_path/'scoring.json'
-    scoring.write_text(json.dumps({'method': method, 'conditions_sha256': bo.digest(conditions)}))
+    scoring.write_text(json.dumps({'method': method, 'conditions_sha256': bo.digest(conditions),
+        'benchmark': dict(ppo_algorithm=bo.NATIVE_PPO_ALGORITHM, native_ppo_settings=bo.NATIVE_PPO_SETTINGS)}))
     source, actor = tmp_path/'plan', tmp_path/'actor'
     plan = {'marker': 'frozen plan'}
     output = tmp_path/'new_continuous'
@@ -33,6 +34,7 @@ def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypat
     (b, a, work), = calls
     assert b is bo and work == output.resolve()
     assert a.trials == 100 and a.updates == 100
+    assert a.ppo_algorithm == bo.NATIVE_PPO_ALGORITHM
     assert a.history is None and a.history_budget is None and a.allowed_ankles is None
 
 

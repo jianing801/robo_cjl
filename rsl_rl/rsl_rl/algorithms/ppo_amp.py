@@ -115,6 +115,10 @@ class PPOAMP(PPO):
         # Storage for AMP discriminator observations
         self.disc_obs_buffer: CircularBuffer = disc_obs_buffer
         self.disc_demo_obs_buffer: CircularBuffer = disc_demo_obs_buffer
+
+    def _entropy_regularization(self, obs_batch: TensorDict, entropy_batch: torch.Tensor) -> torch.Tensor:
+        """Default native entropy bonus; mixed-task learners may weight it by task."""
+        return self.entropy_coef * entropy_batch.mean()
         
     def process_env_step(
         self, obs: TensorDict, rewards: torch.Tensor, dones: torch.Tensor, extras: dict[str, torch.Tensor]
@@ -268,7 +272,9 @@ class PPOAMP(PPO):
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            loss = surrogate_loss + self.value_loss_coef * value_loss - self._entropy_regularization(
+                obs_batch[:original_batch_size], entropy_batch
+            )
 
             # Symmetry loss
             if self.symmetry:

@@ -15,8 +15,8 @@ import torch
 
 from contract import load_plan, sha, write_new
 from finetune_settings import MIXED_BO_ENVS, PPO_SCHEDULE
-from finetune_state import checkpoint_history, load_checkpoint, prune_mixed_checkpoints, select_candidate, save_checkpoint
-from joint_finetune import ACTION_STD, STEPS_PER_TASK, check_pause, ppo_update, publish_training_completion
+from finetune_state import checkpoint_history, select_candidate
+from joint_finetune import STEPS_PER_TASK, check_pause, publish_training_completion
 from mixed_batch import advance, initialize_episode_length, task_counts
 from persistence import resume_pause, run_lock
 from randomization import protocol_metadata, assert_protocol_unchanged
@@ -32,11 +32,14 @@ class NativeTask:
     @torch.inference_mode()
     def __init__(self, name, backend, protocol):
         self.name = name
-        self.wrapper, self.raw, obs, self.canonical, self.clip, self.reward_adapter, policy = backend
+        self.wrapper, self.raw, obs, self.canonical, self.clip, self.reward_adapter, policy = backend[:7]
+        self.amp_training = backend[7] if len(backend) == 8 else None
         if policy != protocol:
             raise ValueError(f'{name} rollout protocol differs')
+        if self.reward_adapter is not None or (name == 'run') != (self.amp_training is not None):
+            raise ValueError('Mixed native training requires an independent trainable AMP discriminator')
+        self.observation = obs
         self.base = self.canonical(obs, None)
-        self.records = []
 
     def begin(self, action):
         action = action.clamp(-self.clip, self.clip)
@@ -68,9 +71,9 @@ class NativeTask:
         done = terminated | truncated
         timeout = truncated if not self.raw.cfg.is_finite_horizon else torch.zeros_like(truncated)
         obs = self.wrapper._extend(obs)
-        step_reward = self.reward_adapter(obs, reward.clone()) if self.reward_adapter else reward
+        self.observation = obs
         self.base = self.canonical(obs, done)
-        return dict(reward=step_reward, environment_reward=reward, done=done, timeout=timeout)
+        return dict(environment_reward=reward, done=done, timeout=timeout)
 
 
 def prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed):
@@ -112,60 +115,62 @@ def prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed):
 
 
 @torch.inference_mode()
-def collect(a, sim, tasks, counts, model, root):
-    for task in tasks:
-        task.records.clear()
-    for _ in range(STEPS_PER_TASK):
+def collect_native(a, sim, tasks, counts, learner, adapter, root, *, steps=STEPS_PER_TASK):
+    """Use the native learner's sampling, transition storage and AMP reward path."""
+    from native_observations import amp_native_observations
+    def observations():
+        packed = adapter.concat([adapter.pack(task.name, task.base, task.observation['critic'])
+                                 for task in tasks])
+        if not torch.isfinite(packed['policy']).all() or not torch.isfinite(packed['critic']).all():
+            raise ValueError('Nonfinite native mixed policy or critic observation')
+        return packed
+    obs = observations()
+    records = [[] for task in tasks]
+    for _ in range(steps):
         check_pause(root)
-        obs = [task.base for task in tasks]
-        mean = model(torch.cat(obs))
-        distribution = torch.distributions.Normal(mean, ACTION_STD)
-        actions = distribution.sample()
-        logp = distribution.log_prob(actions).sum(-1)
+        actions = learner.act(obs)
+        if not torch.isfinite(actions).all():
+            raise ValueError('Nonfinite native PPO action')
         outcomes = advance(tasks, counts, actions, tasks[0].raw.cfg.decimation,
                            lambda: sim.step(render=False))
-        for task, base, action, action_logp, outcome in zip(
-                tasks, obs, actions.split(counts), logp.split(counts), outcomes, strict=True):
-            sample = dict(obs=base, actions=action, logp=action_logp, **outcome)
-            task.records.append({key: value.clone() for key, value in sample.items()})
+        obs = observations()
+        raw_reward, done, timeout = (torch.cat([outcome[key] for outcome in outcomes])
+                                     for key in ('environment_reward', 'done', 'timeout'))
+        amp_obs = amp_native_observations(tasks[-1].observation)
+        if not torch.isfinite(amp_obs['disc']).all() or not torch.isfinite(amp_obs['disc_demo']).all():
+            raise ValueError('Nonfinite native AMP discriminator samples')
+        ppo_reward = learner.process_mixed_env_step(obs, raw_reward, done, timeout, amp_obs)
+        if not torch.isfinite(ppo_reward).all() or not torch.isfinite(raw_reward).all():
+            raise ValueError('Nonfinite reward during mixed PPO collection')
+        for rows, outcome, reward in zip(records, outcomes, ppo_reward.split(counts), strict=True):
+            rows.append({key: value.clone() for key, value in dict(reward=reward, **outcome).items()})
     batches = []
-    for task in tasks:
-        batch = {key: torch.stack([row[key] for row in task.records]) for key in task.records[0]}
-        task.records.clear()
-        for key in ('obs', 'actions', 'logp', 'reward', 'environment_reward'):
-            if not torch.isfinite(batch[key]).all():
-                raise ValueError(f'Nonfinite {task.name} {key}')
-        batches.append(dict(task=task.name, next_obs=task.base, **batch))
-    return batches
+    for task, rows in zip(tasks, records, strict=True):
+        batch = {key: torch.stack([row[key] for row in rows]) for key in rows[0]}
+        batches.append(dict(task=task.name, **batch))
+    return batches, obs
 
 
 def train(a, root, attempt, plan, candidate, protocol, counts):
+    from finetune_settings import NATIVE_PPO_SETTINGS
+    from finetune_state import load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints
+    from native_observations import NativeObservationAdapter
+    # Pin the current bundled RSL-RL before frozen teacher runtime paths are installed.
+    sys.path.insert(0, str(HERE.parents[3] / 'rsl_rl'))
+    from native_ppo import build_native_learner
+    import inspect
+    from rsl_rl.algorithms.ppo_amp import PPOAMP
+    if Path(inspect.getfile(PPOAMP)).resolve() != HERE.parents[3]/'rsl_rl/rsl_rl/algorithms/ppo_amp.py':
+        raise RuntimeError('Mixed learner did not load the current bundled native PPOAMP')
     random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed)
     model, _ = load_student(a.student, a.device)
     if model.schema != plan['schema']:
         raise ValueError('Candidate actor schema differs')
-    critic = torch.nn.Sequential(torch.nn.Linear(model.width, 256), torch.nn.ELU(),
-        torch.nn.Linear(256, 128), torch.nn.ELU(), torch.nn.Linear(128, 1)).to(a.device)
-    optimizer = torch.optim.Adam([{'params': model.parameters(), 'lr': 3e-6},
-                                  {'params': critic.parameters(), 'lr': 1e-3}])
     digest = sha(root/'manifest.json')
-    completed = load_checkpoint(root, model, critic, optimizer, digest)
-    if completed is None:
-        completed = 0
-        save_checkpoint(root, model, critic, optimizer, 0, digest)
     history = checkpoint_history(root, digest)
+    completed = history[-1]['completed_updates'] if history else 0
     if completed > a.updates:
         raise ValueError('Mixed PPO checkpoint exceeds its frozen update budget')
-    if a.compact_training_artifacts and completed:
-        prune_mixed_checkpoints(root, history, reconcile=True)
-    step_history = reward_history_rows(history, TASKS)
-    mean_history = list(mean_reward_rows(history, TASKS))
-    if completed:
-        write_training_reward_csv(root, step_history)
-        write_mean_reward_csv(root, TASKS, mean_history)
-    if completed == a.updates:
-        publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
-        return
     worker_seed = (a.seed + completed*1009) % 2**32
     python_rng, numpy_rng, torch_rng = random.getstate(), np.random.get_state(), torch.get_rng_state()
     sim, tasks = prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed)
@@ -175,6 +180,25 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     np.random.set_state(numpy_rng)
     torch.set_rng_state(torch_rng)
     torch.cuda.manual_seed_all(worker_seed)
+    widths = tuple(task.observation['critic'].shape[1] for task in tasks)
+    adapter = NativeObservationAdapter(widths)
+    amp = tasks[-1].amp_training
+    learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
+                                   adapter.augment, a.device, steps=STEPS_PER_TASK)
+    restored = load_native_checkpoint(root, learner, digest)
+    if restored is not None and restored['completed_updates'] != completed:
+        raise ValueError('Restored native learning state differs from its committed update')
+    retain_updates = {0, a.updates, *[i for i in (100, 200, 500, 800, 1000) if i <= a.updates]}
+    if history:
+        prune_native_checkpoints(root, history, retain_updates=retain_updates)
+    step_history = reward_history_rows(history, TASKS)
+    mean_history = list(mean_reward_rows(history, TASKS))
+    if completed:
+        write_training_reward_csv(root, step_history)
+        write_mean_reward_csv(root, TASKS, mean_history)
+    if completed == a.updates:
+        publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
+        return
     if a.init_at_random_ep_len:
         for task in tasks:
             initialize_episode_length(task.raw.episode_length_buf, task.raw.max_episode_length)
@@ -189,26 +213,48 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
                                     joints=task.wrapper.num_actions) for task in tasks},
               physics_dt=sim.get_physics_dt(), control_dt=tasks[0].raw.step_dt))
     print('MIXED_SCENE_READY', counts, flush=True)
-    rewards = RolloutRewards(history[-1].get('training_reward', {}).get('mean_reward_windows'))
+    rewards = RolloutRewards(history[-1].get('training_reward', {}).get('mean_reward_windows') if history else None)
+    warmup = NATIVE_PPO_SETTINGS['critic_warmup_updates']
+    if restored is None:
+        original_actor = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+        learner.configure_critic_only(True)
+        warmup_rows = []
+        for update in range(1, warmup+1):
+            check_pause(root); assert_protocol_unchanged(protocol)
+            batches, next_obs = collect_native(a, sim, tasks, counts, learner, adapter, root)
+            reward_summary = rewards.summarize(batches, attempt.name)
+            metrics = learner.compute_returns_and_update(next_obs, critic_only=True)
+            warmup_rows.append(dict(update=update, metrics=metrics))
+            print('NATIVE_CRITIC_WARMUP', update, '/', warmup, metrics, flush=True)
+        learner.configure_critic_only(False)
+        if any(not torch.equal(value.detach().cpu(), original_actor[name])
+               for name, value in model.state_dict().items()):
+            raise RuntimeError('Critic-only warmup unexpectedly modified the original shared Actor')
+        del original_actor
+        write_new(attempt/'critic_warmup.json', warmup_rows)
+        receipt = save_native_checkpoint(root, learner, 0, digest, warmup_completed=warmup,
+                                         training_reward=reward_summary)
+        history.append(receipt)
+    elif restored['warmup_completed'] != warmup:
+        raise ValueError('Native checkpoint has an incomplete Critic warmup')
     for update in range(completed+1, a.updates+1):
         assert_protocol_unchanged(protocol)
         torch.cuda.reset_peak_memory_stats(a.device)
         begin = time.monotonic()
-        batches = collect(a, sim, tasks, counts, model, root)
+        batches, next_obs = collect_native(a, sim, tasks, counts, learner, adapter, root)
         torch.cuda.synchronize(a.device)
         collected = time.monotonic()
         reward_summary = rewards.summarize(batches, attempt.name)
-        metrics = ppo_update(model, critic, optimizer, batches)
+        metrics = learner.compute_returns_and_update(next_obs)
         torch.cuda.synchronize(a.device)
         metrics.update(collection_seconds=collected-begin, update_seconds=time.monotonic()-collected,
                        torch_peak_mib=torch.cuda.max_memory_allocated(a.device)/2**20)
         del batches
         check_pause(root)
-        receipt = save_checkpoint(root, model, critic, optimizer, update, digest, metrics,
-                                  training_reward=reward_summary)
+        receipt = save_native_checkpoint(root, learner, update, digest, metrics,
+                                         warmup_completed=warmup, training_reward=reward_summary)
         history.append(receipt)
-        if a.compact_training_artifacts:
-            prune_mixed_checkpoints(root, history)
+        prune_native_checkpoints(root, history, retain_updates=retain_updates)
         step_history.extend(reward_history_rows([receipt], TASKS))
         mean_history.extend(mean_reward_rows([receipt], TASKS))
         write_training_reward_csv(root, step_history)
@@ -218,6 +264,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
 
 
 def main():
+    from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -245,11 +292,15 @@ def main():
         raise ValueError('Mixed pilot requires the three-task student')
     protocol = protocol_metadata(a.profile, a.randomization_strength)
     root = a.output.resolve()
-    files = ['mixed_finetune.py', 'mixed_scene.py', 'mixed_batch.py', 'joint_finetune.py',
-             'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py']
+    files = ['mixed_finetune.py', 'mixed_scene.py', 'mixed_batch.py', 'native_ppo.py', 'native_observations.py',
+             'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py',
+             'finetune_settings.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
+             '../../../../rsl_rl/rsl_rl/algorithms/ppo.py', '../../../../rsl_rl/rsl_rl/storage/rollout_storage.py',
+             '../../../../rsl_rl/rsl_rl/storage/circular_buffer.py', '../../../../rsl_rl/rsl_rl/modules/amp.py']
     manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
+              ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=NATIVE_PPO_SETTINGS,
               init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
               compact_training_artifacts=a.compact_training_artifacts,

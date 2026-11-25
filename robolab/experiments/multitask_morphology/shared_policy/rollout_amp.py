@@ -196,6 +196,16 @@ def prepare_rollout(argv=None, *, mixed_count=None):
             native_boundaries=dict(action_clip=native_clip,observation_clip=None)
             if a.ppo_channel:
                 from ppo_channel import serve
+                def canonical(o,r):
+                    latest=decode_amp_frames(o['policy'][:,:234])[:,-1]
+                    return canonical_input(history.append(latest,r),plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))
+                if mixed_count is not None:
+                    from native_observations import native_amp_setup
+                    # The shared mixed learner owns the native trainable AMP
+                    # discriminator; no frozen reward closure or teacher
+                    # parameter mutation in this path.
+                    amp_native = native_amp_setup(agent,state,obs,step_dt=raw.step_dt)
+                    return env,raw,obs,canonical,STUDENT_ACTION_CLIP,None,metadata['collection_protocol'],amp_native
                 from rsl_rl.modules.amp import AMPDiscriminator,LossType
                 amp=agent['algorithm']['amp_cfg'];disc_cfg=amp['amp_discriminator']
                 discriminator=AMPDiscriminator(67,3,agent['obs_groups'],
@@ -203,14 +213,9 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                 discriminator.load_state_dict(state['amp_discriminator_state_dict'],strict=True)
                 discriminator.disc_obs_normalizer.load_state_dict(state['amp_discriminator_normalizer_state_dict'],strict=True)
                 discriminator.eval();discriminator.requires_grad_(False)
-                def canonical(o,r):
-                    latest=decode_amp_frames(o['policy'][:,:234])[:,-1]
-                    return canonical_input(history.append(latest,r),plan['task_ids']['run'],groups,static,len(plan['schema']['tasks']))
                 def amp_reward(o,reward):
                     style,_=discriminator.predict_style_reward(discriminator.get_disc_obs(o),dt=raw.step_dt)
                     return discriminator.lerp_reward(task_reward=reward,style_reward=style)
-                if mixed_count is not None:
-                    return env,raw,obs,canonical,STUDENT_ACTION_CLIP,amp_reward,metadata['collection_protocol']
                 serve(a.ppo_channel,'run',env,raw,obs,canonical,STUDENT_ACTION_CLIP,amp_reward,
                     protocol=metadata['collection_protocol'])
                 status=0

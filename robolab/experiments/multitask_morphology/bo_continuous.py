@@ -258,11 +258,22 @@ def summary(result):
 
 
 def history_identity(bo, a, source, actor, conditions):
-    return dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=bo.sha(source),
+    identity = dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=bo.sha(source),
                 initial_actor_sha256=bo.sha(actor), conditions_sha256=bo.digest(conditions),
                 scoring_sha256=bo.sha(a.scoring), coordinator_sha256=bo.sha(Path(bo.__file__)),
                 surrogate_sha256=bo.sha(bo.REPO/'rough_bo/constrained_gp.py'),
                 updates=a.updates, seed=a.seed)
+    if getattr(a, 'ppo_algorithm', None) is not None:
+        identity['ppo_algorithm'] = a.ppo_algorithm
+    return identity
+
+
+def candidate_benchmark(bo, a, source, actor):
+    benchmark = dict(source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),
+                     updates=a.updates)
+    if getattr(a, 'ppo_algorithm', None) is not None:
+        benchmark['ppo_algorithm'] = a.ppo_algorithm
+    return benchmark
 
 
 def append_observations(observations, result):
@@ -279,7 +290,8 @@ def load_initial(bo, a, source, plan, actor, conditions, scoring, grid):
     keys = bo.calibration_keys()
     if (len(keys) != INITIAL_PANEL_SIZE or len(benchmark['reports']) != INITIAL_PANEL_SIZE
             or any(benchmark[k] != protocol[k] for k in
-                   ('source_plan_sha256', 'initial_actor_sha256', 'updates'))):
+                   ('source_plan_sha256', 'initial_actor_sha256', 'updates'))
+            or benchmark.get('ppo_algorithm') != protocol.get('ppo_algorithm')):
         raise ValueError('Original reference-ratio calibration does not match the search')
     results, observations, evidence, seen = [], [], [], set()
     for k, receipt in zip(keys, benchmark['reports'], strict=True):
@@ -376,8 +388,7 @@ def load_history(bo, a, source, plan, actor, conditions, scoring, grid):
                               or prior['observation_sha256'] != bo.sha(obs_path)))):
             raise ValueError('Historical trial proposal identity changed')
         candidate_source, candidate_plan, design_id = verify_materialized(bo, trial, source, plan, k, grid)
-        benchmark = dict(source_plan_sha256=bo.sha(candidate_source), initial_actor_sha256=bo.sha(actor),
-                         updates=a.updates)
+        benchmark = candidate_benchmark(bo, a, candidate_source, actor)
         report = verify_candidate(bo, path.parent, benchmark, conditions)
         design_ids = candidate_ids(k, grid, candidate_plan)
         if (report['candidate']['design_ids'] != design_ids or tuple(report['candidate']['structure_key']) != k
@@ -594,8 +605,7 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
             source, native_plan, design_id = materialize(bo, a, trial, donor_source, donor_plan, k, grid, prepare)
         if native_plan['schema'] != schema or bo.load_plan(source) != native_plan:
             raise ValueError('Candidate preparation changed the original policy encoding')
-        benchmark = dict(source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),
-                         updates=a.updates)
+        benchmark = candidate_benchmark(bo, a, source, actor)
         if observation.is_file():
             report = verify_candidate(bo, target, benchmark, conditions)
         else:

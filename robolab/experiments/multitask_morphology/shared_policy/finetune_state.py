@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from contract import sha, structure_key, write_new
+from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS
 from ppo_channel import publish
 
 
@@ -126,6 +127,156 @@ def load_checkpoint(root, model, critic, optimizer, manifest_sha256):
         raise ValueError('Nonfinite restored PPO learning state')
     restore_rng(state['rng'])
     return state['completed_updates']
+
+
+def _native_rng():
+    state = capture_rng()
+    state['cuda'] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    return state
+
+
+def _restore_native_rng(state):
+    restore_rng(state)
+    if state['cuda']:
+        if len(state['cuda']) != torch.cuda.device_count():
+            raise ValueError('Native PPO CUDA RNG device count differs on resume')
+        torch.cuda.set_rng_state_all(state['cuda'])
+
+
+def _ring_state(ring):
+    # Native CircularBuffer sampling includes the previous <=100 transitions,
+    # not just the current rollout; save its actual cursor and replay tensors.
+    return dict(buffer=ring._buffer, pointer=ring._pointer,
+                num_pushes=ring._num_pushes, max_length=ring.max_length,
+                batch_size=ring._batch_size)
+
+
+def _restore_ring(ring, state):
+    pushes, buf, pointer = state['num_pushes'], state['buffer'], state['pointer']
+    if (state['max_length'] != ring.max_length or state['batch_size'] != ring._batch_size
+            or pushes.shape != (ring._batch_size,) or (pushes < 0).any()
+            or type(pointer) != int or not -1 <= pointer < ring.max_length
+            or (buf is None and (pointer != -1 or pushes.any()))
+            or (buf is not None and (pointer < 0 or buf.shape[:2] != (ring.max_length, ring._batch_size)))):
+        raise ValueError('Native AMP replay state differs from its ring contract')
+    ring._buffer = None if buf is None else buf.to(ring._device)
+    ring._pointer = pointer
+    ring._num_pushes.copy_(pushes)
+
+
+def _finite_state(state):
+    if isinstance(state, torch.Tensor):
+        return bool(torch.isfinite(state).all())
+    if isinstance(state, dict):
+        return all(_finite_state(v) for v in state.values())
+    if isinstance(state, (tuple, list)):
+        return all(_finite_state(v) for v in state)
+    if isinstance(state, float):
+        return math.isfinite(state)
+    return True
+
+
+def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, metrics=None, *,
+                           warmup_completed=10, training_reward=None):
+    """Atomically commit every native learning state without mutating old v2 archives.
+
+    Index zero is the actor's original state *after* the separate Critic-only
+    warmup. The actor never changes during that warmup.
+    """
+    if (type(completed_updates) != int or completed_updates < 0
+            or warmup_completed != NATIVE_PPO_SETTINGS['critic_warmup_updates']):
+        raise ValueError('Native checkpoint requires the completed Critic-only warmup')
+    folder = Path(root).resolve()/'checkpoints'
+    folder.mkdir(exist_ok=True)
+    receipt_path = folder/f'update_{completed_updates:06d}.json'
+    if receipt_path.exists():
+        raise ValueError('Native PPO update is already committed')
+    path = folder/f'update_{completed_updates:06d}_{uuid.uuid4().hex}.pt'
+    actor = learner.policy.actor
+    value = dict(kind='shared_ppo_learning_state_v3', ppo_algorithm=NATIVE_PPO_ALGORITHM,
+        actor=actor.state_dict(), policy=learner.policy.state_dict(),
+        optimizer=learner.optimizer.state_dict(), learning_rate=float(learner.learning_rate),
+        amp_discriminator=learner.amp_discriminator.state_dict(), disc_optimizer=learner.disc_optimizer.state_dict(),
+        disc_obs_buffer=_ring_state(learner.disc_obs_buffer),
+        disc_demo_obs_buffer=_ring_state(learner.disc_demo_obs_buffer),
+        counts=list(learner.counts), rng=_native_rng(), completed_updates=completed_updates,
+        warmup_completed=warmup_completed, manifest_sha256=manifest_sha256,
+        schema=actor.schema, architecture=actor.architecture, metrics=metrics,
+        simulator_state_restored=False)
+    if training_reward is not None:
+        value['training_reward'] = training_reward
+    publish(path, value)
+    record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
+        ppo_algorithm=NATIVE_PPO_ALGORITHM, warmup_completed=warmup_completed,
+        path=path.name, sha256=sha(path), metrics=metrics)
+    if training_reward is not None:
+        record['training_reward'] = training_reward
+    write_new(receipt_path, record)
+    return record
+
+
+def load_native_checkpoint(root, learner, manifest_sha256):
+    folder = Path(root).resolve()/'checkpoints'
+    history = checkpoint_history(root, manifest_sha256)
+    if not history:
+        return None
+    record = history[-1]
+    if record.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM:
+        raise ValueError('Cannot resume legacy PPO state as a native PPO learner')
+    state_path = _checkpoint_blob(folder, record)
+    if sha(state_path) != record['sha256']:
+        raise ValueError('Committed native PPO checkpoint changed')
+    state = torch.load(state_path, map_location='cpu', weights_only=True)
+    actor = learner.policy.actor
+    if (state.get('kind') != 'shared_ppo_learning_state_v3' or
+            any(state.get(name) != record.get(name) for name in (
+                'ppo_algorithm', 'completed_updates', 'manifest_sha256', 'warmup_completed',
+                'metrics', 'training_reward')) or state.get('schema') != actor.schema
+            or state.get('architecture') != actor.architecture or state.get('counts') != list(learner.counts)
+            or state.get('warmup_completed') != NATIVE_PPO_SETTINGS['critic_warmup_updates']):
+        raise ValueError('Native PPO learning-state identity mismatch')
+    if not _finite_state({key: state[key] for key in (
+            'actor', 'policy', 'optimizer', 'learning_rate', 'amp_discriminator', 'disc_optimizer',
+            'disc_obs_buffer', 'disc_demo_obs_buffer')}):
+        raise ValueError('Nonfinite restored native PPO learning state')
+    learner.policy.load_state_dict(state['policy'], strict=True)
+    if any(not torch.equal(value.cpu(), state['actor'][name]) for name, value in actor.state_dict().items()):
+        raise ValueError('Native PPO exported actor does not match native policy state')
+    learner.optimizer.load_state_dict(state['optimizer'])
+    learner.learning_rate = float(state['learning_rate'])
+    if (learner.learning_rate <= 0 or
+            any(group['lr'] != learner.learning_rate for group in learner.optimizer.param_groups)):
+        raise ValueError('Native PPO adaptive learning rate does not match restored Adam state')
+    learner.amp_discriminator.load_state_dict(state['amp_discriminator'], strict=True)
+    learner.disc_optimizer.load_state_dict(state['disc_optimizer'])
+    _restore_ring(learner.disc_obs_buffer, state['disc_obs_buffer'])
+    _restore_ring(learner.disc_demo_obs_buffer, state['disc_demo_obs_buffer'])
+    _restore_native_rng(state['rng'])
+    return {name: record[name] for name in ('completed_updates', 'warmup_completed')}
+
+
+def prune_native_checkpoints(root, history, retain_updates=(0, 100, 200, 500, 800, 1000)):
+    """Keep milestones + the most recent two committed full native states.
+
+    The receipts and training metrics of *every* update are retained. Legacy
+    experiments, uncommitted blobs, and files beyond this exact run are untouched.
+    """
+    folder = Path(root).resolve()/'checkpoints'
+    if folder.resolve() != folder or not history:
+        raise ValueError('Native PPO checkpoint directory/history differs')
+    if any(row.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM for row in history):
+        raise ValueError('Native PPO pruning may not touch legacy state')
+    latest = history[-1]
+    if sha(_checkpoint_blob(folder, latest)) != latest['sha256']:
+        raise ValueError('Committed native PPO checkpoint changed')
+    _sync_directory(folder)
+    obsolete = {row['path']: row for row in history[:-2]
+                if row['completed_updates'] not in retain_updates}
+    # Only touch existing committed blobs (at most a few) rather than walking
+    # a growing O(updates) list of already removed files on every update.
+    for path in folder.glob('update_*.pt'):
+        if path.name in obsolete:
+            _checkpoint_blob(folder, obsolete[path.name]).unlink()
 
 
 def _sync_directory(folder):

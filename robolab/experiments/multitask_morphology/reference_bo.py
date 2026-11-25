@@ -62,11 +62,14 @@ def summarize(work, report):
         tasks[task].update(status=trial['status'], reason=trial['reason'], steps=trial['steps'],
                           rate_hz=1/trial['dt_s'], forward_m=trial['forward_m'],
                           mean_forward_mps=trial['mean_forward_mps'])
-    bo.freeze(work/'reference_result.json', dict(candidate=report['candidate'], seed=pair['seed'],
+    result = dict(candidate=report['candidate'], seed=pair['seed'],
               jointly_feasible=pair['feasible'], ppo_updates=report['ppo_updates'], tasks=tasks,
               conditions_sha256=report['conditions_sha256'], student=report['student'],
               student_sha256=report['student_sha256'],
-              report_sha256=bo.sha(work/'candidate/bo_evaluation.json')))
+              report_sha256=bo.sha(work/'candidate/bo_evaluation.json'))
+    if report.get('ppo_algorithm') is not None:
+        result['ppo_algorithm'] = report['ppo_algorithm']
+    bo.freeze(work/'reference_result.json', result)
     print('RPO_REFERENCE_EVALUATION_READY', work/'reference_result.json', flush=True)
 
 
@@ -83,6 +86,7 @@ def main():
     args.updates = bo.DEFAULT_BO_UPDATES
     args.timeout = 1800
     args.finetuned = None
+    args.ppo_algorithm = bo.NATIVE_PPO_ALGORITHM
     work = args.output.resolve()
     with bo.run_lock(work):
         work.mkdir(exist_ok=True)
@@ -92,7 +96,8 @@ def main():
                 require_horizontal_selection=True, continuation=args.shared_continuation.resolve())
             conditions = bo.read_conditions(args.conditions)
             bo.freeze(work/'reference_protocol.json', dict(source_plan_sha256=bo.sha(donor),
-                initial_actor_sha256=bo.sha(actor), conditions_sha256=bo.digest(conditions), updates=args.updates))
+                initial_actor_sha256=bo.sha(actor), conditions_sha256=bo.digest(conditions), updates=args.updates,
+                ppo_algorithm=bo.NATIVE_PPO_ALGORITHM, native_ppo_settings=bo.NATIVE_PPO_SETTINGS))
             source, candidate_plan, design_id = reference_plan(work, args.assets.resolve(), plan)
             report = bo.evaluate(args, work/'candidate', source, candidate_plan, actor, design_id, conditions)
             summarize(work, report)

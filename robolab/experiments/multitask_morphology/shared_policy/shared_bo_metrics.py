@@ -249,6 +249,9 @@ def validate_scoring(value, report):
 
 
 def objective(report, scoring):
+    if (report.get('domain') == 'simulation' and
+            report.get('ppo_algorithm') != scoring.get('benchmark', {}).get('ppo_algorithm')):
+        raise ValueError('Cannot mix BO observations from different PPO algorithms')
     validate_scoring(scoring, report)
     cot_basis = scoring_cot_basis(scoring)
     metric_profile = 'four' if scoring.get('method') == FOUR_METRIC_SCORING_METHOD else 'three'
