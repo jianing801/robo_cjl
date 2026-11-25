@@ -3,7 +3,6 @@
 from copy import deepcopy
 from pathlib import Path
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -149,6 +148,152 @@ def test_freezes_reference_ratios_from_verified_200_hz_measurements(original_rpo
     assert all(bo.sha(path) == digest for path, digest in old.items())
 
 
+FOUR_FIELDS = ('cot', 'forward_rmse_mps', 'roll_pitch_rms_rad_s', 'knee_ankle_max_rated_ratio')
+FOUR_WEIGHTS = dict(stairs=(.25, .20, .35, .20), backpack=(.35, .25, .15, .25),
+                    run=(.25, .35, .15, .25))
+
+
+def test_four_metric_profile_freezes_all_observed_ratios_without_touching_old_data(original_rpo_panel):
+    panel, reference, output, conditions, benchmark, reports, reference_report = original_rpo_panel
+    # Preserve the existing three-metric scoring and every native panel file.
+    bo.freeze_original_rpo_scoring(panel, reference, output)
+    old = {path: bo.sha(path) for path in (*panel.rglob('*.json'), *output.rglob('*.json'))}
+    fresh = output.with_name('four_metrics')
+    bo.freeze_original_rpo_scoring(panel, reference, fresh, metric_profile='four')
+    scoring_path = fresh/'scoring.json'
+    scoring = bo.read(scoring_path)
+    assert scoring['kind'] == 'rpo_three_task_bo_scoring_v2'
+    assert scoring['method'] == 'post_finetune_original_rpo_four_metrics'
+    assert scoring['cot_basis'] == bo.ABSOLUTE_COT_BASIS
+    assert scoring['task_weights'] == dict(stairs=.4, backpack=.3, run=.3)
+    source = reference_report['pairs'][0]['tasks']
+    trial = reports[0]['pairs'][0]['tasks']
+    expected_costs = {}
+    for task in bo.TASKS:
+        assert tuple(scoring['metrics'][task]) == FOUR_FIELDS
+        assert [scoring['metrics'][task][name]['weight'] for name in FOUR_FIELDS] == list(FOUR_WEIGHTS[task])
+        costs = []
+        for name, weight in zip(FOUR_FIELDS, FOUR_WEIGHTS[task], strict=True):
+            raw_name = 'absolute_mechanical_cot' if name == 'cot' else name
+            baseline = source[task]['observed'][raw_name]
+            assert scoring['metrics'][task][name] == dict(baseline=baseline, weight=weight)
+            costs.append(weight * trial[task]['observed'][raw_name] / baseline)
+        expected_costs[task] = sum(costs)
+    baseline = bo.objective(reference_report, scoring)
+    assert baseline['mean_objective'] == 1.
+    assert baseline['observations'][0]['task_objectives'] == dict.fromkeys(bo.TASKS, 1.)
+    scored = bo.objective(reports[0], scoring)
+    assert scored['observations'][0]['task_objectives'] == pytest.approx(expected_costs)
+    assert scored['mean_objective'] == pytest.approx(sum(scoring['task_weights'][task] * cost
+                                                          for task, cost in expected_costs.items()))
+    assert bo.objective(reports[-1], scoring)['observations'] == [
+        dict(seed=20261118, replica=0, feasible=False, objective=None)]
+    assert bo.read_search_benchmark(scoring_path, scoring, conditions)[0] == panel
+    assert len(bo.read(fresh/'initial_observations.json')['candidates']) == 50
+    assert bo.read_search_benchmark(output/'scoring.json', bo.read(output/'scoring.json'), conditions)[0] == panel
+    assert all(bo.sha(path) == digest for path, digest in old.items())
+
+
+@pytest.mark.parametrize('missing', ['knee_ankle_max_rated_ratio', 'roll_pitch_rms_rad_s', 'forward_rmse_mps',
+                                    'absolute_mechanical_cot'])
+def test_four_metric_profile_rejects_missing_observed_inputs(original_rpo_panel, missing):
+    panel, reference, output, _, _, reports, _ = original_rpo_panel
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='four')
+    scoring = bo.read(output/'scoring.json')
+    report = deepcopy(reports[0])
+    report['pairs'][0]['tasks']['stairs']['observed'].pop(missing)
+    with pytest.raises(ValueError, match='Missing or invalid'):
+        bo.objective(report, scoring)
+
+
+@pytest.mark.parametrize('bad', [None, float('nan'), float('inf'), '0.1', -0.1, True])
+def test_four_metric_profile_rejects_invalid_observed_inputs(original_rpo_panel, bad):
+    panel, reference, output, _, _, reports, _ = original_rpo_panel
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='four')
+    report = deepcopy(reports[0])
+    report['pairs'][0]['tasks']['backpack']['observed']['roll_pitch_rms_rad_s'] = bad
+    with pytest.raises(ValueError, match='Missing or invalid'):
+        bo.objective(report, bo.read(output/'scoring.json'))
+
+
+def test_four_metric_profile_rejects_rate_weights_scale_or_kind_changes(original_rpo_panel):
+    panel, reference, output, _, _, reports, _ = original_rpo_panel
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='four')
+    scoring = bo.read(output/'scoring.json')
+    wrong_rate = deepcopy(reports[0])
+    wrong_rate['pairs'][0]['tasks']['run']['dt_s'] = .02
+    with pytest.raises(ValueError, match='200 Hz'):
+        bo.objective(wrong_rate, scoring)
+    changed_weights = deepcopy(scoring)
+    changed_weights['metrics']['stairs']['cot']['weight'] = .26
+    changed_scale = deepcopy(scoring)
+    changed_scale['metrics']['stairs']['cot']['scale'] = 1.
+    changed_kind = dict(scoring, kind=bo.SCORING_VERSION)
+    for changed in (changed_weights, changed_scale, changed_kind):
+        with pytest.raises(ValueError):
+            bo.objective(reports[0], changed)
+
+
+@pytest.mark.parametrize('profile', [None, 'three', 'four'])
+def test_freeze_scoring_cli_metric_profile_default_is_four(original_rpo_panel, profile):
+    panel, reference, output, *_ = original_rpo_panel
+    flags = ['freeze-scoring', '--measurements-root', str(panel), '--original-rpo-reference', str(reference),
+             '--output', str(output)]
+    if profile is not None:
+        flags += ['--metric-profile', profile]
+    bo.main(flags)
+    scoring = bo.read(output/'scoring.json')
+    assert scoring['method'] == ('post_finetune_original_rpo' if profile == 'three'
+                                 else 'post_finetune_original_rpo_four_metrics')
+
+
+def test_four_metric_custom_weights_are_frozen_and_independent_of_current_default(original_rpo_panel, monkeypatch):
+    panel, reference, output, conditions, _, _, reference_report = original_rpo_panel
+    config = output.with_name('custom_weights.json')
+    original_weights = {task: dict(zip(FOUR_FIELDS, weights, strict=True))
+                        for task, weights in FOUR_WEIGHTS.items()}
+    custom = deepcopy(original_weights)
+    custom['stairs'].update(cot=.4, forward_rmse_mps=.1, roll_pitch_rms_rad_s=.3, knee_ankle_max_rated_ratio=.2)
+    bo.freeze(config, custom)
+    bo.main(['freeze-scoring', '--measurements-root', str(panel), '--original-rpo-reference', str(reference),
+             '--output', str(output), '--metric-profile', 'four', '--metric-weights', str(config)])
+    scoring_path = output/'scoring.json'
+    scoring = bo.read(scoring_path)
+    assert {task: {metric: row['weight'] for metric, row in values.items()}
+            for task, values in scoring['metrics'].items()} == custom
+    assert bo.objective(reference_report, scoring)['mean_objective'] == pytest.approx(1.)
+    # A later edit to the provisional default file cannot alter an already
+    # frozen experiment, even when the new default uses other valid weights.
+    changed_default = output.with_name('changed_default.json')
+    bo.freeze(changed_default, original_weights)
+    monkeypatch.setattr(bo, 'FOUR_METRIC_WEIGHTS_PATH', changed_default)
+    before = {p: bo.sha(p) for p in output.rglob('*.json')}
+    assert bo.read_search_benchmark(scoring_path, scoring, conditions)[0] == panel
+    assert all(bo.sha(p) == digest for p, digest in before.items())
+
+
+@pytest.mark.parametrize('bad', ['missing_task', 'missing_metric', 'extra_metric', 'negative', 'nonfinite', 'bool', 'sum'])
+def test_four_metric_weight_configuration_has_exact_fields_and_valid_weights(bad):
+    from shared_bo_metrics import validate_four_metric_weights
+    config = {task: dict(zip(FOUR_FIELDS, weights, strict=True)) for task, weights in FOUR_WEIGHTS.items()}
+    if bad == 'missing_task':
+        config.pop('stairs')
+    elif bad == 'missing_metric':
+        config['run'].pop('cot')
+    elif bad == 'extra_metric':
+        config['stairs']['unknown'] = 0.
+    elif bad == 'negative':
+        config['backpack'].update(cot=-.1, forward_rmse_mps=.7)
+    elif bad == 'nonfinite':
+        config['stairs']['cot'] = float('nan')
+    elif bad == 'bool':
+        config['stairs']['cot'] = True
+    else:
+        config['stairs']['cot'] = .26
+    with pytest.raises(ValueError):
+        validate_four_metric_weights(config)
+
+
 @pytest.mark.parametrize('artifact', ['panel_manifest', 'panel_receipt', 'scoring', 'observations'])
 def test_search_refuses_tampered_score_or_panel_receipt(original_rpo_panel, artifact):
     panel, reference, output, conditions, *_ = original_rpo_panel
@@ -169,42 +314,3 @@ def test_search_refuses_a_different_evaluation_protocol(original_rpo_panel):
     changed = dict(conditions, seeds=[42])
     with pytest.raises(ValueError):
         bo.read_search_benchmark(scoring_path, bo.read(scoring_path), changed)
-
-
-def test_search_starts_at_51_with_original_rpo_scores(original_rpo_panel, monkeypatch, capsys):
-    panel, reference, output, conditions, _, reports, _ = original_rpo_panel
-    bo.freeze_original_rpo_scoring(panel, reference, output)
-    source = panel.parent/'plan.json'
-    actor = panel.parent/'selected.pt'
-    bank = panel.parent/'bank.json'
-    candidates = [dict(key=r['candidate']['structure_key'], design_ids=r['candidate']['design_ids'])
-                  for r in reports]
-    next_candidate = dict(key=[.3333333333, .3777777778, 'RS04', 'DM-J8009P-2EC-V1.1'],
-                          design_ids=dict.fromkeys(bo.TASKS, 'tr_new'))
-    rows = [*candidates, next_candidate]
-    bo.freeze(bank, dict(structures=rows))
-    plan = dict(shared_bank=str(bank), selected_structure_keys=[row['key'] for row in rows], schema={})
-    evaluated = []
-
-    def propose(pool, observations, seen, schema, seed):
-        assert [r for r in pool if r['design_ids']['stairs'] not in seen] == [next_candidate]
-        assert len(observations) == 50
-        assert observations[0]['objective'] == pytest.approx(.8)
-        assert observations[-1]['feasible'] is False and observations[-1]['objective'] is None
-        return next_candidate, dict(method='test')
-
-    def evaluate(args, work, source, plan, actor, design_id, conditions):
-        evaluated.append(design_id)
-        return dict(reports[0], candidate=dict(structure_key=next_candidate['key'],
-                                               design_ids=next_candidate['design_ids']))
-
-    monkeypatch.setattr(bo, 'propose', propose)
-    monkeypatch.setattr(bo, 'evaluate', evaluate)
-    work = panel.parent/'new_search'
-    work.mkdir()
-    args = SimpleNamespace(scoring=output/'scoring.json', updates=100, trials=51, seed=42, resume_paused=False)
-    bo.search(args, work, source, plan, actor, conditions)
-    assert evaluated == ['tr_new']
-    assert 'BO_TRIAL 51 / 51 tr_new' in capsys.readouterr().out
-    assert bo.read(work/'manifest.json')['scoring_sha256'] == bo.sha(args.scoring)
-    assert bo.read(work/'budget_0051.json')['trials'] == 51

@@ -156,37 +156,6 @@ def test_absolute_scoring_rejects_positive_only_or_wrong_rate_evidence(missing):
         objective(report, scoring)
 
 
-def test_search_makes_exact_unique_proposals_and_preserves_scores_on_resume(tmp_path, monkeypatch):
-    report = fixtures()
-    conditions = report['conditions']
-    scoring = tmp_path/'scoring.json'
-    scoring.write_text(json.dumps(bo.calibrate(report, dict(name='pilot'))))
-    source, actor = tmp_path/'source.json', tmp_path/'actor.pt'
-    source.write_bytes(b'source')
-    actor.write_bytes(b'actor')
-    rows = [dict(key=[thigh, calf, 'K', 'A'], design_ids={'stairs': f'id{i}'})
-            for i, (thigh, calf) in enumerate([(x,y) for x in (.2,.3,.4) for y in (.25,.35,.45)])]
-    bank = tmp_path/'bank.json'
-    bank.write_text(json.dumps(dict(structures=rows)))
-    plan = dict(schema={'ranges_m': {'thigh': [.2, .4], 'calf': [.25, .45]},
-                        'knees': ['K'], 'ankles': ['A']},
-                shared_bank=str(bank), selected_structure_keys=[r['key'] for r in rows])
-    path = tmp_path/'search'
-    path.mkdir()
-    def fake_evaluate(*_):
-        return report
-    monkeypatch.setattr(bo, 'evaluate', fake_evaluate)
-    args = SimpleNamespace(scoring=scoring, updates=2, seed=42, trials=5, resume_paused=False)
-    bo.search(args, path, source, plan, actor, conditions)
-    first = bo.read(path/'budget_0005.json')
-    assert len({row['design_id'] for row in first['candidates']}) == 5
-    fifth = bo.read(path/'trial_0004/proposal.json')['acquisition']
-    assert fifth['feasibility_rows'] == 12 and fifth['performance_rows'] == 8
-    args.trials = 6
-    bo.search(args, path, source, plan, actor, conditions)
-    assert bo.read(path/'budget_0006.json')['candidates'][:5] == first['candidates']
-
-
 def test_imported_baseline_uses_same_measurements_and_fixed_conditions(tmp_path):
     conditions = dict(kind=TRIAL_VERSION, duration_s=.08, seeds=[10], copies=2, tasks={
         'stairs': dict(speed_mps=.5, step_height_m=.075, step_depth_m=.25, step_count=12, approach_m=1.),
@@ -549,7 +518,6 @@ def official_panel(tmp_path, monkeypatch):
     (tmp_path/'migration_completed.json').write_text('{}')
     monkeypatch.setattr(bo,'MIGRATED_ROOT',tmp_path,raising=False)
     calls = []
-    next_key = next(k for k in keys if k not in fixed)
     by_id = {ids[k]['stairs']:k for k in keys}
     def synthetic(a, folder, source, plan, initial, candidate_id, conditions):
         calls.append((candidate_id,bo.sha(initial),a.updates))
@@ -622,16 +590,10 @@ def official_panel(tmp_path, monkeypatch):
         return report
     monkeypatch.setattr(bo,'evaluate',synthetic)
 
-    def choose(pool, observations, evaluated, _schema, _seed):
-        assert evaluated == {ids[k]['stairs'] for k in fixed}
-        assert len(observations) in (50, 150)
-        assert sum(o['feasible'] for o in observations) == len(observations) - 1
-        return next(r for r in pool if r['key'] == list(next_key)), dict(method='fixture')
-    monkeypatch.setattr(bo,'propose',choose)
     return SimpleNamespace(root=tmp_path,calls=calls,selection=selection_path,student=actor,
-                           fixed_ids=[ids[k]['stairs'] for k in fixed],next_id=ids[next_key]['stairs'])
+                           fixed_ids=[ids[k]['stairs'] for k in fixed])
 
-def test_official_panel_initializes_once_and_proposes_candidate_51(official_panel):
+def test_official_panel_initializes_once_and_freezes_legacy_scores(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
@@ -640,16 +602,8 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     assert manifest['ppo_schedule'] == dict(epochs=5, minibatches=4)
     assert manifest['init_at_random_ep_len'] is True
     assert manifest['envs_per_task'] == dict(stairs=1366, backpack=1365, run=1365)
-    bo.main(['search','--migrated','--trials','50'])
-    bo.main(['search','--migrated','--trials','51'])
-    assert p.calls[50:] == [(p.next_id,bo.sha(p.student),100)]
-    saved=bo.read(p.root/'bo/search_single_seed_ppo100_random_200hz/budget_0051.json')
-    assert [r['design_id'] for r in saved['candidates']] == [*p.fixed_ids,p.next_id]
-    assert saved['candidates'][0]['complete_objectives'] == 0
-    assert saved['candidates'][0]['mean_objective'] is None
-    assert saved['candidates'][-1]['complete_objectives'] == 1
-    assert saved['best_observed']['design_id'] == p.next_id
-    assert not (p.root/'bo/search_single_seed_ppo100_random_200hz/trial_0000').exists()
+    bo.main(['initialize','--migrated'])
+    assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
     scoring_path = p.root/'bo/calibration50_single_seed_ppo100_random_200hz/scoring.json'
     scoring = bo.read(scoring_path)
     assert scoring['cot_basis'] == 'absolute_mechanical'
@@ -657,26 +611,30 @@ def test_official_panel_initializes_once_and_proposes_candidate_51(official_pane
     assert scoring['metrics']['stairs']['cot']['p10'] == pytest.approx(3 * 7.8 + 2)
     assert scoring['metrics']['backpack']['cot']['p10'] == pytest.approx(3 * 6.9 + 2)
     assert scoring['metrics']['run']['cot']['p90'] == pytest.approx(3 * 46.1 + 2)
-    # Candidate 51 was never used to fit the normalization. Its stair CoT differs
-    # from its other tasks, so an accidental equal-task average changes this score.
+    # Historical percentile scores remain readable without the obsolete discrete
+    # search. Use a new synthetic report with different stair and other task CoTs
+    # to check the frozen normalization and task weighting independently.
     task_costs = {}
     for task, specs in scoring['metrics'].items():
         values = dict.fromkeys(specs, 1.)
         values['cot'] = 9. if task == 'stairs' else 5.
         task_costs[task] = sum(spec['weight'] * (values[metric] - spec['p10']) / spec['scale']
                                for metric, spec in specs.items())
-    latest = bo.read(p.root/'bo/search_single_seed_ppo100_random_200hz/trial_0050/observation.json')
+    latest_report = bo.read(scoring_path.parent/'design_02/bo_evaluation.json')
+    for task, trial in latest_report['pairs'][0]['tasks'].items():
+        trial['metrics'] = dict.fromkeys(bo.METRICS[task], 1.)
+        trial['observed']['absolute_mechanical_cot'] = 9. if task == 'stairs' else 5.
+    latest = objective(latest_report, scoring)
     assert latest['observations'][0]['task_objectives'] == pytest.approx(task_costs)
     assert latest['mean_objective'] == pytest.approx(
         .4 * task_costs['stairs'] + .3 * task_costs['backpack'] + .3 * task_costs['run'])
-    search_manifest = p.root/'bo/search_single_seed_ppo100_random_200hz/manifest.json'
-    assert bo.read(search_manifest)['scoring_sha256'] == bo.sha(scoring_path)
+    legacy_panel, benchmark = bo.read_search_benchmark(scoring_path, scoring, latest_report['conditions'])
+    assert legacy_panel == scoring_path.parent and len(benchmark['reports']) == 50
 
 def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_panel):
     p = official_panel
     legacy = ['--conditions', str(bo.LEGACY_FORMAL_CONDITIONS)]
     initialize = ['initialize', '--migrated', '--updates', '100', *legacy]
-    search = ['search', '--migrated', '--updates', '100', '--trials', '50', *legacy]
     bo.main(initialize)
     assert p.calls == [(k,bo.sha(p.student),100) for k in p.fixed_ids]
     calibration = p.root/'bo/calibration50'
@@ -695,7 +653,7 @@ def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_
     assert objective(legacy_report, data)['mean_objective'] > 0
 
     with pytest.raises(ValueError, match='initialize'):
-        bo.main(search)
+        bo.read_search_benchmark(old_scoring, data, legacy_report['conditions'])
     original_report = report_path.read_bytes()
     report_path.write_bytes(original_report + b' ')
     with pytest.raises(ValueError, match='Frozen initial BO report changed'):
@@ -709,8 +667,8 @@ def test_initialize_reuses_frozen_legacy_reports_with_anchored_scoring(official_
 
     updated = calibration/'percentile_scoring/scoring.json'
     assert objective(legacy_report, bo.read(updated))['mean_objective'] < 0
-    bo.main(search)
-    assert bo.read(p.root/'bo/search/manifest.json')['scoring_sha256'] == bo.sha(updated)
+    panel, benchmark = bo.read_search_benchmark(updated, bo.read(updated), legacy_report['conditions'])
+    assert panel == updated.parent and len(benchmark['reports']) == 50
 
 
 def test_initialize_reuses_completed_anchored_100_update_panel(official_panel):
@@ -736,23 +694,23 @@ def test_explicit_legacy_calibration_refuses_current_conditions(official_panel):
     original_manifest = (calibration/'manifest.json').read_bytes()
     with pytest.raises(ValueError, match='Frozen BO identity differs'):
         bo.main(['initialize', '--migrated', '--output', str(calibration)])
-    with pytest.raises(ValueError, match='same conditions'):
-        bo.main(['search', '--migrated', '--trials', '50', '--scoring', str(calibration/'scoring.json'),
-                 '--conditions', str(bo.FORMAL_CONDITIONS)])
+    with pytest.raises(ValueError, match='different measurement conditions'):
+        bo.read_search_benchmark(calibration/'scoring.json', bo.read(calibration/'scoring.json'),
+                                 bo.read_conditions(bo.FORMAL_CONDITIONS))
     assert len(p.calls) == 50
     assert (calibration/'manifest.json').read_bytes() == original_manifest
 
 
 @pytest.mark.parametrize('change', ['actor','budget','report','substituted_manifest','scale','downgrade'])
-def test_official_panel_rejects_changed_evidence_before_proposal(official_panel,change):
+def test_official_panel_rejects_changed_evidence_on_reuse(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
     calib=p.root/'bo/calibration50_single_seed_ppo100_random_200hz'
-    args=['search','--root',str(p.root),'--trials','51']
+    args=['initialize','--root',str(p.root),'--output',str(calib)]
     if change=='actor':
         p.student.write_bytes(b'changed')
     elif change=='budget':
-        args+=['--updates','99','--scoring',str(calib/'scoring.json')]
+        args+=['--updates','99']
     elif change=='report':
         with (calib/'design_01/bo_evaluation.json').open('a') as f: f.write(' ')
     elif change=='substituted_manifest':

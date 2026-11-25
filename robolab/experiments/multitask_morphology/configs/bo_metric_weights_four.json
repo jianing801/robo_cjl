@@ -1,0 +1,20 @@
+{
+  "stairs": {
+    "cot": 0.25,
+    "forward_rmse_mps": 0.20,
+    "roll_pitch_rms_rad_s": 0.35,
+    "knee_ankle_max_rated_ratio": 0.20
+  },
+  "backpack": {
+    "cot": 0.35,
+    "forward_rmse_mps": 0.25,
+    "roll_pitch_rms_rad_s": 0.15,
+    "knee_ankle_max_rated_ratio": 0.25
+  },
+  "run": {
+    "cot": 0.25,
+    "forward_rmse_mps": 0.35,
+    "roll_pitch_rms_rad_s": 0.15,
+    "knee_ankle_max_rated_ratio": 0.25
+  }
+}

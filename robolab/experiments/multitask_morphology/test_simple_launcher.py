@@ -72,6 +72,28 @@ def test_preview_does_not_create_output_or_launch_record(tmp_path,capsys):
     assert '--device cuda:0' in capsys.readouterr().out
 
 
+def test_bo_launcher_passes_continuous_search_options_without_preparing_banks(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(launcher, 'run', lambda command, **kwargs: commands.append((list(map(str, command)), kwargs)))
+    monkeypatch.setattr(launcher, 'ensure_banks', lambda *_: pytest.fail('BO must consume existing verified inputs'))
+    score = tmp_path/'scoring.json'
+    continuation = tmp_path/'shared_policy_round5'
+    output = tmp_path/'continuous_run'
+    history = tmp_path/'historical_search'
+    launcher.main(['bo', '--root', str(tmp_path), '--scoring', str(score),
+                   '--shared-continuation', str(continuation), '--bo-output', str(output),
+                   '--history', str(history), '--history-budget', '100', '--trials', '110',
+                   '--allowed-ankles', 'DM-J6216P-2EC', '--gpu', '2', '--resume-paused', '--dry-run'])
+    (command, options), = commands
+    assert command[2:4] == [str(launcher.ENTRY/'bo.py'), 'search']
+    for flag, value in {'--root':tmp_path, '--scoring':score, '--shared-continuation':continuation,
+                        '--output':output, '--history':history, '--history-budget':100,
+                        '--trials':110, '--allowed-ankles':'DM-J6216P-2EC', '--gpu':2}.items():
+        assert command[command.index(flag)+1] == str(value)
+    assert '--resume-paused' in command and options['preview'] is True
+    assert not output.exists()
+
+
 def test_fresh_and_migration_actions_are_independent(tmp_path, monkeypatch):
     old, fresh, migrated = (tmp_path/name for name in ('old', 'fresh', 'migrated'))
     banks(old)

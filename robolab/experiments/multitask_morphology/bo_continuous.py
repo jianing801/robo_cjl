@@ -1,15 +1,11 @@
-"""Extend a completed 100-observation search with ten continuous-leg BO designs."""
-import argparse
+"""Continuous three-task BO from the frozen 50-design calibration or completed history."""
+import re
 import math
 from pathlib import Path
 
-from bo_compact_ankles import ALLOWED_ANKLES, frozen_coordinator
-
 
 HERE = Path(__file__).resolve().parent
-HISTORY_SIZE = 100
 INITIAL_PANEL_SIZE = 50
-TOTAL_SIZE = 110
 FIELDS = ('thigh_m', 'calf_m', 'knee_motor', 'ankle_motor')
 SUMMARY_KEYS = ('design_id', 'structure_key', 'evaluation', 'valid_pairs',
                 'joint_successes', 'complete_objectives', 'mean_objective')
@@ -46,8 +42,20 @@ def checked_key(value, schema, seen):
     return canonical
 
 
-def propose(schema, observations, seen, seed):
-    """Original constrained EI, fitted on every observation, 15 new motor pairs."""
+def allowed_choices(schema, allowed_ankles=None):
+    """Default to the full trained pool; restrictions apply only to new proposals."""
+    if (len(schema['knees']) != 5 or len(set(schema['knees'])) != 5
+            or len(schema['ankles']) != 5 or len(set(schema['ankles'])) != 5):
+        raise ValueError('Expected the original five knee and ankle motor choices')
+    requested = schema['ankles'] if allowed_ankles is None or allowed_ankles == ['all'] else allowed_ankles
+    if (not requested or len(set(requested)) != len(requested)
+            or not set(requested) <= set(schema['ankles'])):
+        raise ValueError('Allowed ankle motor IDs must be a nonempty, unique subset of the original pool')
+    return [motor for motor in schema['ankles'] if motor in requested]
+
+
+def propose(schema, observations, seen, seed, allowed_ankles=None):
+    """Constrained EI, fitted on every observation, over requested motor pairs."""
     from itertools import product
 
     import numpy as np
@@ -55,10 +63,7 @@ def propose(schema, observations, seen, seed):
     from scipy.stats import qmc
     from rough_bo.constrained_gp import ConstrainedSurrogate
 
-    if (len(schema['knees']) != 5 or len(set(schema['knees'])) != 5
-            or len(schema['ankles']) != 5 or len(set(schema['ankles'])) != 5
-            or not ALLOWED_ANKLES <= set(schema['ankles'])):
-        raise ValueError('Expected the original five knee and ankle motor choices')
+    allowed_ankles = allowed_choices(schema, allowed_ankles)
     model = ConstrainedSurrogate(schema['ranges_m'], schema['knees'], schema['ankles'],
                                  seed=seed, objective_key='objective')
     # Do not narrow the surrogate's schema or discard excluded-motor evidence.
@@ -68,7 +73,7 @@ def propose(schema, observations, seen, seed):
     points = qmc.Sobol(2, scramble=True, seed=proposal_seed).random_base2(8)
     points = np.vstack((points, [[0, 0], [0, 1], [1, 0], [1, 1], [.5, .5]]))
     pairs = list(product(range(len(schema['knees'])), [
-        i for i, motor in enumerate(schema['ankles']) if motor in ALLOWED_ANKLES]))
+        i for i, motor in enumerate(schema['ankles']) if motor in allowed_ankles]))
     raw = np.vstack([np.column_stack((points, np.tile(pair, (len(points), 1)))) for pair in pairs])
     existing = set(seen)
 
@@ -129,7 +134,7 @@ def propose(schema, observations, seen, seed):
         feasibility_kernel=str(model.classifier.kernel_) if model.classifier is not None else None,
         classifier='logistic_GPC_Laplace' if model.classifier is not None else 'one_class_Beta_prior',
         fit_warnings=model.fit_warnings, search_space='continuous_thigh_calf_exact_motor_categories',
-        allowed_ankles=sorted(ALLOWED_ANKLES), motor_pairs=len(pairs),
+        allowed_ankles=allowed_ankles, motor_pairs=len(pairs),
         sobol_points_per_motor_pair=256, bounded_local_refinement=True,
         canonical_length_decimals=10, fit_performance_rows=model.performance_count,
         fit_feasibility_rows=model.feasibility_count)
@@ -152,7 +157,7 @@ def grid_lookup(bo, plan):
 def scoring_protocol(bo, scoring, conditions):
     bo.validate_scoring(scoring, dict(domain='simulation',
                         conditions_sha256=bo.digest(conditions), conditions=conditions))
-    if (scoring['method'] != bo.ORIGINAL_RPO_SCORING_METHOD
+    if (scoring['method'] not in bo.ORIGINAL_RPO_SCORING_METHODS
             or conditions.get('measurement_dt_s') != bo.PHYSICS_DT
             or conditions.get('reset_mode') != 'fixed'
             or bo.scoring_cot_basis(scoring) != bo.ABSOLUTE_COT_BASIS
@@ -164,7 +169,8 @@ def scoring_protocol(bo, scoring, conditions):
 def score_report(bo, report, scoring, conditions):
     bo.check_panel_pairs(report['pairs'], bo.required_panel_pairs(conditions))
     scored = bo.objective(report, scoring)
-    if scored['complete_objectives'] != scored['joint_successes']:
+    if (scored['valid_pairs'] != len(bo.required_panel_pairs(conditions))
+            or scored['complete_objectives'] != scored['joint_successes']):
         raise ValueError('Successful BO trial has incomplete performance measurements')
     return scored
 
@@ -193,75 +199,195 @@ def append_observations(observations, result):
                         for o in result['observations'])
 
 
-def load_history(bo, a, source, plan, actor, conditions, scoring, grid):
-    """Read and verify all 100 committed measurements without old-run writes."""
-    root = a.history.resolve()
-    identity = history_identity(bo, a, source, actor, conditions)
-    manifest_path = root/'manifest.json'
-    if bo.read(manifest_path) != identity:
-        raise ValueError('Original search must use the same frozen coordinator, actor, plan, scoring and seed')
-    budget_path = root/'budget_0100.json'
-    budget = bo.read(budget_path)
-    entries = budget['candidates']
-    if budget['trials'] != HISTORY_SIZE or len(entries) != HISTORY_SIZE:
-        raise ValueError('A completed, exact 100-observation original budget is required')
-    # This also validates the original reference and 50 initial raw traces,
-    # checkpoint/actor hashes, frozen scale, and existing panel score receipt.
+def load_initial(bo, a, source, plan, actor, conditions, scoring, grid):
+    """The first 50 measurements are fixed; do not run calibration workers."""
+    protocol = history_identity(bo, a, source, actor, conditions)
+    # Verifies frozen original reference, initial panel traces, policy hashes,
+    # fixed conditions and all scoring/initial observation receipts.
     panel, benchmark = bo.read_search_benchmark(a.scoring, scoring, conditions)
     keys = bo.calibration_keys()
     if (len(keys) != INITIAL_PANEL_SIZE or len(benchmark['reports']) != INITIAL_PANEL_SIZE
-            or any(benchmark[k] != identity[k] for k in
+            or any(benchmark[k] != protocol[k] for k in
                    ('source_plan_sha256', 'initial_actor_sha256', 'updates'))):
         raise ValueError('Original reference-ratio calibration does not match the search')
     results, observations, evidence, seen = [], [], [], set()
-    for i, row in enumerate(entries):
-        k = checked_key(row['structure_key'], plan['schema'], seen)
-        if k not in grid or grid[k]['design_ids']['stairs'] != row['design_id']:
-            raise ValueError('Original budget contains an invalid paired-bank design')
-        design_ids = grid[k]['design_ids']
-        if i < INITIAL_PANEL_SIZE:
-            receipt = benchmark['reports'][i]
-            if tuple(keys[i]) != k:
-                raise ValueError('Initial structure order changed')
-            path = panel/receipt['report']
-            report = bo.initial_report(path, receipt, benchmark)
-            proposal = dict(design_id=row['design_id'], structure_key=list(k))
-            obs_hash = prop_hash = None
-        else:
-            trial = root/f'trial_{i:04d}'
-            path = trial/'candidate/bo_evaluation.json'
-            proposal_path, obs_path = trial/'proposal.json', trial/'observation.json'
-            proposal = bo.read(proposal_path)
-            if proposal['design_id'] != row['design_id'] or tuple(proposal['structure_key']) != k:
-                raise ValueError('Historical trial proposal identity changed')
-            report = verify_candidate(bo, path.parent, benchmark, conditions)
-            obs_hash, prop_hash = bo.sha(obs_path), bo.sha(proposal_path)
-        if (path.resolve() != Path(row['evaluation']).resolve()
-                or report['candidate']['design_ids'] != design_ids
+    for k, receipt in zip(keys, benchmark['reports'], strict=True):
+        k = checked_key(k, plan['schema'], seen)
+        row = grid[k]
+        path = panel/receipt['report']
+        report = bo.initial_report(path, receipt, benchmark)
+        if (report['candidate']['design_ids'] != row['design_ids']
                 or tuple(report['candidate']['structure_key']) != k
                 or report['ppo_updates'] != a.updates):
+            raise ValueError('Initial BO observation is attached to another candidate or budget')
+        result = dict(design_id=row['design_ids']['stairs'], structure_key=list(k), evaluation=str(path),
+                      **score_report(bo, report, scoring, conditions))
+        results.append(result)
+        append_observations(observations, result)
+        evidence.append(dict(design_id=result['design_id'], structure_key=list(k), report=str(path),
+            report_sha256=bo.sha(path), observation_sha256=None, proposal_sha256=None))
+        seen.add(k)
+    return results, observations, evidence
+
+
+def history_budget_path(root, requested):
+    if requested is not None:
+        if requested < INITIAL_PANEL_SIZE:
+            raise ValueError('Historical BO budget must include the first 50 structures')
+        candidate = root/f'budget_{requested:04d}.json'
+        if not candidate.is_file():
+            raise ValueError(f'Completed historical budget not found: {candidate}')
+        return candidate, requested
+    choices = [(int(m.group(1)), p) for p in root.glob('budget_*.json')
+               if (m := re.fullmatch(r'budget_([0-9]{4,})\.json',p.name))]
+    if not choices:
+        raise ValueError(f'No completed historical budget in {root}')
+    count, path = max(choices)
+    return path, count
+
+
+def load_history(bo, a, source, plan, actor, conditions, scoring, grid):
+    """Read original panel, optionally append verified completed BO budgets without old writes."""
+    results, observations, evidence = load_initial(bo, a, source, plan, actor, conditions, scoring, grid)
+    if getattr(a, 'history', None) is None:
+        if getattr(a, 'history_budget', None) is not None:
+            raise ValueError('--history-budget requires --history')
+        return results, observations, dict(history=None, scoring_sha256=bo.sha(a.scoring), records=evidence)
+    root = Path(a.history).resolve()
+    identity = history_identity(bo, a, source, actor, conditions)
+    manifest_path = root/'manifest.json'
+    manifest = bo.read(manifest_path)
+    kinds = ('rpo_shared_bo_search_v1', 'rpo_shared_continuous_bo_extension_v1', 'rpo_shared_continuous_bo_search_v2')
+    if manifest.get('kind') not in kinds:
+        raise ValueError('Unknown historical BO protocol')
+    saved = manifest.get('original_protocol',manifest)
+    # Older coordinators are deliberately not rerun/rewritten; their recorded
+    # sources stay frozen in the source manifest. Independently check every
+    # measurement/checkpoint and the exact scientific protocol/score identity.
+    if any(saved.get(k) != v for k,v in identity.items() if k != 'coordinator_sha256'):
+        raise ValueError('Historical search must use the same actor, plan, scoring, surrogate, updates and seed')
+    if not re.fullmatch(r'[0-9a-f]{64}',saved.get('coordinator_sha256','')):
+        raise ValueError('Historical coordinator identity missing')
+    budget_path, count = history_budget_path(root, getattr(a,'history_budget',None))
+    budget = bo.read(budget_path)
+    entries = budget['candidates']
+    if (count < INITIAL_PANEL_SIZE or budget['trials'] != count or len(entries) != count
+            or [summary(r) for r in results] != entries[:INITIAL_PANEL_SIZE]):
+        raise ValueError('Historical BO budget does not match the frozen first 50 structures')
+    inherited = manifest.get('historical_trials', INITIAL_PANEL_SIZE)
+    prior_records = []
+    if inherited != INITIAL_PANEL_SIZE or manifest.get('history_sha256') is not None:
+        receipt_path = root/f'verified_history_{inherited:04d}.json'
+        if (not INITIAL_PANEL_SIZE <= inherited <= count or bo.sha(receipt_path) != manifest['history_sha256']):
+            raise ValueError('Frozen inherited BO history receipt changed')
+        prior_records = bo.read(receipt_path)['records']
+        if len(prior_records) != inherited or prior_records[:INITIAL_PANEL_SIZE] != evidence:
+            raise ValueError('Inherited BO history does not match the initial calibration')
+    seen = {tuple(r['structure_key']) for r in results}
+    for i,row in enumerate(entries[INITIAL_PANEL_SIZE:],INITIAL_PANEL_SIZE):
+        k = checked_key(row['structure_key'], plan['schema'], seen)
+        path = Path(row['evaluation'])
+        if i < inherited:
+            prior = prior_records[i]
+            if str(path) != prior['report'] or bo.sha(path) != prior['report_sha256']:
+                raise ValueError('Inherited historical report identity changed')
+            trial = path.parent.parent
+        else:
+            prior = None
+            trial = root/f'trial_{i:04d}'
+        if path.resolve() != (trial/'candidate/bo_evaluation.json').resolve():
+            raise ValueError('Historical BO measurement is outside its exact committed trial')
+        proposal_path, obs_path = trial/'proposal.json', trial/'observation.json'
+        proposal = bo.read(proposal_path)
+        if (tuple(proposal['structure_key']) != k or proposal.get('design_id',row['design_id']) != row['design_id']
+                or proposal.get('trial_number',i+1) != i+1
+                or (prior and (prior['proposal_sha256'] != bo.sha(proposal_path)
+                              or prior['observation_sha256'] != bo.sha(obs_path)))):
+            raise ValueError('Historical trial proposal identity changed')
+        candidate_source, candidate_plan, design_id = verify_materialized(bo, trial, source, plan, k, grid)
+        benchmark = dict(source_plan_sha256=bo.sha(candidate_source), initial_actor_sha256=bo.sha(actor),
+                         updates=a.updates)
+        report = verify_candidate(bo, path.parent, benchmark, conditions)
+        design_ids = candidate_ids(k, grid, candidate_plan)
+        if (report['candidate']['design_ids'] != design_ids or tuple(report['candidate']['structure_key']) != k
+                or report['ppo_updates'] != a.updates or design_id != row['design_id']):
             raise ValueError('Historical measured candidate differs from its budget entry')
-        result = dict(proposal, evaluation=str(path), **score_report(bo, report, scoring, conditions))
-        if summary(result) != row or (i >= INITIAL_PANEL_SIZE and bo.read(obs_path) != result):
+        if k not in grid and bo.read(path.parent/'native_asset_evidence.json') != native_usd_evidence(bo,path.parent,a.updates,design_ids):
+            raise ValueError('Historical native USD evidence changed')
+        result = dict(proposal,design_id=design_id, evaluation=str(path), **score_report(bo, report, scoring, conditions))
+        if summary(result) != row or bo.read(obs_path) != result:
             raise ValueError('Historical score differs from the frozen BO observation')
         results.append(result)
         append_observations(observations, result)
         evidence.append(dict(design_id=row['design_id'], structure_key=list(k),
                              report=str(path), report_sha256=bo.sha(path),
-                             observation_sha256=obs_hash, proposal_sha256=prop_hash))
+                             observation_sha256=bo.sha(obs_path), proposal_sha256=bo.sha(proposal_path)))
         seen.add(k)
-    if len({r['design_id'] for r in results}) != HISTORY_SIZE:
+    if len({r['design_id'] for r in results}) != count:
         raise ValueError('Duplicate design identities in historical budget')
     return results, observations, dict(history=str(root), budget_sha256=bo.sha(budget_path),
-        original_manifest_sha256=bo.sha(manifest_path), scoring_sha256=bo.sha(a.scoring),
-        records=evidence)
-
+        original_manifest_sha256=bo.sha(manifest_path), scoring_sha256=bo.sha(a.scoring), records=evidence)
 
 def materialize(bo, a, trial, donor_source, donor_plan, k, grid, prepare):
     if k in grid:
         return donor_source, donor_plan, grid[k]['design_ids']['stairs']
     return prepare(bo, a, trial/'assets', donor_source, donor_plan, k)
 
+
+def candidate_ids(k, grid, native_plan):
+    return grid[k]['design_ids'] if k in grid else {
+        task: spec['design_ids'][0] for task, spec in native_plan['teachers'].items()}
+
+
+def verify_materialized(bo, trial, donor_source, donor_plan, k, grid):
+    """Verify accepted exact native assets without re-running a generator or worker."""
+    if k in grid:
+        return donor_source, donor_plan, grid[k]['design_ids']['stairs']
+    from bo_continuous_assets import BANKS, singleton_config, _audit_common
+    from amp_engine.amp_references import validate_library
+    from contract import reference_context
+
+    work = trial/'assets'
+    identity = bo.read(work/'native_identity.json')
+    source = work/'candidate_plan.json'
+    plan = bo.load_plan(source)
+    schema = donor_plan['schema']
+    if (identity['donor_plan_sha256'] != bo.sha(donor_source) or identity['key'] != list(k)
+            or identity['donor_banks'] != {t:donor_plan['teachers'][t]['bank_sha256'] for t in BANKS}
+            or plan['schema'] != schema or plan['reference_structure_key'] != list(k)
+            or plan['selected_structure_keys'] != [list(k)]):
+        raise ValueError('Historical off-grid candidate does not share original donor identity')
+    config = singleton_config(list(k),schema)
+    if bo.read(work/'singleton_config.json') != config:
+        raise ValueError('Historical singleton config changed')
+    donor = {t:bo.read(donor_plan['teachers'][t]['bank']) for t in BANKS}
+    paths = {t:Path(plan['teachers'][t]['bank']).resolve() for t in BANKS}
+    for task,label in BANKS.items():
+        stage = work/'native_banks'/label
+        receipt = bo.read(stage/'completed.json')
+        if (paths[task] != (stage/receipt['attempt']/'bank.json').resolve()
+                or bo.sha(paths[task]) != receipt['evidence']['bank_sha256']
+                or plan['teachers'][task]['design_ids'] != [receipt['evidence']['design_id']]):
+            raise ValueError('Historical native singleton bank receipt changed')
+    common = _audit_common(bo,paths,donor,config,schema,list(k))
+    if bo.read(work/'bank_audit.json') != common:
+        raise ValueError('Historical exact common morphology audit changed')
+    if bo.read(plan['shared_bank'])['structures'] != [dict(key=list(k),design_ids=common['design_ids'])]:
+        raise ValueError('Historical candidate common bank changed')
+    context = bo.read(work/'actor_context.json')
+    for task in BANKS:
+        bank = bo.read(paths[task]); (row,) = bank['designs']
+        if (context != dict(schema=schema['context_schema'],key=list(k),
+                            normalization=schema['context_normalization'],values=reference_context(bank,row,schema,list(k)))):
+            raise ValueError('Historical candidate actor context changed')
+    ref = Path(plan['teachers']['run']['reference_library']).resolve()
+    stage = work/'native_references'; receipt = bo.read(stage/'completed.json')
+    if (ref != (stage/receipt['attempt']/'library.json').resolve()
+            or not bo.sha(ref) == receipt['evidence']['library_sha256'] == plan['teachers']['run']['reference_library_sha256']
+            or receipt['evidence']['urdf_sha256'] != common['actual_urdf_hashes']['run']):
+        raise ValueError('Historical AMP reference identity changed')
+    validate_library(bo.read(paths['run']),paths['run'],ref)
+    return source,plan,common['design_ids']['stairs']
 
 def native_usd_evidence(bo, candidate_root, updates, design_ids):
     """Verify the exact native USD used by the final committed PPO session."""
@@ -290,37 +416,63 @@ def native_usd_evidence(bo, candidate_root, updates, design_ids):
                            audit_sha256=bo.sha(audit_path), reused=row['reused'])
     return dict(training_session=session_id, checkpoint_receipt_sha256=bo.sha(checkpoint), tasks=tasks)
 
-def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare):
-    """Native frozen evaluator is used only for the new ten candidate dirs."""
-    check_separation(a.history, work)
-    if a.trials != TOTAL_SIZE or a.updates != bo.DEFAULT_BO_UPDATES:
-        raise ValueError('Expected 100 original + 10 new structures, each using 100 PPO updates')
+def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=None):
+    """Run continuous BO; imported and already completed evidence stays read-only."""
+    if prepare is None:
+        from bo_continuous_assets import prepare_candidate as prepare
+    work = Path(work).resolve()
+    a.search_root = work
+    manifest_path = work/'manifest.json'
+    existing_manifest = bo.read(manifest_path) if manifest_path.is_file() else None
+    if existing_manifest is not None and existing_manifest.get('kind') != 'rpo_shared_continuous_bo_search_v2':
+        raise ValueError('The existing output belongs to a different BO protocol; choose a new output and --history')
+    if (work/'USER_PAUSED').exists() and not a.resume_paused:
+        raise RuntimeError('USER_PAUSED; pass --resume-paused to continue this run')
+    if getattr(a,'history',None) is not None:
+        check_separation(a.history,work)
+    if a.trials < INITIAL_PANEL_SIZE or a.updates != bo.DEFAULT_BO_UPDATES:
+        raise ValueError('BO requires >=50 total structures with the original 100-update PPO protocol')
     scoring = bo.read(a.scoring)
     scoring_protocol(bo, scoring, conditions)
     grid = grid_lookup(bo, donor_plan)
     schema = donor_plan['schema']
-    if (len(schema['knees']) != 5 or len(schema['ankles']) != 5
-            or schema['ranges_m'] != {'thigh':[.2,.4], 'calf':[.25,.45]}):
+    if schema['ranges_m'] != {'thigh':[.2,.4], 'calf':[.25,.45]}:
         raise ValueError('Original morphology search schema changed')
+    allowed_ankles = allowed_choices(schema,getattr(a,'allowed_ankles',None))
     results, observations, evidence = load_history(
         bo, a, donor_source, donor_plan, actor, conditions, scoring, grid)
-    recorded_history = work/'verified_history_0100.json'
-    bo.freeze(recorded_history, evidence)
-    manifest = dict(kind='rpo_shared_continuous_bo_extension_v1',
-                    history_sha256=bo.sha(recorded_history), historical_trials=HISTORY_SIZE,
-                    total_trials=TOTAL_SIZE, original_protocol=history_identity(
+    start = len(results)
+    if a.trials < start:
+        raise ValueError('Total BO trial budget cannot be below imported completed history count')
+    recorded_history = work/f'verified_history_{start:04d}.json'
+    # An incompatible resume must not create even a new history receipt in an
+    # existing run. If the coordinator was interrupted just before publishing
+    # its first manifest, an identical standalone history receipt is reusable.
+    if existing_manifest is not None:
+        if (existing_manifest.get('historical_trials') != start
+                or not recorded_history.is_file()
+                or existing_manifest.get('history_sha256') != bo.sha(recorded_history)
+                or bo.read(recorded_history) != evidence):
+            raise ValueError('Frozen BO history does not match the existing output')
+    else:
+        if any(p != recorded_history and p.name != 'USER_PAUSED' for p in work.iterdir()):
+            raise ValueError('The existing output contains untracked artifacts; use a separate BO output')
+        bo.freeze(recorded_history,evidence)
+    manifest = dict(kind='rpo_shared_continuous_bo_search_v2',
+                    history_sha256=bo.sha(recorded_history), historical_trials=start,
+                    total_trials=a.trials, original_protocol=history_identity(
                         bo, a, donor_source, actor, conditions),
                     search_schema={field:schema[field] for field in ('ranges_m','knees','ankles')},
-                    allowed_ankles=sorted(ALLOWED_ANKLES),
-                    acquisition='restricted_sobol_local_refined_global_incumbent_constrained_EI',
+                    allowed_ankles=allowed_ankles,
+                    acquisition='sobol_local_refined_global_incumbent_constrained_EI',
                     coordinator_sha256=bo.sha(Path(__file__)),
                     asset_builder_sha256=bo.sha(HERE/'bo_continuous_assets.py'))
-    bo.freeze(work/'manifest.json', manifest)
+    bo.freeze(manifest_path, manifest)
     bo.resume_pause(work, a.resume_paused)
     seen = {tuple(r['structure_key']) for r in results}
-    print('BO_CONTINUOUS_HISTORY_VERIFIED', len(results), '/', HISTORY_SIZE, flush=True)
+    print('BO_CONTINUOUS_HISTORY_VERIFIED', start, '/', start, flush=True)
 
-    for i in range(HISTORY_SIZE, TOTAL_SIZE):
+    for i in range(start, a.trials):
         trial = work/f'trial_{i:04d}'
         trial.mkdir(exist_ok=True)
         request, observation = trial/'proposal.json', trial/'observation.json'
@@ -330,35 +482,43 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare)
         else:
             if any(trial.iterdir()):
                 raise ValueError('Unexpected uncommitted candidate without a frozen proposal')
-            k, audit = propose(schema, observations, seen, a.seed)
+            k, audit = propose(schema, observations, seen, a.seed, allowed_ankles=allowed_ankles)
             proposal = dict(kind='continuous_bo_proposal_v1', trial_number=i+1,
                             structure_key=list(k), acquisition=audit,
                             existing_grid_design_id=grid[k]['design_ids']['stairs'] if k in grid else None)
             bo.freeze(request, proposal)
-        if (k[3] not in ALLOWED_ANKLES or proposal['kind'] != 'continuous_bo_proposal_v1'
+        if (k[3] not in allowed_ankles or proposal['kind'] != 'continuous_bo_proposal_v1'
                 or proposal['trial_number'] != i+1
                 or proposal['existing_grid_design_id'] != (grid[k]['design_ids']['stairs'] if k in grid else None)):
             raise ValueError('Frozen continuous proposal identity changed')
         if (work/'USER_PAUSED').exists():
             raise KeyboardInterrupt
-        print('BO_TRIAL', i+1, '/', TOTAL_SIZE, list(k), flush=True)
-        source, native_plan, design_id = materialize(bo, a, trial, donor_source, donor_plan, k, grid, prepare)
+        target = trial/'candidate'
+        print('BO_TRIAL', i+1, '/', a.trials, list(k), flush=True)
+        if observation.is_file():
+            source, native_plan, design_id = verify_materialized(bo,trial,donor_source,donor_plan,k,grid)
+        else:
+            source, native_plan, design_id = materialize(bo, a, trial, donor_source, donor_plan, k, grid, prepare)
         if native_plan['schema'] != schema or bo.load_plan(source) != native_plan:
             raise ValueError('Candidate preparation changed the original policy encoding')
-        target = trial/'candidate'
         benchmark = dict(source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),
                          updates=a.updates)
         if observation.is_file():
             report = verify_candidate(bo, target, benchmark, conditions)
         else:
             report = bo.evaluate(a, target, source, native_plan, actor, design_id, conditions)
-        design_ids = grid[k]['design_ids'] if k in grid else {
-            task: spec['design_ids'][0] for task, spec in native_plan['teachers'].items()}
+        design_ids = candidate_ids(k, grid, native_plan)
         if (tuple(report['candidate']['structure_key']) != k or report['candidate']['design_ids'] != design_ids
                 or design_id != design_ids['stairs'] or report['ppo_updates'] != a.updates):
             raise ValueError('Measured candidate differs from the frozen exact proposal')
         if k not in grid:
-            bo.freeze(target/'native_asset_evidence.json', native_usd_evidence(bo, target, a.updates, design_ids))
+            assets = target/'native_asset_evidence.json'
+            checked = native_usd_evidence(bo,target,a.updates,design_ids)
+            if observation.is_file():
+                if bo.read(assets) != checked:
+                    raise ValueError('Committed native USD evidence changed')
+            else:
+                bo.freeze(assets,checked)
         result = dict(proposal, design_id=design_id, evaluation=str(target/'bo_evaluation.json'),
                       **score_report(bo, report, scoring, conditions))
         bo.freeze(observation, result)
@@ -368,53 +528,7 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare)
     complete = [r for r in results if r['mean_objective'] is not None
                 and r['complete_objectives'] == len(bo.required_panel_pairs(conditions))]
     best = min(complete, key=lambda r:r['mean_objective']) if complete else None
-    bo.freeze(work/'budget_0110.json', dict(trials=len(results), best_observed=best,
-                                         candidates=[summary(r) for r in results]))
-    print('BO_CONTINUOUS_COMPLETE', work/'budget_0110.json', flush=True)
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('history','output','root','shared-continuation','scoring','frozen-code-root'):
-        parser.add_argument('--'+name, type=Path, required=True)
-    parser.add_argument('--conditions',type=Path)
-    parser.add_argument('--gpu',type=int,default=0)
-    parser.add_argument('--updates',type=int,default=100)
-    parser.add_argument('--trials',type=int,default=110)
-    parser.add_argument('--seed',type=int,default=42)
-    parser.add_argument('--timeout',type=int,default=1800)
-    parser.add_argument('--resume-paused',action='store_true')
-    parser.add_argument('--reference-python',type=Path)
-    parser.add_argument('--reference-device',default='cuda:0')
-    parser.add_argument('--warp-cache',type=Path)
-    parser.add_argument('--template',type=Path)
-    parser.add_argument('--mesh-dir',type=Path)
-    a = parser.parse_args(argv)
-    a.history, a.output, a.root, a.scoring = (p.resolve() for p in
-                                              (a.history,a.output,a.root,a.scoring))
-    check_separation(a.history, a.output)
-    if a.updates != 100 or a.trials != TOTAL_SIZE or a.gpu < 0 or a.timeout <= 0:
-        parser.error('Use the original 100-update protocol and a total of 110 designs')
-    # Both new entry modules have only stdlib imports at import time. The
-    # frozen coordinator then puts its code roots ahead of the current checkout.
-    from bo_continuous_assets import prepare_candidate
-    bo = frozen_coordinator(a.frozen_code_root)
-    a.conditions = (a.conditions or bo.PHYSICS_CONDITIONS).resolve()
-    conditions = bo.read_conditions(a.conditions)
-    if bo.official_conditions_path(bo.digest(conditions)) != bo.PHYSICS_CONDITIONS:
-        parser.error('Expected original 200 Hz physics-step evaluation')
-    with bo.run_lock(a.output):
-        a.output.mkdir(exist_ok=True,parents=True)
-        try:
-            if (a.output/'USER_PAUSED').exists() and not a.resume_paused:
-                raise RuntimeError('USER_PAUSED; pass --resume-paused to continue this run')
-            donor, plan, actor = bo.shared_input(a.root, formal=True,
-                require_horizontal_selection=True, continuation=a.shared_continuation.resolve())
-            search(bo, a, a.output, donor, plan, actor, conditions, prepare=prepare_candidate)
-        except KeyboardInterrupt:
-            (a.output/'USER_PAUSED').touch()
-            raise SystemExit(130)
-
-
-if __name__ == '__main__':
-    main()
+    output = work/f'budget_{a.trials:04d}.json'
+    bo.freeze(output, dict(trials=len(results), best_observed=best,
+                          candidates=[summary(r) for r in results]))
+    print('BO_CONTINUOUS_COMPLETE', output, flush=True)

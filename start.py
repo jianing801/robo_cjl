@@ -801,7 +801,7 @@ def main(argv=None):
     parser.add_argument('-h', '--help', action='help', help='显示本说明并退出')
     parser._positionals.title = '操作'
     parser._optionals.title = '选项'
-    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial',*SERIAL_TASKS,'蒸馏','微调','状态','录像'])
+    parser.add_argument('操作', choices=['准备','参考动作','资产','迁移','rough','负重','amp','amp-spatial','rough-spatial','backpack-spatial',*SERIAL_TASKS,'蒸馏','微调','bo','状态','录像'])
     parser.add_argument('--gpu', type=int, default=0, help='显卡编号，默认0')
     parser.add_argument('--cpu', action='store_true', help='单独生成参考动作时使用CPU')
     parser.add_argument('--任务', choices=['rough','负重','amp','全部'], help='资产默认全部任务；录像默认rough')
@@ -811,6 +811,14 @@ def main(argv=None):
     parser.add_argument('--finetune-updates', type=int, default=100)
     parser.add_argument('--finetune-output', type=Path, help='可选：为候选微调指定独立实验目录')
     parser.add_argument('--finetune-evaluation-seeds', default='20261118')
+    parser.add_argument('--scoring', type=Path, help='BO：冻结的原机比值评分文件（旧三指标或新四指标）')
+    parser.add_argument('--shared-continuation', type=Path, help='BO：已完成的共享策略续轮目录')
+    parser.add_argument('--bo-output', type=Path, help='BO：独立连续搜索输出目录')
+    parser.add_argument('--trials', type=int, default=100, help='BO：包含固定前50个观测的总结构预算')
+    parser.add_argument('--history', type=Path, help='BO：已完成、只读复用的原搜索目录')
+    parser.add_argument('--history-budget', type=int, help='BO：历史目录中已完成的预算编号')
+    parser.add_argument('--allowed-ankles', nargs='+', help='BO：可选踝电机型号白名单；默认五款均可用')
+    parser.add_argument('--reference-python', type=Path, help='BO：单独的 HHTools Python 路径（默认自动定位）')
     parser.add_argument('--root', type=Path, help='高级选项：自定义实验根目录')
     parser.add_argument('--migrated', action='store_true', help='使用默认的独立迁移目录')
     parser.add_argument('--source-root', type=Path, help='仅用于迁移：指定旧实验目录')
@@ -848,8 +856,8 @@ def main(argv=None):
         parser.error('--source-root 仅用于迁移')
     if args.cpu and action != 'references':
         parser.error('--cpu仅用于单独生成参考动作')
-    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','distill','finetune',*SERIAL_TASKS):
-        parser.error('--resume-paused仅用于迁移、资产准备、专家任务、蒸馏或微调')
+    if args.resume_paused and action not in ('migrate','assets','rough','backpack','amp','distill','finetune','bo',*SERIAL_TASKS):
+        parser.error('--resume-paused仅用于迁移、资产准备、专家任务、蒸馏、微调或BO')
     if args.restart_initial and action not in ('rough','backpack','amp',*SERIAL_TASKS):
         parser.error('--restart-initial仅用于专家任务')
     if args.resume_paused and args.restart_initial:
@@ -890,6 +898,24 @@ def main(argv=None):
         finetune(root,args.gpu,args.candidate_design_id,args.candidate_task,args.finetune_updates,
             args.dry_run,args.resume_paused,args.finetune_output,args.evaluation_profile,args.finetune_evaluation_seeds,
             args.tracking_rel_tolerance,.5 if args.min_command_progress_ratio is None else args.min_command_progress_ratio)
+        return
+    if action == 'bo':
+        if args.trials < 50 or (args.history_budget is not None and args.history is None):
+            parser.error('BO总预算至少50；--history-budget需要--history')
+        command = [sys.executable, '-u', ENTRY/'bo.py', 'search', '--root', root,
+                   '--gpu', str(args.gpu), '--trials', str(args.trials)]
+        for flag, value in (('--scoring', args.scoring), ('--shared-continuation', args.shared_continuation),
+                            ('--output', args.bo_output), ('--history', args.history),
+                            ('--history-budget', args.history_budget), ('--reference-python', args.reference_python)):
+            if value is not None:
+                command += [flag, str(value)]
+        if args.allowed_ankles:
+            command += ['--allowed-ankles', *args.allowed_ankles]
+        if args.resume_paused:
+            command.append('--resume-paused')
+        # BO consumes verified existing measurements and does not start expert
+        # preparation or training as an implicit side effect.
+        run(command, preview=args.dry_run)
         return
     ensure_banks(root, args.dry_run)
     if action == 'prepare':

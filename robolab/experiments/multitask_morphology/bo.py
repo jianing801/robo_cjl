@@ -23,9 +23,9 @@ PRE_INGEST_ALIGNMENT_BO_SHA256 = {
     'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
 }
 PHYSICS_CONDITIONS = HERE/'configs/bo_conditions_physics_step.json'
+FOUR_METRIC_WEIGHTS_PATH = HERE/'configs/bo_metric_weights_four.json'
 ORIGINAL_RPO_ARCHIVE = REPO/'docs/reference/rpo_original_configuration'
 ORIGINAL_RPO_SCORING_METHOD = 'post_finetune_original_rpo'
-FORMAL_SCORING_METHODS = ('post_finetune_panel50', ORIGINAL_RPO_SCORING_METHOD)
 FORMAL_CONDITIONS = HERE/'configs/bo_conditions_single_seed.json'
 LEGACY_FORMAL_CONDITIONS = HERE/'configs/bo_conditions.json'
 # Exact LF and CRLF source sets preceding the fixed-reset protocol.
@@ -41,15 +41,20 @@ PRE_FIXED_BO_SOURCES = (
 PILOT_CONDITIONS = HERE/'configs/bo_pilot_conditions.json'
 sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
-from shared_bo_metrics import (ABSOLUTE_COT_BASIS, DT, FORMAL_TASK_WEIGHTS, KNEE_ANKLE, METRICS, PHYSICS_DT,
+from shared_bo_metrics import (ABSOLUTE_COT_BASIS, DT, FORMAL_TASK_WEIGHTS, FOUR_METRICS,
+                               FOUR_METRIC_SCORING_METHOD, FOUR_METRIC_SCORING_VERSION, KNEE_ANKLE, METRICS, PHYSICS_DT,
                                POSITIVE_COT_BASIS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
                                digest, objective, paired_trials, positive, read_conditions, score_trial,
-                               scoring_cot_basis, trial_metric, validate_scoring)
+                               scoring_cot_basis, trial_metric, validate_four_metric_weights, validate_scoring)
 from contract import load_plan, sha, write_new
 from collection_grid import SELECTION_VERSION, calibration_keys, select_collection_grid, selection_panel
 from evaluation import EVALUATION_VELOCITY_FRAME
 from finetune_settings import MIXED_BO_ENVS, MIXED_BO_LAYOUT, PPO_SCHEDULE
 from persistence import resume_pause, run_lock
+
+ORIGINAL_RPO_FOUR_METRIC_METHOD = FOUR_METRIC_SCORING_METHOD
+ORIGINAL_RPO_SCORING_METHODS = (ORIGINAL_RPO_SCORING_METHOD, ORIGINAL_RPO_FOUR_METRIC_METHOD)
+FORMAL_SCORING_METHODS = ('post_finetune_panel50', *ORIGINAL_RPO_SCORING_METHODS)
 from stair_course import COURSE, evaluation_flight, outside_flight
 
 
@@ -255,13 +260,18 @@ def check_native_measurement(report, path, conditions, *, task, seed, design_id,
                 trial_metric(row, 'cot', ABSOLUTE_COT_BASIS)
 
 
-def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, gpu, timeout):
+def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, gpu, timeout, *, pause_root=None):
+    pause_root = Path(pause_root or root)
+    if (pause_root/'USER_PAUSED').exists():
+        raise KeyboardInterrupt('USER_PAUSED')
     from robolab.rough_gpu import query_gpus, candidates, gpu_lease, child_environment
     actor_sha = sha(actor)
     plan_sha = sha(plan_path)
     requests = [(seed, task) for seed in conditions['seeds'] for task in TASKS]
     reports = []
     for seed, task in requests:
+        if (pause_root/'USER_PAUSED').exists():
+            raise KeyboardInterrupt('USER_PAUSED')
         spec = plan['teachers'][task]
         design_id = spec['design_ids'][0]
         work = root/'measurements'/f'{seed}_{task}'
@@ -283,7 +293,7 @@ def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, g
             print('BO_MEASURING', design_id, task, seed, attempt/'logs', flush=True)
             with gpu_lease(devices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as device:
                 command += [f"--kit_args=--/renderer/activeGpu={device['index']} --/physics/cudaDevice=0"]
-                run_worker(command, attempt/'logs', child_environment(device, os.environ), timeout, root)
+                run_worker(command, attempt/'logs', child_environment(device, os.environ), timeout, pause_root)
             if not (child_output/'summary.json').is_file() or (child_output/'failure.json').exists():
                 raise ValueError(f'Native BO measurement did not complete: {attempt}')
             report_path = child_output/'bo_trials.json'
@@ -304,6 +314,9 @@ def evaluate_native(root, plan_path, plan, actor, conditions_path, conditions, g
 
 
 def evaluate(a, work, source, original, initial, design_id, conditions):
+    pause_root = Path(getattr(a, 'search_root', None) or work)
+    if (pause_root/'USER_PAUSED').exists() and pause_root != work:
+        raise KeyboardInterrupt('USER_PAUSED')
     from finetune_state import select_candidate
     plan, candidate = select_candidate(original, design_id=design_id)
     if any(not spec['full_body_torque'] for spec in plan['teachers'].values()):
@@ -347,15 +360,16 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
             choices = candidates(query_gpus(), os.environ, min_free_mib=12800,
                                  max_utilization=100, requested=f'cuda:{a.gpu}')
             with gpu_lease(choices, REPO/'robolab/logs/rpo_rough_multimorph/gpu_locks') as gpu:
-                run_worker(command, logs, child_environment(gpu, os.environ), timeout, work)
+                run_worker(command, logs, child_environment(gpu, os.environ), timeout, pause_root)
         else:
-            run_worker(command, logs, os.environ, timeout, work)
+            run_worker(command, logs, os.environ, timeout, pause_root)
     actor = completed_actor(tuning, source, initial, candidate, a.updates,
                             ppo_schedule=PPO_SCHEDULE if mixed else None, mixed_bo=mixed)
     plan_path = tuning/'plan.json'
     if load_plan(plan_path) != plan:
         raise ValueError('Fine-tuned physical plan differs from BO candidate')
-    reports = evaluate_native(work, plan_path, plan, actor, a.conditions, conditions, a.gpu, a.timeout)
+    reports = evaluate_native(work, plan_path, plan, actor, a.conditions, conditions, a.gpu, a.timeout,
+                              pause_root=pause_root)
     result = dict(kind=REPORT_VERSION, domain='simulation', candidate=candidate, ppo_updates=a.updates,
         student=str(actor), student_sha256=sha(actor), conditions=conditions, conditions_sha256=digest(conditions),
         evaluation_manifest_sha256=sha(work/'manifest.json'), pairs=paired_trials(reports, conditions),
@@ -683,27 +697,43 @@ def checked_original_rpo_reference(root, benchmark, conditions):
                         report_sha256=sha(path), protocol_sha256=sha(protocol_path))
 
 
-def original_rpo_scoring(reference, source, benchmark, panel, conditions):
+def original_rpo_scoring(reference, source, benchmark, panel, conditions, *, metric_profile='three', metric_weights=None):
     expected = required_panel_pairs(conditions)
     check_panel_pairs(reference['pairs'], expected)
     (pair,) = reference['pairs']
     if (conditions.get('measurement_dt_s') != PHYSICS_DT or len(expected) != 1
             or pair['feasible'] is not True or any(row['status'] != 'success' for row in pair['tasks'].values())):
         raise ValueError('Original RPO ratios require three successful tasks with one fixed 200 Hz evaluation')
+    if metric_profile not in ('three', 'four'):
+        raise ValueError('Unknown Original RPO metric profile')
+    four = metric_profile == 'four'
+    if four:
+        metric_weights = validate_four_metric_weights(
+            read(FOUR_METRIC_WEIGHTS_PATH) if metric_weights is None else metric_weights)
+    elif metric_weights is not None:
+        raise ValueError('Custom metric weights require the four-metric profile')
     metrics = {}
-    for task, names in METRICS.items():
-        weights = (1/3, 1/3, 1/3) if task == 'stairs' else (.4, .4, .2)
+    for task, names in (FOUR_METRICS if four else METRICS).items():
+        weights = (tuple(metric_weights[task][name] for name in names) if four
+                   else ((1/3, 1/3, 1/3) if task == 'stairs' else (.4, .4, .2)))
         metrics[task] = {
-            name: dict(baseline=trial_metric(pair['tasks'][task], name, ABSOLUTE_COT_BASIS), weight=weight)
+            name: dict(baseline=trial_metric(pair['tasks'][task], name, ABSOLUTE_COT_BASIS,
+                                             metric_profile=metric_profile), weight=weight)
             for name, weight in zip(names, weights, strict=True)
         }
-    scoring = dict(kind=SCORING_VERSION, method=ORIGINAL_RPO_SCORING_METHOD, domain='simulation',
+    scoring = dict(kind=FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION,
+                   method=ORIGINAL_RPO_FOUR_METRIC_METHOD if four else ORIGINAL_RPO_SCORING_METHOD,
+                   domain='simulation',
                    conditions_sha256=digest(conditions), cot_basis=ABSOLUTE_COT_BASIS,
                    task_weights=FORMAL_TASK_WEIGHTS, metrics=metrics, benchmark=benchmark,
                    measurement_panel=panel, original_rpo_reference=source)
     score = objective(reference, scoring)
-    if (score['mean_objective'] != 1.0
-            or score['observations'][0]['task_objectives'] != dict.fromkeys(TASKS, 1.0)):
+    costs = score['observations'][0]['task_objectives']
+    baseline_valid = (score['mean_objective'] == 1.0 and costs == dict.fromkeys(TASKS, 1.0))
+    if four:
+        baseline_valid = (isclose(score['mean_objective'], 1., rel_tol=0., abs_tol=1e-12)
+                          and all(isclose(cost, 1., rel_tol=0., abs_tol=1e-12) for cost in costs.values()))
+    if not baseline_valid:
         raise ValueError('Original RPO reference scores must all equal one')
     return scoring
 
@@ -727,14 +757,15 @@ def measurement_panel_source(root):
                 measurements_completed_sha256=sha(root/'measurements_completed.json'))
 
 
-def freeze_original_rpo_scoring(measurements_root, reference_root, output):
+def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, metric_profile='three', metric_weights=None):
     panel, reference_root, output = (Path(path).resolve() for path in (measurements_root, reference_root, output))
     if any(output.is_relative_to(source) or source.is_relative_to(output) for source in (panel, reference_root)):
         raise ValueError('Original RPO scoring needs a separate output directory')
     panel_source = measurement_panel_source(panel)
     reports, _, benchmark, conditions = checked_measurement_panel(panel)
     reference, source = checked_original_rpo_reference(reference_root, benchmark, conditions)
-    scoring = original_rpo_scoring(reference, source, benchmark, panel_source, conditions)
+    scoring = original_rpo_scoring(reference, source, benchmark, panel_source, conditions,
+                                   metric_profile=metric_profile, metric_weights=metric_weights)
     candidates = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
     if measurement_panel_source(panel) != panel_source:
         raise ValueError('Measurement panel changed while freezing Original RPO scoring')
@@ -748,7 +779,7 @@ def freeze_original_rpo_scoring(measurements_root, reference_root, output):
 
 
 def read_search_benchmark(scoring_path, scoring, conditions):
-    if scoring['method'] != ORIGINAL_RPO_SCORING_METHOD:
+    if scoring['method'] not in ORIGINAL_RPO_SCORING_METHODS:
         check_panel_receipt(scoring_path)
         root = scoring_path.parent
         if read(root/'manifest.json').get('conditions_sha256') != digest(conditions):
@@ -771,7 +802,13 @@ def read_search_benchmark(scoring_path, scoring, conditions):
         raise ValueError('Frozen Original RPO measurement conditions changed')
     reference, source = checked_original_rpo_reference(
         Path(scoring['original_rpo_reference']['root']), benchmark, conditions)
-    if original_rpo_scoring(reference, source, benchmark, panel_source, conditions) != scoring:
+    metric_profile = 'four' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three'
+    # Existing scores retain the selected weights even if the provisional
+    # default configuration was subsequently edited for a new experiment.
+    weights = ({task: {name: row['weight'] for name, row in items.items()}
+                for task, items in scoring['metrics'].items()} if metric_profile == 'four' else None)
+    if original_rpo_scoring(reference, source, benchmark, panel_source, conditions,
+                            metric_profile=metric_profile, metric_weights=weights) != scoring:
         raise ValueError('Frozen Original RPO scoring differs from the reference and measured panel')
     records = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
     if read(observations_path) != dict(scoring_sha256=sha(scoring_path), reference_objective=1.0, candidates=records):
@@ -921,142 +958,12 @@ def initialize(a, work, source, plan, actor, conditions):
     freeze_panel_scoring(work, scoring)
 
 
-def parameters(row):
-    return dict(zip(('thigh_m', 'calf_m', 'knee_motor', 'ankle_motor'), row['key'], strict=True))
-
-
-def propose(pool, observations, evaluated, schema, seed):
-    import numpy as np
-    from rough_bo.constrained_gp import ConstrainedSurrogate
-    candidates = [r for r in pool if r['design_ids']['stairs'] not in evaluated]
-    if not candidates:
-        raise ValueError('All exact shared structures have been evaluated')
-    model = ConstrainedSurrogate(schema['ranges_m'], schema['knees'], schema['ankles'],
-                                 seed=seed, objective_key='objective')
-    X = model.encode([parameters(r) for r in candidates])
-    if evaluated:
-        old = model.encode([parameters(r) for r in pool if r['design_ids']['stairs'] in evaluated])
-        distance = np.min(np.sum((X[:, None, :2] - old[None, :, :2]) ** 2, axis=-1)
-                          + np.sum(X[:, None, 2:] != old[None, :, 2:], axis=-1), axis=1)
-    else:
-        distance = -np.sum((X[:, :2] - .5) ** 2, axis=-1)
-    if not observations or len(evaluated) < 4:
-        index = int(np.argmax(distance))
-        return candidates[index], dict(method='initial_space_filling', pool_size=len(candidates))
-    model.fit(observations)
-    acq = model.acquisition(X)
-    if model.regressor is None:
-        values, method = acq * (1 + distance), 'feasibility_exploration'
-    elif acq.max() <= 1e-16:
-        _, deviation, probability = model.predict(X)
-        values, method = probability * deviation, 'uncertainty_feasibility_fallback'
-    else:
-        values, method = acq, 'EI_times_probability_feasible'
-    index = int(np.argmax(values))
-    mean, std, probability = model.predict(X[index:index+1])
-    return candidates[index], dict(method=method, pool_size=len(candidates),
-        acquisition=float(values[index]), probability_feasible=float(probability[0]),
-        expected_objective=float(mean[0]) if model.regressor is not None else None,
-        objective_std=float(std[0]) if model.regressor is not None else None,
-        performance_rows=model.performance_count, feasibility_rows=model.feasibility_count)
-
-
 def search(a, work, source, plan, actor, conditions):
-    scoring = read(a.scoring)
-    conditions_sha256 = digest(conditions)
-    validate_scoring(scoring, dict(domain='simulation', conditions_sha256=conditions_sha256, conditions=conditions))
-    method = scoring.get('method')
-    formal = method in FORMAL_SCORING_METHODS
-    if formal and conditions.get('measurement_dt_s') == PHYSICS_DT and (
-            scoring_cot_basis(scoring) != ABSOLUTE_COT_BASIS or scoring['task_weights'] != FORMAL_TASK_WEIGHTS):
-        raise ValueError('Formal 200 Hz BO search requires frozen absolute mechanical CoT and 0.4/0.3/0.3 task weights')
-    expected = required_panel_pairs(conditions) if formal else None
-
-    def score(report):
-        if expected is not None:
-            check_panel_pairs(report['pairs'], expected)
-        scored = objective(report, scoring)
-        if (method == ORIGINAL_RPO_SCORING_METHOD
-                and scored['complete_objectives'] != scored['joint_successes']):
-            raise ValueError('Successful BO trial has incomplete performance measurements')
-        return scored
-
-    pool = read(plan['shared_bank'])['structures']
-    keys = {tuple(k) for k in plan['selected_structure_keys']}
-    pool = [r for r in pool if tuple(r['key']) in keys]
-    observations, evaluated, results = [], set(), []
-    if formal:
-        panel_root, benchmark = read_search_benchmark(a.scoring, scoring, conditions)
-        keys = calibration_keys()
-        if (benchmark['initial_actor_sha256'] != sha(actor) or benchmark['source_plan_sha256'] != sha(source)
-                or benchmark['updates'] != a.updates or len(benchmark['reports']) != len(keys)):
-            raise ValueError('Initial observations must share the selected actor, source plan and PPO budget')
-        if (a.updates == PREVIOUS_BO_UPDATES or uses_current_schedule(a.updates, conditions)) and (
-                benchmark.get('selection_velocity_frame') != EVALUATION_VELOCITY_FRAME):
-            raise ValueError('Initial observations must come from horizontal heading checkpoint selection')
-        if uses_current_schedule(a.updates, conditions) and (
-                benchmark.get('ppo_schedule') != PPO_SCHEDULE or benchmark.get('init_at_random_ep_len') is not True
-                or benchmark.get('envs_per_task') != MIXED_BO_LAYOUT):
-            raise ValueError('Initial observations use a different PPO schedule, episode timing or environment layout')
-        if a.trials < len(keys):
-            raise ValueError('The total BO budget must include the 50 initial observations')
-        lookup = {tuple(row['key']): row for row in pool}
-        for key, evidence in zip(keys,benchmark['reports'],strict=True):
-            path = panel_root/evidence['report']
-            report = initial_report(path, evidence, benchmark)
-            row = lookup[key]
-            design_id = row['design_ids']['stairs']
-            if (report['candidate']['design_ids'] != row['design_ids'] or tuple(report['candidate']['structure_key']) != key
-                    or report['ppo_updates'] != a.updates):
-                raise ValueError('Initial BO observation is attached to another candidate or budget')
-            scored = score(report)
-            observations.extend(dict(obs,params=parameters(row)) for obs in scored['observations'])
-            evaluated.add(design_id)
-            results.append(dict(design_id=design_id,structure_key=row['key'],evaluation=str(path),**scored))
-    manifest = work/'manifest.json'
-    identity = dict(kind='rpo_shared_bo_search_v1', source_plan_sha256=sha(source),
-        initial_actor_sha256=sha(actor), conditions_sha256=conditions_sha256, scoring_sha256=sha(a.scoring),
-        coordinator_sha256=sha(__file__), surrogate_sha256=sha(REPO/'rough_bo/constrained_gp.py'),
-        updates=a.updates, seed=a.seed)
-    if manifest.is_file():
-        saved = read(manifest)
-        previous_sha = saved.get('coordinator_sha256')
-        accepted = PRE_INGEST_ALIGNMENT_BO_SHA256
-        if conditions.get('reset_mode') != 'fixed':
-            accepted = accepted | {coordinators[0] for coordinators, _, _ in PRE_FIXED_BO_SOURCES}
-        if previous_sha in accepted and saved == dict(identity, coordinator_sha256=previous_sha):
-            identity = saved
-    freeze(manifest, identity)
-    resume_pause(work, a.resume_paused)
-    for i in range(len(evaluated), a.trials):
-        trial = work/f'trial_{i:04d}'
-        trial.mkdir(exist_ok=True)
-        request = trial/'proposal.json'
-        if request.is_file():
-            proposal = read(request)
-        else:
-            row, audit = propose(pool, observations, evaluated, plan['schema'], a.seed)
-            proposal = dict(design_id=row['design_ids']['stairs'], structure_key=row['key'], acquisition=audit)
-            write_new(request, proposal)
-        design_id = proposal['design_id']
-        matched = [r for r in pool if r['design_ids']['stairs'] == design_id and r['key'] == proposal['structure_key']]
-        if len(matched) != 1 or design_id in evaluated:
-            raise ValueError('Repeated or mismatched frozen BO proposal')
-        print('BO_TRIAL', i + 1, '/', a.trials, design_id, flush=True)
-        report = evaluate(a, trial/'candidate', source, plan, actor, design_id, conditions)
-        scored = score(report)
-        result = dict(proposal, evaluation=str(trial/'candidate/bo_evaluation.json'), **scored)
-        freeze(trial/'observation.json', result)
-        observations.extend(dict(row, params=parameters(matched[0])) for row in scored['observations'])
-        evaluated.add(design_id)
-        results.append(result)
-    complete = [row for row in results if row['mean_objective'] is not None
-                and (expected is None or row['complete_objectives'] == len(expected))]
-    best_observed = min(complete, key=lambda r: r['mean_objective']) if complete else None
-    freeze(work/f'budget_{a.trials:04d}.json', dict(trials=len(results), best_observed=best_observed,
-        candidates=[{k: r[k] for k in ('design_id', 'structure_key', 'evaluation',
-                    'valid_pairs', 'joint_successes', 'complete_objectives', 'mean_objective')} for r in results]))
-
+    """Canonical continuous BO, shared by the three- and four-metric profiles."""
+    from bo_continuous import search as continuous_search
+    from bo_continuous_assets import prepare_candidate
+    return continuous_search(sys.modules[__name__], a, work, source, plan, actor,
+                             conditions, prepare=prepare_candidate)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1082,9 +989,17 @@ def main(argv=None):
                            help='Use all 50 completed PPO runs from a separate calibration panel')
             p.add_argument('--measure-only', action='store_true', help='Save both CoTs and defer freezing scores')
         elif command == 'search':
-            p.add_argument('--scoring', type=Path)
+            p.add_argument('--scoring', type=Path, help='Frozen original-RPO three- or four-metric scoring JSON')
             p.add_argument('--seed', type=int, default=42)
-            p.add_argument('--trials', type=int, required=True, help='Total candidate evaluations including previous commits')
+            p.add_argument('--trials', type=int, default=100, help='Total evaluations including the original 50 initial observations')
+            p.add_argument('--history', type=Path, help='Completed prior search to read without modifying it')
+            p.add_argument('--history-budget', type=int, help='Select a completed budget from the historical search')
+            p.add_argument('--allowed-ankles', nargs='+', help='Permitted new ankle motor IDs (default: all five)')
+            p.add_argument('--reference-python', type=Path, help='Dedicated HHTools Python for new AMP geometry')
+            p.add_argument('--reference-device', default='cuda:0')
+            p.add_argument('--warp-cache', type=Path)
+            p.add_argument('--template', type=Path)
+            p.add_argument('--mesh-dir', type=Path)
     p = sub.add_parser('calibrate')
     p.add_argument('report', type=Path)
     p.add_argument('--benchmark-name', required=True)
@@ -1097,6 +1012,10 @@ def main(argv=None):
     p.add_argument('--resume-paused', action='store_true')
     p.add_argument('--original-rpo-reference', type=Path,
                    help='Validated original RPO evaluation directory for reference-ratio scoring')
+    p.add_argument('--metric-profile', choices=('three', 'four'),
+                   help='Original RPO metric profile (default: four for original-RPO scoring)')
+    p.add_argument('--metric-weights', type=Path,
+                   help='Four-metric weights JSON (default: configs/bo_metric_weights_four.json)')
     p.add_argument('--output', type=Path, help='Separate output directory for original RPO scoring')
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
@@ -1109,13 +1028,19 @@ def main(argv=None):
             parser.error('Completed measurement panel directory does not exist')
         if (a.original_rpo_reference is None) != (a.output is None):
             parser.error('Original RPO scoring requires both --original-rpo-reference and --output')
+        if a.metric_profile is not None and a.original_rpo_reference is None:
+            parser.error('--metric-profile requires --original-rpo-reference and --output')
+        if a.metric_weights is not None and (a.original_rpo_reference is None or a.metric_profile == 'three'):
+            parser.error('--metric-weights requires the four-metric Original RPO profile')
         if a.original_rpo_reference is not None:
             output = a.output.resolve()
             if output.is_relative_to(work) or output.is_relative_to(a.original_rpo_reference.resolve()):
                 parser.error('Original RPO scoring requires a separate output directory')
             with run_lock(output):
                 resume_pause(output, a.resume_paused)
-                freeze_original_rpo_scoring(work, a.original_rpo_reference, output)
+                freeze_original_rpo_scoring(work, a.original_rpo_reference, output,
+                                            metric_profile=a.metric_profile or 'four',
+                                            metric_weights=read(a.metric_weights) if a.metric_weights is not None else None)
             return
         with run_lock(work):
             freeze_scoring(work, resume_paused=a.resume_paused)
@@ -1131,7 +1056,7 @@ def main(argv=None):
     if a.command == 'score':
         print(json.dumps(objective(checked_report(a.report), read(a.scoring)), indent=2, allow_nan=False))
         return
-    if min(a.updates,a.timeout) < 1 or a.gpu < 0 or (a.command == 'search' and a.trials < 1):
+    if min(a.updates,a.timeout) < 1 or a.gpu < 0 or (a.command == 'search' and a.trials < 50):
         parser.error('Expected a positive PPO and BO budget, timeout, and valid GPU index')
     a.root = (a.root or (MIGRATED_ROOT if a.migrated else DEFAULT_ROOT)).resolve()
     if (a.migrated or (a.root/'migration_in_progress.json').is_file()) and not (a.root/'migration_completed.json').is_file():
@@ -1142,25 +1067,24 @@ def main(argv=None):
     if (getattr(a, 'reuse_finetuned_panel', None) or getattr(a, 'measure_only', False)) and 'measurement_dt_s' not in conditions:
         parser.error('Panel reevaluation and measurement-only calibration require 200 Hz conditions')
     if a.command == 'search':
-        default_scoring = a.root/'bo'/calibration_label(conditions, a.updates)/'scoring.json'
-        anchored_scoring = default_scoring.parent/'percentile_scoring/scoring.json'
-        if (anchored_scoring.parent/'completed.json').is_file():
-            default_scoring = anchored_scoring
+        if a.updates != DEFAULT_BO_UPDATES:
+            parser.error('Formal continuous BO requires 100 joint PPO updates per structure')
+        if a.history_budget is not None and a.history is None:
+            parser.error('--history-budget requires --history')
+        if a.history is not None:
+            a.history = a.history.resolve()
+        default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics'/'scoring.json'
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
-        formal = scoring.get('method') in FORMAL_SCORING_METHODS
-        if not formal and (a.scoring == default_scoring or 'reports' in scoring.get('benchmark', {})):
-            raise ValueError('Official initial observations require the frozen panel scoring method')
+        if scoring.get('method') not in ORIGINAL_RPO_SCORING_METHODS:
+            raise ValueError('Continuous BO requires original-RPO ratio scoring (three or four metrics); old percentile scores remain reproducible through score')
+        formal = True
         if a.conditions is None:
-            if formal and a.scoring != default_scoring.resolve():
-                conditions_path = official_conditions_path(scoring['conditions_sha256'])
-                if conditions_path != PHYSICS_CONDITIONS:
-                    parser.error('Archived BO scoring requires its matching explicit --conditions')
-            elif not formal and scoring.get('conditions_sha256') == digest(read_conditions(PILOT_CONDITIONS)):
-                conditions_path = PILOT_CONDITIONS
+            conditions_path = official_conditions_path(scoring['conditions_sha256'])
             conditions = read_conditions(conditions_path)
-        if scoring.get('conditions_sha256') != digest(conditions):
-            raise ValueError('BO search scoring and measurements require the same conditions')
+        if (scoring.get('conditions_sha256') != digest(conditions)
+                or official_conditions_path(digest(conditions)) != PHYSICS_CONDITIONS):
+            raise ValueError('Continuous BO requires the same official 200 Hz conditions as the scoring and measurements')
     a.conditions = conditions_path.resolve()
     continuation = {}
     if a.shared_continuation is not None:
@@ -1181,7 +1105,8 @@ def main(argv=None):
     if a.command == 'initialize':
         label = calibration_label(conditions, a.updates)
     elif a.command == 'search':
-        label = 'search_single_seed' if formal and conditions.get('reset_mode') == 'fixed' else 'search'
+        profile = 'four_metrics' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three_metrics'
+        label = f'search_continuous_{profile}'
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):

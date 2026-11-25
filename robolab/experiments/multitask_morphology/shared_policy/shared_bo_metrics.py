@@ -15,9 +15,16 @@ KNEE_ANKLE = frozenset(f'{side}_{joint}_joint' for side in ('left', 'right')
 METRICS = {task: ('cot', 'forward_rmse_mps',
                   'roll_pitch_rms_rad_s' if task == 'stairs' else 'knee_ankle_max_rated_ratio')
            for task in TASKS}
+# Keep the native v1 report and its three-metric payload unchanged. Every
+# required quantity already exists in `observed`, including metrics not used
+# by the former task-specific score.
+FOUR_METRICS = {task: ('cot', 'forward_rmse_mps', 'roll_pitch_rms_rad_s',
+                       'knee_ankle_max_rated_ratio') for task in TASKS}
 TRIAL_VERSION = 'rpo_three_task_mechanical_positive_v1'
 REPORT_VERSION = 'rpo_three_task_bo_evaluation_v1'
 SCORING_VERSION = 'rpo_three_task_bo_scoring_v1'
+FOUR_METRIC_SCORING_VERSION = 'rpo_three_task_bo_scoring_v2'
+FOUR_METRIC_SCORING_METHOD = 'post_finetune_original_rpo_four_metrics'
 DT = .02
 PHYSICS_DT = .005
 POSITIVE_COT_BASIS = 'positive_mechanical'
@@ -32,6 +39,22 @@ def digest(value):
 
 def positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
+
+
+def validate_four_metric_weights(value):
+    """Validate an explicit four-metric profile without altering its weights."""
+    if not isinstance(value, dict) or set(value) != set(TASKS):
+        raise ValueError('Four-metric weights require exactly stairs, backpack and run')
+    result = {}
+    for task, names in FOUR_METRICS.items():
+        row = value[task]
+        if (not isinstance(row, dict) or set(row) != set(names)
+                or any(type(w) not in (int, float) or not math.isfinite(w) or w < 0
+                       for w in row.values())
+                or not math.isclose(math.fsum(row.values()), 1., rel_tol=0., abs_tol=1e-12)):
+            raise ValueError(f'Invalid {task} four-metric weights: exact metrics, nonnegative finite values, sum one required')
+        result[task] = {name: row[name] for name in names}
+    return result
 
 
 def read_conditions(path):
@@ -164,7 +187,20 @@ def scoring_cot_basis(scoring):
     return basis
 
 
-def trial_metric(trial, name, cot_basis):
+def trial_metric(trial, name, cot_basis, *, metric_profile='three'):
+    if metric_profile == 'four':
+        if trial.get('dt_s') != PHYSICS_DT or cot_basis != ABSOLUTE_COT_BASIS:
+            raise ValueError('Four-metric scoring requires 200 Hz absolute mechanical measurements')
+        if trial.get('status') != 'success':
+            raise ValueError('Four-metric scoring requires a successful task trial')
+        raw_name = 'absolute_mechanical_cot' if name == 'cot' else name
+        observed = trial.get('observed')
+        value = observed.get(raw_name) if isinstance(observed, dict) else None
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f'Missing or invalid observed metric in successful trial: {raw_name}')
+        return value
+    if metric_profile != 'three':
+        raise ValueError(f'Unknown metric profile: {metric_profile}')
     if name == 'cot' and cot_basis == ABSOLUTE_COT_BASIS:
         value = (trial.get('observed') or {}).get('absolute_mechanical_cot')
         if (trial.get('dt_s') != PHYSICS_DT or type(value) not in (int, float)
@@ -175,7 +211,9 @@ def trial_metric(trial, name, cot_basis):
 
 
 def validate_scoring(value, report):
-    if (value.get('kind') != SCORING_VERSION or value.get('domain') != report.get('domain')
+    four = value.get('method') == FOUR_METRIC_SCORING_METHOD
+    version = FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION
+    if (value.get('kind') != version or value.get('domain') != report.get('domain')
             or value.get('conditions_sha256') != report.get('conditions_sha256')):
         raise ValueError('Scoring and evaluation must have the same domain and conditions')
     def weights(values, keys):
@@ -184,16 +222,27 @@ def validate_scoring(value, report):
             and math.isclose(sum(values.values()), 1., abs_tol=1e-12))
     if not weights(value['task_weights'], TASKS) or set(value['metrics']) != set(TASKS):
         raise ValueError('Task weights must be nonnegative and sum to one')
-    if scoring_cot_basis(value) == ABSOLUTE_COT_BASIS:
+    cot_basis = scoring_cot_basis(value)
+    if four and (value.get('domain') != 'simulation' or cot_basis != ABSOLUTE_COT_BASIS
+                 or value['task_weights'] != FORMAL_TASK_WEIGHTS):
+        raise ValueError('Four-metric Original RPO scoring requires absolute mechanical CoT and 0.4/0.3/0.3 task weights')
+    if four:
+        validate_four_metric_weights({task: {name: row['weight'] for name, row in items.items()}
+                                      for task, items in value['metrics'].items()})
+    if cot_basis == ABSOLUTE_COT_BASIS:
         if 'conditions' in report and report['conditions'].get('measurement_dt_s') != PHYSICS_DT:
             raise ValueError('Absolute mechanical CoT scoring requires 200 Hz measurements')
         if value.get('method') == 'post_finetune_panel50' and value['task_weights'] != FORMAL_TASK_WEIGHTS:
             raise ValueError('Formal 200 Hz scoring requires 0.4/0.3/0.3 task weights')
     for task, items in value['metrics'].items():
-        if not weights({k: row['weight'] for k, row in items.items()}, METRICS[task]):
+        task_weights = {k: row['weight'] for k, row in items.items()}
+        names = FOUR_METRICS[task] if four else METRICS[task]
+        if not weights(task_weights, names):
             raise ValueError(f'Invalid {task} metric weights')
         for row in items.values():
             baseline, scale = row['baseline'], row.get('scale')
+            if four and (not positive(baseline) or scale is not None):
+                raise ValueError('Four-metric Original RPO scoring requires positive fixed ratio denominators')
             if (type(baseline) not in (int, float) or not math.isfinite(baseline) or baseline < 0
                     or (scale is None and not positive(baseline)) or (scale is not None and not positive(scale))):
                 raise ValueError('Zero or unreliable baseline requires an explicit positive physical scale')
@@ -202,6 +251,7 @@ def validate_scoring(value, report):
 def objective(report, scoring):
     validate_scoring(scoring, report)
     cot_basis = scoring_cot_basis(scoring)
+    metric_profile = 'four' if scoring.get('method') == FOUR_METRIC_SCORING_METHOD else 'three'
     observations = []
     for pair in report['pairs']:
         feasible = pair['feasible']
@@ -211,7 +261,8 @@ def objective(report, scoring):
         if feasible:
             normalized = {}
             for task, specs in scoring['metrics'].items():
-                raw = {key: trial_metric(pair['tasks'][task], key, cot_basis) for key in specs}
+                raw = {key: trial_metric(pair['tasks'][task], key, cot_basis, metric_profile=metric_profile)
+                       for key in specs}
                 if any(value is None for value in raw.values()):
                     continue
                 normalized[task] = {}
