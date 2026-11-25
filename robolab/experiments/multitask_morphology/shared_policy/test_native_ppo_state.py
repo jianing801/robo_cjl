@@ -108,3 +108,13 @@ def test_native_bo_actor_protocol_never_accepts_legacy(tmp_path):
     assert bo.completed_actor_from_hashes(root,'p','i',candidate,100,mixed_bo=True)==actor
     with pytest.raises(ValueError,match='algorithm'):
         bo.completed_actor_from_hashes(root,'p','i',candidate,100,mixed_bo=True,ppo_algorithm=NATIVE_PPO_ALGORITHM)
+
+
+def test_native_bo_does_not_score_mixed_observations():
+    from shared_bo_metrics import objective
+    native_scoring = {'benchmark': {'ppo_algorithm': NATIVE_PPO_ALGORITHM}}
+    old_report = {'domain': 'simulation'}
+    with pytest.raises(ValueError,match='different PPO algorithms'):
+        objective(old_report, native_scoring)
+    with pytest.raises(ValueError,match='different PPO algorithms'):
+        objective(dict(old_report, ppo_algorithm=NATIVE_PPO_ALGORITHM), {'benchmark': {}})

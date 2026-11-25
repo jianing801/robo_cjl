@@ -46,6 +46,16 @@ def test_search_cli_rejects_retired_percentile_default(tmp_path):
         bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring), '--trials', '100'])
 
 
+def test_search_cli_rejects_old_ppo_before_any_worker(tmp_path, monkeypatch):
+    conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
+    scoring = tmp_path/'scoring.json'
+    scoring.write_text(json.dumps({'method': bo.ORIGINAL_RPO_FOUR_METRIC_METHOD,
+                                  'conditions_sha256': bo.digest(conditions), 'benchmark': {}}))
+    monkeypatch.setattr(bo, 'shared_input', lambda *args, **kwargs: pytest.fail('old scoring cannot launch new BO'))
+    with pytest.raises(ValueError, match='Native PPO BO'):
+        bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring)])
+
+
 def test_search_pause_prevents_candidate_and_native_measurement_start(tmp_path):
     search_root = tmp_path/'search'
     search_root.mkdir()
