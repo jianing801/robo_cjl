@@ -1,5 +1,5 @@
 import csv
-from ppo_correction_study import curve_assessment
+from ppo_correction_study import curve_assessment, choose_best
 
 
 def make_curve(decline=False):
@@ -16,3 +16,12 @@ def test_all_task_gate_rejects_cancellation_even_when_total_is_flat():
     result=curve_assessment(make_curve(True),prior)
     assert not result['passed'] and not result['tasks']['run']['passed']
     assert result['tasks']['stairs']['passed'] and result['tasks']['backpack']['passed']
+
+
+def test_selection_prefers_balanced_measured_performance():
+    tasks=('stairs','backpack','run'); keys=('cot','forward_rmse_mps','roll_pitch_rms_rad_s','knee_ankle_max_rated_ratio')
+    norm={'task_weights':dict(stairs=.4,backpack=.3,run=.3),'metrics':{t:{k:{'baseline':1.,'weight':.25} for k in keys} for t in tasks}}
+    def candidate(name,values):
+        return {'profile':name,'pairs':[{'feasible':True,'tasks': {t:{'status':'success','observed':{'absolute_mechanical_cot':v,**{k:v for k in keys[1:]}}} for t,v in zip(tasks,values)}}]}
+    winner=choose_best([candidate('low_average',[.5,.5,1.2]),candidate('balanced',[.9,.9,.9])],norm)
+    assert winner['profile']=='balanced'

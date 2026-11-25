@@ -42,6 +42,21 @@ def curve_assessment(rows, baseline):
     return dict(passed=all(r['passed'] for r in results.values()),tasks=results,tolerance=.05)
 
 
+def choose_best(candidates, normalization):
+    """Among separately accepted curves, prefer the best worst-task raw score ratio."""
+    from original_expert_comparison import comparison_scores
+    ranked=[]
+    for candidate in candidates:
+        pair=candidate['pairs'][0]
+        if pair['feasible'] is not True: raise ValueError('Unaccepted correction cannot compete')
+        tasks=pair['tasks'];score=comparison_scores(tasks,tasks,normalization)
+        by_task={t:score['shared'][t]['objective'] for t in TASKS}
+        ranked.append((max(by_task.values()),score['shared_objective'],candidate['profile'],candidate,by_task))
+    if not ranked:return None
+    ranked.sort(key=lambda row:row[:3]);winner=dict(ranked[0][3]);winner['selection_scores']=[dict(profile=r[2],worst_task=r[0],overall=r[1],task_objectives=r[4]) for r in ranked]
+    return winner
+
+
 def read_csv(path):
     with Path(path).open(encoding='utf8',newline='') as stream: return list(csv.DictReader(stream))
 
@@ -235,12 +250,17 @@ def main():
                 raise ValueError('Correction control starting policy or original structure plan changed')
             bo.freeze(a.output/'manifest.json',dict(original=str(a.original),original_manifest_sha256=bo.sha(a.original/'tuning/manifest.json'),
                         source_plan_sha256=bo.sha(source),initial_actor_sha256=bo.sha(initial),profiles=a.profiles,updates=UPDATES))
+            accepted=[]
             for profile in a.profiles:
                 result=run_profile(a,bo,profile,source,initial,origin,previous)
                 if result is not None:
-                    publish(a.output/'selected.json',result);status(a.output,'accepted',profile=profile,actor_sha256=result['actor_sha256'])
-                    if a.expert_root is not None:resume_experts(a)
-                    return
+                    accepted.append(result)
+                    status(a.output,'profile_accepted',profile=profile,actor_sha256=result['actor_sha256'])
+            result=choose_best(accepted,bo.read(bo.ORIGINAL_RPO_ARCHIVE/'normalization.json'))
+            if result is not None:
+                publish(a.output/'selected.json',result);status(a.output,'accepted',profile=result['profile'],actor_sha256=result['actor_sha256'])
+                if a.expert_root is not None:resume_experts(a)
+                return
             status(a.output,'next_correction_needed')
         except KeyboardInterrupt:
             (a.output/'USER_PAUSED').touch(exist_ok=True);status(a.output,'paused');raise SystemExit(130)
