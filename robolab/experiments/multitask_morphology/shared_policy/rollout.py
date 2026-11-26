@@ -338,8 +338,10 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         with torch.inference_mode():
             collection_columns=None
             if args.task=='stairs':
-                validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs)
-                if args.num_envs is not None:
+                spatial_training = mixed_count is not None and count > 1
+                validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs,
+                    balanced_morphology_training=spatial_training)
+                if args.num_envs is not None or spatial_training:
                     collection_columns=raw.scene.terrain.terrain_types.clone()
                 raw.reset()
                 if evaluation_stairs or (bo_conditions and bo_conditions['tasks']['stairs'].get('course') == COURSE):
@@ -353,7 +355,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
             elif args.task=='backpack':
                 from robolab.tasks.direct.backpack_walk import backpack_urdf as module
                 properties=payload_properties(module,n,count,seed=args.seed,profile=args.profile,
-                    strength=args.randomization_strength,fixed_mass=args.payload_kg)
+                    strength=args.randomization_strength,fixed_mass=args.payload_kg,
+                    balanced_morphology_training=mixed_count is not None and count > 1)
                 raw.reset();audit=module.apply_backpack_properties(raw.robot,properties);raw.reset()
                 write_new(output/'payload_audit.json',dict(properties=properties,audit=audit))
                 validation=(copy_index%2)==1

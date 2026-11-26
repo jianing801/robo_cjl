@@ -73,7 +73,7 @@ def configure_stairs(cfg, *, profile, seed, evaluation_seconds=None):
     return spec
 
 
-def route_stairs(scene, design_count, *, profile, paired_validation=False):
+def route_stairs(scene, design_count, *, profile, paired_validation=False, balanced_morphology_training=False):
     """Route physical reset origins, keeping each morphology's strata balanced."""
     import torch
     terrain = scene.terrain
@@ -84,7 +84,12 @@ def route_stairs(scene, design_count, *, profile, paired_validation=False):
     copies = n // design_count
     environments = torch.arange(n, device=terrain.terrain_types.device)
     copy = environments // design_count
-    if paired_validation and copies < 2 * count:
+    if balanced_morphology_training:
+        if paired_validation or copies < count:
+            raise ValueError('Spatial PPO requires all terrain strata within each morphology')
+        column = (copy + environments % design_count) % count
+        validation = torch.zeros_like(environments, dtype=torch.bool)
+    elif paired_validation and copies < 2 * count:
         if copies <= count:
             raise ValueError('Stair collection requires all training strata and a held-out copy per design')
         # Keep all six training columns. Rotate the remaining four or five
@@ -117,7 +122,7 @@ def verify_stair_origins(scene, columns):
         raise ValueError('Live stair environment origin differs from the assigned mesh column')
 
 
-def payload_properties(module, num_envs, design_count, *, seed, profile, strength, fixed_mass=None):
+def payload_properties(module, num_envs, design_count, *, seed, profile, strength, fixed_mass=None, balanced_morphology_training=False):
     if design_count < 1 or num_envs < design_count:
         raise ValueError('Payload sampling requires a physical environment for every design')
     if fixed_mass is not None and not 0 < fixed_mass <= 15:
@@ -125,7 +130,7 @@ def payload_properties(module, num_envs, design_count, *, seed, profile, strengt
     spec = payload_spec(profile, strength=strength)
     result = []
     for i in range(num_envs):
-        pair = (i // design_count) // 2
+        pair = i // design_count + i % design_count if balanced_morphology_training else (i // design_count) // 2
         if fixed_mass is not None:
             bounds = (fixed_mass, fixed_mass)
         elif profile == 'nominal':

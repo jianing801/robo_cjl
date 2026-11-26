@@ -108,6 +108,13 @@ _OPTIONAL_ACTOR_WEIGHT_HASHES = (
 )
 
 
+# New multi-morphology routing is selected only when a mixed worker hosts
+# more than one design. Existing singleton candidate behavior is unchanged.
+_SPATIAL_PRETRAIN_ROLLOUT_HASHES = (
+    'd5e87ee391452c6ff70bfb8566414ab01e3ec158ca18076b58cf04fed3ef588b',
+    '84999aa23362a72889ccf37c3745ad83b16013611d1d548e4a0ead9003a4cb39',
+)
+
 def _native_manifest_fields(manifest):
     return {key: value for key, value in manifest.items() if key != 'sources'}
 
@@ -126,7 +133,8 @@ def _matches_current_sources(sources):
             and all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
                     for value in sources.values())
             and all(sources[name] in (expected + _B_DEFAULT_SETTINGS_HASHES if name == 'finetune_settings.py'
-                                      else expected + _OPTIONAL_ACTOR_WEIGHT_HASHES if name == 'native_ppo.py' else expected)
+                                      else expected + _OPTIONAL_ACTOR_WEIGHT_HASHES if name == 'native_ppo.py'
+                                      else expected + _SPATIAL_PRETRAIN_ROLLOUT_HASHES if name == 'rollout.py' else expected)
                     for name, expected in _391E19C.items()
                     if name not in _CADENCE_SOURCES))
 

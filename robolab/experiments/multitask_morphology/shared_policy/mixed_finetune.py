@@ -93,7 +93,7 @@ def prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed):
         preparers, recipes = [], []
         for task, count in zip(TASKS, counts, strict=True):
             definition = plan['teachers'][task]
-            args = ['--plan', str(root/'plan.json'), '--design-ids', definition['design_ids'][0],
+            args = ['--plan', str(root/'plan.json'), '--design-ids', ','.join(definition['design_ids']),
                     '--output', str(attempt/task), '--mode', 'evaluate', '--ppo-channel', str(root),
                     '--profile', a.profile, '--randomization-strength', str(a.randomization_strength),
                     '--seed', str(worker_seed), '--headless', '--device', a.device]
@@ -223,7 +223,7 @@ def build_configured_learner(model, counts, widths, amp_cfg, amp_state, augment,
     return learner
 
 
-def train(a, root, attempt, plan, candidate, protocol, counts):
+def train(a, root, attempt, plan, candidate, protocol, counts, *, layout_callback=None, completion_callback=publish_training_completion):
     from finetune_settings import NATIVE_PPO_SETTINGS, correction_settings
     from finetune_state import (load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints,
                                 native_checkpoint_due, native_checkpoint_history_for_resume, save_native_metrics)
@@ -250,6 +250,8 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     worker_seed = (a.seed + completed*1009) % 2**32
     python_rng, numpy_rng, torch_rng = random.getstate(), np.random.get_state(), torch.get_rng_state()
     sim, tasks = prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed)
+    if layout_callback is not None:
+        layout_callback(root, attempt, plan, tasks, counts)
     # Native scene creation seeds its sampling. Protect the coordinator's RNG,
     # and use a deterministic CUDA stream for each fresh physical session.
     random.setstate(python_rng)
@@ -284,7 +286,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
     if completed == a.updates:
-        publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
+        completion_callback(a, root, model.cpu(), candidate, digest, protocol)
         return
     if a.init_at_random_ep_len:
         for task in tasks:
@@ -364,7 +366,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         print('NATIVE_UPDATE_ARTIFACT', update, 'full_checkpoint' if full_checkpoint else 'metrics_only',
               f'seconds={time.monotonic()-persist_started:.3f}', flush=True)
         print('MIXED_PPO_UPDATE', update, '/', a.updates, metrics, flush=True)
-    publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
+    completion_callback(a, root, model.cpu(), candidate, digest, protocol)
 
 
 def main():
