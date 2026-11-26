@@ -28,10 +28,15 @@ PPO_NATIVE_CONFIG = dict(learning_rate=LEARNING_RATE, schedule='adaptive', desir
 CRITIC_HIDDEN = (512, 256, 128)
 
 
-def project_actor_gradients(gradients):
+def project_actor_gradients(gradients, weights=None):
     """PCGrad on task contributions; cyclic order avoids altering rollout RNG."""
     if gradients.ndim != 2 or gradients.shape[0] != len(TASKS):
         raise ValueError('Expected three flattened Actor gradients')
+    if weights is not None:
+        weights=torch.as_tensor(weights, dtype=gradients.dtype, device=gradients.device)
+        if weights.shape!=(len(TASKS),) or not torch.isfinite(weights).all() or not (weights>0).all():
+            raise ValueError('Expected three positive, finite Actor task weights')
+        gradients=gradients*(weights/weights.mean())[:,None]
     projected=[]
     for i in range(len(TASKS)):
         g=gradients[i]
@@ -223,6 +228,7 @@ class NativeMixedPPO(PPOAMP):
             torch.tensor(self.counts, device=self.device)).reshape(-1, 1)
         self._fixed_std = None
         self.actor_projection = False
+        self.actor_gradient_weights = None
         self.inspect_actor_gradients = False
         self._gradient_records = []
 
@@ -270,7 +276,7 @@ class NativeMixedPPO(PPOAMP):
             norms=flat.norm(dim=1)
             cosine=(flat@flat.T)/(norms[:,None]*norms[None,:]).clamp_min(1e-30)
             self._gradient_records.append(dict(norms=norms.tolist(),cosine=cosine.tolist()))
-        replacement=project_actor_gradients(flat) if self.actor_projection else None
+        replacement=project_actor_gradients(flat,self.actor_gradient_weights) if self.actor_projection else None
         loss.backward()
         if replacement is not None:
             offset=0
@@ -354,6 +360,8 @@ class NativeMixedPPO(PPOAMP):
             tasks=self._task_diagnostics(), critic_only=bool(critic_only))
         if self._gradient_records:
             result['actor_gradient_sample']=self._gradient_records[0]
+        if self.actor_gradient_weights is not None:
+            result['actor_gradient_weights']=dict(zip(TASKS,self.actor_gradient_weights,strict=True))
         if not all(math.isfinite(v) for v in result.values() if isinstance(v,(int,float))):
             raise ValueError('Nonfinite native PPO statistics')
         if any(not torch.isfinite(p).all() for p in self.policy.parameters()):

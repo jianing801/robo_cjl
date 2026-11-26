@@ -41,6 +41,8 @@ NATIVE_PPO_PROFILES = {NATIVE_PPO_ALGORITHM_V3: NATIVE_PPO_SETTINGS_V3,
                        NATIVE_PPO_ALGORITHM: NATIVE_PPO_SETTINGS}
 
 CORRECTION_PROFILES = ('native', 'fixed_amp_std', 'fixed_amp_std_pcgrad')
+STAIRS_WEIGHT_PROFILE = 'fixed_amp_std_pcgrad_stairs_weight2'
+TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE,)
 
 
 def correction_settings(profile):
@@ -51,6 +53,10 @@ def correction_settings(profile):
         return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'])
     if profile == 'fixed_amp_std_pcgrad':
         return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic')
+    if profile == STAIRS_WEIGHT_PROFILE:
+        return dict(correction_settings('fixed_amp_std_pcgrad'),
+                    actor_gradient_weights={'stairs': 2., 'backpack': 1., 'run': 1.},
+                    actor_gradient_weight_normalization='mean_one')
     raise ValueError(f'Unknown experimental PPO profile: {profile}')
 
 

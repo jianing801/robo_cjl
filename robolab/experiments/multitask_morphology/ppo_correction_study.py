@@ -79,14 +79,19 @@ def write_diagnostics(bo,folder,tuning,previous):
         ax.set_title(label);ax.set_xlabel('PPO updates');ax.set_ylabel('Mean reward');ax.grid(alpha=.2)
     fig.savefig(folder/'mean_reward.png',dpi=170);plt.close(fig)
     history=checkpoint_history(tuning,bo.sha(tuning/'manifest.json'))[1:]
+    expected_weights=bo.read(tuning/'manifest.json')['native_ppo_settings'].get('actor_gradient_weights')
+    if expected_weights and (len(history)!=UPDATES or any(r['metrics'].get('actor_gradient_weights')!=expected_weights for r in history)):
+        raise ValueError('Weighted Actor task gradients were not used on every formal update')
     with (folder/'ppo_diagnostics.csv').open('w',newline='',encoding='utf8') as stream:
         keys=('learning_rate','mean_action_std','value','surrogate','entropy','collection_seconds','update_seconds')
         subs=('kl','clip_fraction','explained_variance','mean_action_std')
-        writer=csv.DictWriter(stream,fieldnames=['update',*keys,*[f'{t}_{k}' for t in TASKS for k in subs]])
+        weights=[f'{t}_actor_gradient_weight' for t in TASKS] if expected_weights else []
+        writer=csv.DictWriter(stream,fieldnames=['update',*keys,*[f'{t}_{k}' for t in TASKS for k in subs],*weights])
         writer.writeheader()
         for rec in history:
             m=rec['metrics'];writer.writerow(dict(update=rec['completed_updates'],**{k:m.get(k) for k in keys},
-                **{f'{t}_{k}':m['tasks'][t].get(k) for t in TASKS for k in subs}))
+                **{f'{t}_{k}':m['tasks'][t].get(k) for t in TASKS for k in subs},
+                **{f'{t}_actor_gradient_weight':m['actor_gradient_weights'][t] for t in TASKS} if expected_weights else {}))
     publish(folder/'actor_gradient_samples.json',[dict(update=r['completed_updates'],**r['metrics']['actor_gradient_sample'])
          for r in history if r['metrics'].get('actor_gradient_sample')])
     return result
@@ -244,11 +249,11 @@ def main():
     from original_expert_comparison import status,check_pause
     from persistence import run_lock,resume_pause
     from singleton_native import publish
-    from finetune_settings import CORRECTION_PROFILES
+    from finetune_settings import CORRECTION_PROFILES, TRAINING_PROFILES
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--original',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--gpu',type=int,default=0)
-    p.add_argument('--profiles',nargs='+',choices=CORRECTION_PROFILES[1:],default=list(CORRECTION_PROFILES[1:]))
+    p.add_argument('--profiles',nargs='+',choices=TRAINING_PROFILES[1:],default=list(CORRECTION_PROFILES[1:]))
     p.add_argument('--expert-root',type=Path);p.add_argument('--eval100',type=Path);p.add_argument('--native-checkout',type=Path)
     p.add_argument('--resume-paused',action='store_true');a=p.parse_args()
     a.original=a.original.resolve();a.output=a.output.resolve();a.output.mkdir(parents=True,exist_ok=True)

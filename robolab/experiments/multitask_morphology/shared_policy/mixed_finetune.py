@@ -189,7 +189,7 @@ def verify_expert_initialization(tasks, learner, adapter, expected_hashes):
 
 
 def train(a, root, attempt, plan, candidate, protocol, counts):
-    from finetune_settings import NATIVE_PPO_SETTINGS
+    from finetune_settings import NATIVE_PPO_SETTINGS, correction_settings
     from finetune_state import (load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints,
                                 native_checkpoint_due, native_checkpoint_history_for_resume, save_native_metrics)
     from native_observations import NativeObservationAdapter
@@ -224,9 +224,12 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     teacher_priors = {task.name:task.training_prior['expert_prior'] for task in tasks}
     learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
                                    adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK)
-    if getattr(a,'experimental_profile','native') in ('fixed_amp_std','fixed_amp_std_pcgrad'):
-        learner.fix_expert_std(('run',))
-    learner.actor_projection = getattr(a,'experimental_profile','native') == 'fixed_amp_std_pcgrad'
+    settings=correction_settings(a.experimental_profile)
+    if settings.get('fixed_expert_std_tasks'):
+        learner.fix_expert_std(tuple(settings['fixed_expert_std_tasks']))
+    learner.actor_projection = settings.get('actor_gradient_projection') == 'pcgrad_cyclic'
+    if weights:=settings.get('actor_gradient_weights'):
+        learner.actor_gradient_weights=tuple(weights[t] for t in TASKS)
     expected_hashes = {name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS}
     write_new(attempt/'expert_prior_audit.json', dict(initial_actor_sha256=sha(a.student),
         tasks=verify_expert_initialization(tasks, learner, adapter, expected_hashes)))
@@ -322,7 +325,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
 
 
 def main():
-    from finetune_settings import CORRECTION_PROFILES, resolve_training_profile
+    from finetune_settings import TRAINING_PROFILES, resolve_training_profile
     from native_resume_compat import validate_native_resume_manifest
     from isaaclab.app import AppLauncher
 
@@ -341,7 +344,7 @@ def main():
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-paused', action='store_true')
     parser.add_argument('--compact-training-artifacts', action='store_true')
-    parser.add_argument('--experimental-profile', choices=CORRECTION_PROFILES, default=None,
+    parser.add_argument('--experimental-profile', choices=TRAINING_PROFILES, default=None,
                         help='Explicit isolated legacy control/ablation; default is formal scheme B')
     AppLauncher.add_app_launcher_args(parser)
     a = parser.parse_args()

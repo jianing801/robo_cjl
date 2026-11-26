@@ -42,6 +42,20 @@ def test_pcgrad_removes_pairwise_conflicting_component_without_changing_aligned_
     assert torch.isfinite(actual).all()
 
 
+def test_weighted_stairs_profile_preserves_formal_b_and_scales_contributions():
+    from finetune_settings import STAIRS_WEIGHT_PROFILE, CURRENT_PPO_SETTINGS, correction_settings, resolve_training_profile
+    from native_ppo import project_actor_gradients
+    settings=correction_settings(STAIRS_WEIGHT_PROFILE)
+    assert settings['actor_gradient_weights']==dict(stairs=2.,backpack=1.,run=1.)
+    assert settings['actor_gradient_weight_normalization']=='mean_one'
+    assert {k:v for k,v in settings.items() if not k.startswith('actor_gradient_weight')}==CURRENT_PPO_SETTINGS
+    assert resolve_training_profile()[2]==CURRENT_PPO_SETTINGS
+    aligned=torch.eye(3)
+    weights=(2.,1.,1.)
+    assert torch.allclose(project_actor_gradients(aligned,weights), torch.tensor([1.5,.75,.75]))
+    assert torch.equal(project_actor_gradients(aligned),aligned.sum(0))
+
+
 def test_pcgrad_real_ppo_update_keeps_frozen_amp_and_native_discriminator():
     def mirror(obs=None,actions=None,env=None):
         return (torch.cat((obs,obs.clone()),dim=0) if obs is not None else None,
@@ -55,3 +69,13 @@ def test_pcgrad_real_ppo_update_keeps_frozen_amp_and_native_discriminator():
     assert torch.equal(alg.policy.std[2],initial[2])
     assert not torch.equal(disc,alg.amp_discriminator.disc_linear.weight)
     assert any(not torch.equal(v,actor[k]) for k,v in alg.policy.actor.state_dict().items())
+
+
+def test_weighted_stairs_real_ppo_update_keeps_frozen_amp_and_discriminator():
+    alg=learner(None)
+    alg.fix_expert_std(('run',));alg.actor_projection=True;alg.actor_gradient_weights=(2.,1.,1.)
+    initial=alg.policy.std.detach().clone();disc=alg.amp_discriminator.disc_linear.weight.clone()
+    metrics=alg.compute_returns_and_update(fill_rollout(alg))
+    assert metrics['actor_gradient_weights']==dict(stairs=2.,backpack=1.,run=1.)
+    assert torch.equal(alg.policy.std[2],initial[2])
+    assert not torch.equal(disc,alg.amp_discriminator.disc_linear.weight)

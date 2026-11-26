@@ -90,6 +90,12 @@ _HELPER = 'native_resume_compat.py'
 _B_DEFAULT_SETTINGS_HASHES = (
     '2c7b0a28e5563e0cce93f6e166630af76d27c67aa60d86a9388a0e3b6fd4b19d',
     '9791e08cb73b7934f2e9505f514d99eeb49d1c953c65a972a48e60a87653f12f',
+    'ed8314a036ad38bdb638a3e8944ec18f6aa276b0ed0b737beecc7acfb35c4c75',
+    '7e967110c416ed17314109c17f9fda5708303b6be4ea94a9186183a3cb394d72',
+)
+_OPTIONAL_ACTOR_WEIGHT_HASHES = (
+    'a2b3c9f8c202f2f4ec7604c65eec6bb0f5edc735b770b8080210fd2b64548acd',
+    'd57a4073cf46a048734593efb8e31ca825d03be6bb2396d4ffce4d98981a59c1',
 )
 
 
@@ -110,7 +116,8 @@ def _matches_current_sources(sources):
             and sources.keys() == _391E19C.keys() | {_HELPER}
             and all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
                     for value in sources.values())
-            and all(sources[name] in (expected + _B_DEFAULT_SETTINGS_HASHES if name == 'finetune_settings.py' else expected)
+            and all(sources[name] in (expected + _B_DEFAULT_SETTINGS_HASHES if name == 'finetune_settings.py'
+                                      else expected + _OPTIONAL_ACTOR_WEIGHT_HASHES if name == 'native_ppo.py' else expected)
                     for name, expected in _391E19C.items()
                     if name not in _CADENCE_SOURCES))
 
