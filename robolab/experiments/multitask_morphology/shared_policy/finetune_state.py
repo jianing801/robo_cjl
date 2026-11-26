@@ -16,6 +16,18 @@ from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, NATIVE_
 from ppo_channel import publish
 
 
+NATIVE_CHECKPOINT_INTERVAL = 10
+NATIVE_METRICS_RECEIPT_KIND = 'native_ppo_metrics_only_v1'
+
+
+def native_checkpoint_due(update, final_update):
+    """Keep full learning state at 0, every ten updates, and the final budget."""
+    if (type(update) is not int or type(final_update) is not int
+            or final_update < 1 or not 0 <= update <= final_update):
+        raise ValueError('Invalid native PPO checkpoint update/budget')
+    return update == final_update or update % NATIVE_CHECKPOINT_INTERVAL == 0
+
+
 def select_candidate(plan, *, design_id=None, design_task='stairs', design_key=None):
     if (design_id is None) == (design_key is None):
         raise ValueError('Select exactly one --design-id or --design-key')
@@ -230,14 +242,103 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
     return record
 
 
+def save_native_metrics(root, learner, completed_updates, manifest_sha256, metrics=None, *,
+                        warmup_completed=10, training_reward=None):
+    """Record every update without serializing or hashing learner/replay tensors.
+
+    These rows make a dense metrics history, not a restore point. If a process
+    dies before the next full checkpoint, only its trailing metric receipts are
+    archived/replayed; committed checkpoint history is never rewritten.
+    """
+    if (type(completed_updates) is not int or completed_updates <= 0
+            or completed_updates % NATIVE_CHECKPOINT_INTERVAL == 0
+            or warmup_completed != NATIVE_PPO_SETTINGS['critic_warmup_updates']):
+        raise ValueError('Native metrics-only receipt cannot replace a scheduled full checkpoint')
+    folder = Path(root).resolve()/'checkpoints'
+    folder.mkdir(exist_ok=True)
+    prior = _v4_policy_contract(learner.policy)
+    record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
+        ppo_algorithm=NATIVE_PPO_ALGORITHM, state_kind=NATIVE_PPO_STATE_KIND,
+        teacher_checkpoint_sha256=prior['teacher_checkpoint_sha256'], warmup_completed=warmup_completed,
+        record_kind=NATIVE_METRICS_RECEIPT_KIND, metrics=metrics)
+    if training_reward is not None:
+        record['training_reward'] = training_reward
+    write_new(folder/f'update_{completed_updates:06d}.json', record)
+    return record
+
+
+def _native_full_history(history):
+    """Recognize old full V4 receipts and new explicit metrics-only receipts."""
+    full = []
+    for row in history:
+        if (row.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM
+                or row.get('state_kind') != NATIVE_PPO_STATE_KIND):
+            raise ValueError('Cannot resume legacy PPO or native V3 state as a native expert-prior V4 learner')
+        if row.get('record_kind') == NATIVE_METRICS_RECEIPT_KIND:
+            if ('path' in row or 'sha256' in row
+                    or row['completed_updates'] % NATIVE_CHECKPOINT_INTERVAL == 0):
+                raise ValueError('Invalid native metrics-only receipt')
+        elif (row.get('record_kind') is None and isinstance(row.get('path'), str)
+              and isinstance(row.get('sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', row['sha256'])):
+            full.append(row)
+        else:
+            raise ValueError('Invalid native full checkpoint receipt')
+    if history and (not full or full[0]['completed_updates'] != 0):
+        raise ValueError('Native PPO history must start with a full checkpoint')
+    return full
+
+
+def native_checkpoint_history_for_resume(root, manifest_sha256, *, recovery_dir):
+    """Reconcile a dead session's metrics tail to the last real checkpoint.
+
+    The prior every-update V4 format remains a valid dense prefix. Trailing
+    lightweight receipts are moved, never destroyed, into a fresh recovery
+    directory under this run. Highest update first leaves a contiguous active
+    prefix even if recovery itself is interrupted. Verify the actual checkpoint
+    before changing any history.
+    """
+    root = Path(root).resolve()
+    folder = root/'checkpoints'
+    history = checkpoint_history(root, manifest_sha256)
+    if not history:
+        return history
+    full = _native_full_history(history)
+    latest = full[-1]
+    if latest is history[-1]:
+        return history
+    checkpoint = _checkpoint_blob(folder, latest)
+    if not checkpoint.is_file() or sha(checkpoint) != latest['sha256']:
+        raise ValueError('Committed native PPO checkpoint changed')
+    recovered = Path(recovery_dir).absolute()
+    if (folder.resolve() != folder or recovered.resolve() != recovered
+            or not recovered.is_relative_to(root/'attempts')):
+        raise ValueError('Native checkpoint recovery must stay in this run attempt directory')
+    tail = history[latest['completed_updates']+1:]
+    paths = [folder/f'update_{row["completed_updates"]:06d}.json' for row in reversed(tail)]
+    if any(not path.is_file() or path.is_symlink() for path in paths):
+        raise ValueError('Invalid native metrics recovery receipt path')
+    recovered.mkdir(parents=True, exist_ok=False)
+    # Persist the archival directory's entry before removing any receipt from
+    # the source. This also makes a nested newly-created attempt recoverable.
+    for directory in recovered.parents:
+        _sync_directory(directory)
+        if directory == root:
+            break
+    for path in paths:
+        os.replace(path, recovered/path.name)
+        _sync_directory(recovered)
+        _sync_directory(folder)
+    return history[:latest['completed_updates']+1]
+
+
 def load_native_checkpoint(root, learner, manifest_sha256):
     folder = Path(root).resolve()/'checkpoints'
     history = checkpoint_history(root, manifest_sha256)
     if not history:
         return None
-    record = history[-1]
-    if record.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or record.get('state_kind') != NATIVE_PPO_STATE_KIND:
-        raise ValueError('Cannot resume legacy PPO or native V3 state as a native expert-prior V4 learner')
+    record = _native_full_history(history)[-1]
+    if record is not history[-1]:
+        raise ValueError('Native PPO metrics tail requires reconciliation before restore')
     state_path = _checkpoint_blob(folder, record)
     if sha(state_path) != record['sha256']:
         raise ValueError('Committed native PPO checkpoint changed')
@@ -282,13 +383,16 @@ def prune_native_checkpoints(root, history, retain_updates=(0, 100, 200, 500, 80
     folder = Path(root).resolve()/'checkpoints'
     if folder.resolve() != folder or not history:
         raise ValueError('Native PPO checkpoint directory/history differs')
-    if any(row.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM for row in history):
-        raise ValueError('Native PPO pruning may not touch legacy state')
-    latest = history[-1]
+    full = _native_full_history(history)
+    latest = full[-1]
+    if latest is not history[-1]:
+        # No new full state has been committed; avoid repeated hashing and
+        # never mistake metrics-only progress for a durable rollback point.
+        return
     if sha(_checkpoint_blob(folder, latest)) != latest['sha256']:
         raise ValueError('Committed native PPO checkpoint changed')
     _sync_directory(folder)
-    obsolete = {row['path']: row for row in history[:-2]
+    obsolete = {row['path']: row for row in full[:-2]
                 if row['completed_updates'] not in retain_updates}
     # Only touch existing committed blobs (at most a few) rather than walking
     # a growing O(updates) list of already removed files on every update.

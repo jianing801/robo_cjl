@@ -15,7 +15,7 @@ import torch
 
 from contract import load_plan, sha, write_new
 from finetune_settings import MIXED_BO_ENVS, PPO_SCHEDULE
-from finetune_state import checkpoint_history, select_candidate
+from finetune_state import select_candidate
 from finetune_common import STEPS_PER_TASK, check_pause, publish_training_completion
 from mixed_batch import advance, initialize_episode_length, task_counts
 from persistence import resume_pause, run_lock
@@ -190,7 +190,8 @@ def verify_expert_initialization(tasks, learner, adapter, expected_hashes):
 
 def train(a, root, attempt, plan, candidate, protocol, counts):
     from finetune_settings import NATIVE_PPO_SETTINGS
-    from finetune_state import load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints
+    from finetune_state import (load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints,
+                                native_checkpoint_due, native_checkpoint_history_for_resume, save_native_metrics)
     from native_observations import NativeObservationAdapter
     # Pin the current bundled RSL-RL before frozen teacher runtime paths are installed.
     sys.path.insert(0, str(HERE.parents[3] / 'rsl_rl'))
@@ -204,7 +205,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     if model.schema != plan['schema']:
         raise ValueError('Candidate actor schema differs')
     digest = sha(root/'manifest.json')
-    history = checkpoint_history(root, digest)
+    history = native_checkpoint_history_for_resume(root, digest, recovery_dir=attempt/'rolled_back_metrics')
     completed = history[-1]['completed_updates'] if history else 0
     if completed > a.updates:
         raise ValueError('Mixed PPO checkpoint exceeds its frozen update budget')
@@ -240,7 +241,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         prune_native_checkpoints(root, history, retain_updates=retain_updates)
     step_history = reward_history_rows(history, TASKS)
     mean_history = list(mean_reward_rows(history, TASKS))
-    if completed:
+    if history:
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
     if completed == a.updates:
@@ -302,20 +303,27 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
                        torch_peak_mib=torch.cuda.max_memory_allocated(a.device)/2**20)
         del batches
         check_pause(root)
-        receipt = save_native_checkpoint(root, learner, update, digest, metrics,
-                                         warmup_completed=warmup, training_reward=reward_summary)
+        persist_started = time.monotonic()
+        full_checkpoint = native_checkpoint_due(update, a.updates)
+        save = save_native_checkpoint if full_checkpoint else save_native_metrics
+        receipt = save(root, learner, update, digest, metrics,
+                       warmup_completed=warmup, training_reward=reward_summary)
         history.append(receipt)
-        prune_native_checkpoints(root, history, retain_updates=retain_updates)
+        if full_checkpoint:
+            prune_native_checkpoints(root, history, retain_updates=retain_updates)
         step_history.extend(reward_history_rows([receipt], TASKS))
         mean_history.extend(mean_reward_rows([receipt], TASKS))
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
+        print('NATIVE_UPDATE_ARTIFACT', update, 'full_checkpoint' if full_checkpoint else 'metrics_only',
+              f'seconds={time.monotonic()-persist_started:.3f}', flush=True)
         print('MIXED_PPO_UPDATE', update, '/', a.updates, metrics, flush=True)
     publish_training_completion(a, root, model.cpu(), candidate, digest, protocol)
 
 
 def main():
     from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, CORRECTION_PROFILES, correction_settings
+    from native_resume_compat import validate_native_resume_manifest
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -347,7 +355,7 @@ def main():
     root = a.output.resolve()
     files = ['mixed_finetune.py', 'finetune_common.py', 'mixed_scene.py', 'mixed_batch.py', 'native_ppo.py', 'native_observations.py',
              'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py',
-             'finetune_settings.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
+             'finetune_settings.py', 'native_resume_compat.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
              '../../../../rsl_rl/rsl_rl/algorithms/ppo.py', '../../../../rsl_rl/rsl_rl/storage/rollout_storage.py',
              '../../../../rsl_rl/rsl_rl/storage/circular_buffer.py', '../../../../rsl_rl/rsl_rl/modules/amp.py']
     manifest = dict(kind='shared_candidate_finetuning_mixed',
@@ -362,10 +370,16 @@ def main():
     if a.experimental_profile != 'native':
         manifest['experimental_profile'] = a.experimental_profile
     with run_lock(root):
+        compatible_resume = None
         if a.resume or a.resume_paused:
-            if (json.loads((root/'manifest.json').read_text(encoding='utf8')) != manifest
+            saved_manifest = json.loads((root/'manifest.json').read_text(encoding='utf8'))
+            if (not validate_native_resume_manifest(saved_manifest, manifest)
                     or load_plan(root/'plan.json') != plan):
                 raise ValueError('Mixed PPO candidate, budget, episode timing or sources changed')
+            if saved_manifest != manifest:
+                compatible_resume = dict(kind='native_checkpoint_cadence_compatible_resume',
+                    frozen_manifest_sha256=sha(root/'manifest.json'),
+                    frozen_sources=saved_manifest['sources'], execution_sources=manifest['sources'])
         else:
             root.mkdir(parents=True, exist_ok=True)
             frozen_plan = root/'plan.json'
@@ -380,6 +394,8 @@ def main():
         resume_pause(root, a.resume_paused)
         attempt = root/'attempts'/uuid4().hex
         attempt.mkdir(parents=True, exist_ok=False)
+        if compatible_resume is not None:
+            write_new(attempt/'native_resume_compatibility.json', compatible_resume)
         a.kit_args = (a.kit_args or '') + f' --/renderer/multiGpu/enabled=false --portable-root {attempt/"portable"} --portable'
         app = AppLauncher(a).app
         try:

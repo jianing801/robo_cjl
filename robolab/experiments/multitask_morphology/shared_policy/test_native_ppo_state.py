@@ -91,6 +91,100 @@ def test_native_resume_rejects_legacy_learning_state(tmp_path):
         load_native_checkpoint(tmp_path,learner(),'a'*64)
 
 
+def test_native_interval_keeps_dense_rewards_and_eleven_full_commits(tmp_path):
+    from finetune_state import native_checkpoint_due, save_native_metrics
+    from training_reward import mean_reward_rows
+
+    agent = learner()
+    digest = 'd'*64
+    full = []
+    for n in range(101):
+        update(agent)
+        metrics = {'kl': n/1000}
+        reward = {'session_id': 'one', 'mean_reward': {'all': {'mean_reward': n, 'window_episodes': 100}}}
+        if native_checkpoint_due(n, 100):
+            row = save_native_checkpoint(tmp_path, agent, n, digest, metrics, training_reward=reward)
+            full.append(n)
+            assert (tmp_path/'checkpoints'/row['path']).is_file()
+            prune_native_checkpoints(tmp_path, checkpoint_history(tmp_path,digest), retain_updates=(0,100))
+        else:
+            row = save_native_metrics(tmp_path, agent, n, digest, metrics, training_reward=reward)
+            assert 'path' not in row and 'sha256' not in row
+    assert full == [0,10,20,30,40,50,60,70,80,90,100]
+    history = checkpoint_history(tmp_path,digest)
+    assert len(history) == 101
+    assert [r['completed_updates'] for r in history if 'path' in r] == full
+    assert len(list((tmp_path/'checkpoints').glob('*.pt'))) == 3
+    assert [r['mean_reward'] for r in mean_reward_rows(history, ('stairs','backpack','run'))] == list(range(1,101))
+    assert load_native_checkpoint(tmp_path,learner(),digest)['completed_updates'] == 100
+
+
+def test_native_resume_mixed_old_dense_prefix_preserves_replayed_metrics(tmp_path):
+    from finetune_state import native_checkpoint_due, native_checkpoint_history_for_resume, save_native_metrics
+    from training_reward import mean_reward_rows
+
+    agent=learner(); digest='e'*64
+    for n in range(18):
+        update(agent)
+        save_native_checkpoint(tmp_path,agent,n,digest,{'old': n})
+        prune_native_checkpoints(tmp_path,checkpoint_history(tmp_path,digest))
+    for n in (18,19):
+        update(agent)
+        save_native_metrics(tmp_path,agent,n,digest,{'discarded': n})
+    with pytest.raises(ValueError,match='reconcil|rollback'):
+        load_native_checkpoint(tmp_path,learner(),digest)
+    archived = tmp_path/'attempts'/'recovery'/'receipts'
+    prefix = native_checkpoint_history_for_resume(tmp_path,digest,recovery_dir=archived)
+    assert len(prefix) == 18 and prefix[-1]['completed_updates'] == 17
+    assert sorted(p.name for p in archived.iterdir()) == ['update_000018.json','update_000019.json']
+    assert not (tmp_path/'checkpoints/update_000019.json').exists()
+    restored=learner()
+    assert load_native_checkpoint(tmp_path,restored,digest)['completed_updates'] == 17
+    for n in range(18,24):
+        update(restored)
+        reward={'session_id':'replay','mean_reward':{'all':{'mean_reward':n,'window_episodes':100}}}
+        saver=save_native_checkpoint if native_checkpoint_due(n,23) else save_native_metrics
+        saver(tmp_path,restored,n,digest,{'replayed':n},training_reward=reward)
+        if saver is save_native_checkpoint:
+            prune_native_checkpoints(tmp_path,checkpoint_history(tmp_path,digest), retain_updates=(0,23))
+    history=checkpoint_history(tmp_path,digest)
+    assert len(history)==24
+    assert 'discarded' not in history[18]['metrics']
+    assert history[19]['metrics']=={'replayed':19}
+    assert history[20]['path'].endswith('.pt') and history[23]['path'].endswith('.pt')
+    assert [r['update'] for r in mean_reward_rows(history, ('stairs','backpack','run'))] == list(range(1,24))
+    assert load_native_checkpoint(tmp_path,learner(),digest)['completed_updates'] == 23
+
+
+def test_native_metrics_recovery_does_not_hide_corrupted_full_state(tmp_path):
+    from finetune_state import native_checkpoint_history_for_resume, save_native_metrics
+
+    agent=learner();digest='f'*64
+    row=save_native_checkpoint(tmp_path,agent,0,digest)
+    save_native_metrics(tmp_path,agent,1,digest,{'kl':.01})
+    (tmp_path/'checkpoints'/row['path']).write_bytes(b'corrupt')
+    with pytest.raises(ValueError,match='checkpoint changed'):
+        native_checkpoint_history_for_resume(tmp_path,digest,recovery_dir=tmp_path/'attempts/recovery')
+    assert (tmp_path/'checkpoints/update_000001.json').exists()
+
+
+def test_native_lightweight_updates_do_not_hash_existing_blob(tmp_path, monkeypatch):
+    import finetune_state
+
+    agent=learner();digest='1'*64
+    record=save_native_checkpoint(tmp_path,agent,0,digest)
+    original_blob = tmp_path/'checkpoints'/record['path']
+    def forbidden_hash(path):
+        pytest.fail(f'Metrics-only update unexpectedly hashes a checkpoint: {path}')
+    monkeypatch.setattr(finetune_state,'sha',forbidden_hash)
+    finetune_state.save_native_metrics(tmp_path,agent,1,digest,{'kl':.01})
+    prune_native_checkpoints(tmp_path,checkpoint_history(tmp_path,digest))
+    assert original_blob.is_file()
+    assert list((tmp_path/'checkpoints').glob('*.pt')) == [original_blob]
+    with pytest.raises(ValueError,match='scheduled full checkpoint'):
+        finetune_state.save_native_metrics(tmp_path,agent,10,digest,{'kl':.01})
+
+
 def test_native_settings_match_joint_ppo_contract():
     assert NATIVE_PPO_SETTINGS['critic_warmup_updates']==10
     assert NATIVE_PPO_ALGORITHM == 'shared_native_ppoamp_expert_prior_v4'
