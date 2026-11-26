@@ -97,7 +97,7 @@ def write_diagnostics(bo,folder,tuning,previous):
     return result
 
 
-def verified_corrected_actor(tuning, origin_manifest, profile):
+def verified_corrected_actor(tuning, origin_manifest, profile, updates=UPDATES):
     """Detached experimental output, never accepted by official BO checks."""
     import bo, torch
     from finetune_settings import correction_settings,NATIVE_PPO_SETTINGS
@@ -106,16 +106,16 @@ def verified_corrected_actor(tuning, origin_manifest, profile):
     from student import load_student
     tuning=Path(tuning).resolve();manifest=bo.read(tuning/'manifest.json');digest=bo.sha(tuning/'manifest.json')
     if (manifest.get('experimental_profile')!=profile or manifest['native_ppo_settings']!=correction_settings(profile)
-            or manifest['native_ppo_settings']==NATIVE_PPO_SETTINGS or manifest['updates']!=UPDATES):
+            or manifest['native_ppo_settings']==NATIVE_PPO_SETTINGS or manifest['updates']!=updates):
         raise ValueError('Unexpected experimental training identity')
     for k in ('plan_sha256','initial_actor_sha256','candidate','seed','envs_per_task','collection_protocol','ppo_schedule','init_at_random_ep_len','teacher_checkpoint_sha256'):
         if manifest[k]!=origin_manifest[k]: raise ValueError(f'Correction changed frozen control setting {k}')
     receipt=bo.read(tuning/'training_completed.json');actor=tuning/'shared_actor_finetuned.pt'
-    if (receipt['manifest_sha256']!=digest or receipt['ppo_updates']!=UPDATES or Path(receipt['student']).resolve()!=actor
+    if (receipt['manifest_sha256']!=digest or receipt['ppo_updates']!=updates or Path(receipt['student']).resolve()!=actor
             or receipt['student_sha256']!=bo.sha(actor) or receipt['candidate']!=manifest['candidate']):
         raise ValueError('Experimental final Actor receipt differs')
     history=checkpoint_history(tuning,digest)
-    if len(history)!=UPDATES+1 or bo.sha(tuning/'checkpoints/update_001000.json')!=receipt['checkpoint_sha256']:
+    if len(history)!=updates+1 or bo.sha(tuning/f'checkpoints/update_{updates:06d}.json')!=receipt['checkpoint_sha256']:
         raise ValueError('Incomplete experimental PPO commits')
     state=verify_blob(bo,tuning,history[-1],digest)
     model,_=load_student(actor,'cpu')

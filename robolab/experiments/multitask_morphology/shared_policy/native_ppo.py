@@ -362,6 +362,8 @@ class NativeMixedPPO(PPOAMP):
             result['actor_gradient_sample']=self._gradient_records[0]
         if self.actor_gradient_weights is not None:
             result['actor_gradient_weights']=dict(zip(TASKS,self.actor_gradient_weights,strict=True))
+        if self.desired_kl != PPO_NATIVE_CONFIG['desired_kl']:
+            result['desired_kl']=float(self.desired_kl)
         if not all(math.isfinite(v) for v in result.values() if isinstance(v,(int,float))):
             raise ValueError('Nonfinite native PPO statistics')
         if any(not torch.isfinite(p).all() for p in self.policy.parameters()):
@@ -407,9 +409,12 @@ class NativeMixedPPO(PPOAMP):
 
 
 def build_native_learner(actor, counts, critic_widths, amp_cfg, amp_state, symmetry_callback, device,
-        *, teacher_priors, steps=24, symmetry_env=None, num_epochs=5, num_minibatches=4, critic_warmup_updates=10):
+        *, teacher_priors, steps=24, symmetry_env=None, num_epochs=5, num_minibatches=4, critic_warmup_updates=10,
+        desired_kl=PPO_NATIVE_CONFIG['desired_kl']):
     """Create fresh candidate optimizer with exact native teacher learning priors."""
     counts, widths = _task_tuple(counts), _task_tuple(critic_widths)
+    if not math.isfinite(desired_kl) or desired_kl <= 0:
+        raise ValueError('Adaptive KL target must be positive and finite')
     policy = NativeSharedPolicy(actor,widths,device,teacher_priors=teacher_priors)
     n = sum(counts)
     if steps < 1 or steps*n % num_minibatches or steps*counts[-1] % num_minibatches:
@@ -428,7 +433,7 @@ def build_native_learner(actor, counts, critic_widths, amp_cfg, amp_state, symme
         mirror_loss_coeff=.2, data_augmentation_func=symmetry_callback, _env=symmetry_env)
     alg = NativeMixedPPO(policy,storage,disc,demo,counts=counts,
         critic_warmup_updates=critic_warmup_updates,num_learning_epochs=num_epochs,num_mini_batches=num_minibatches,
-        device=device,symmetry_cfg=symmetry,amp_cfg=cfg,**PPO_NATIVE_CONFIG)
+        device=device,symmetry_cfg=symmetry,amp_cfg=cfg,**dict(PPO_NATIVE_CONFIG,desired_kl=desired_kl))
     alg.amp_discriminator.load_state_dict(amp_state['amp_discriminator_state_dict'], strict=True)
     alg.amp_discriminator.disc_obs_normalizer.load_state_dict(
         amp_state['amp_discriminator_normalizer_state_dict'],strict=True)

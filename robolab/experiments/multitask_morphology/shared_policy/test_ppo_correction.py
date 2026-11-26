@@ -79,3 +79,17 @@ def test_weighted_stairs_real_ppo_update_keeps_frozen_amp_and_discriminator():
     assert metrics['actor_gradient_weights']==dict(stairs=2.,backpack=1.,run=1.)
     assert torch.equal(alg.policy.std[2],initial[2])
     assert not torch.equal(disc,alg.amp_discriminator.disc_linear.weight)
+
+
+def test_kl_pilot_changes_only_desired_kl_and_uses_native_value():
+    from finetune_settings import KL_PILOT_PROFILE, CURRENT_PPO_SETTINGS, correction_settings
+    from native_ppo import build_native_learner
+    settings=correction_settings(KL_PILOT_PROFILE)
+    assert settings==dict(CURRENT_PPO_SETTINGS,desired_kl=.02)
+    cfg,state=amp_settings()
+    alg=build_native_learner(Actor(),(2,2,2),(4,6,3),cfg,state,None,'cpu',teacher_priors=teacher_priors(),
+                            steps=2,num_epochs=1,num_minibatches=1,desired_kl=settings['desired_kl'])
+    assert alg.desired_kl==.02
+    alg.fix_expert_std(('run',));alg.actor_projection=True
+    metrics=alg.compute_returns_and_update(fill_rollout(alg))
+    assert metrics['desired_kl']==.02 and 'actor_gradient_weights' not in metrics

@@ -222,9 +222,10 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     adapter = NativeObservationAdapter(widths)
     amp = tasks[-1].amp_training
     teacher_priors = {task.name:task.training_prior['expert_prior'] for task in tasks}
-    learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
-                                   adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK)
     settings=correction_settings(a.experimental_profile)
+    learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
+                                   adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK,
+                                   desired_kl=settings['desired_kl'])
     if settings.get('fixed_expert_std_tasks'):
         learner.fix_expert_std(tuple(settings['fixed_expert_std_tasks']))
     learner.actor_projection = settings.get('actor_gradient_projection') == 'pcgrad_cyclic'
