@@ -52,7 +52,8 @@ from collection_grid import SELECTION_VERSION, calibration_keys, select_collecti
 from evaluation import EVALUATION_VELOCITY_FRAME
 from finetune_settings import (MIXED_BO_ENVS, MIXED_BO_LAYOUT, PPO_SCHEDULE,
                                NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS,
-                               NATIVE_PPO_PROFILES, NATIVE_PPO_STATE_KIND)
+                               NATIVE_PPO_PROFILES, NATIVE_PPO_STATE_KIND,
+                               CURRENT_PPO_ALGORITHM, CURRENT_PPO_SETTINGS, EXPERT_PRIOR_ALGORITHMS)
 from persistence import resume_pause, run_lock
 
 ORIGINAL_RPO_FOUR_METRIC_METHOD = FOUR_METRIC_SCORING_METHOD
@@ -239,13 +240,13 @@ def completed_actor_from_hashes(root, source_plan_sha256, initial_actor_sha256, 
                 (ppo_algorithm is not None and checkpoint.get('warmup_completed') !=
                  settings['critic_warmup_updates'])):
             raise ValueError('Fine-tuned checkpoint uses a different PPO algorithm or Critic warmup')
-        if ppo_algorithm == NATIVE_PPO_ALGORITHM:
+        if ppo_algorithm in EXPERT_PRIOR_ALGORITHMS:
             hashes = manifest.get('teacher_checkpoint_sha256', {})
             if (checkpoint.get('state_kind') != NATIVE_PPO_STATE_KIND
                     or checkpoint.get('teacher_checkpoint_sha256') != hashes
                     or set(hashes) != set(TASKS)
                     or any(not isinstance(h, str) or not re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes.values())):
-                raise ValueError('Fine-tuned V4 checkpoint has a different expert-prior identity')
+                raise ValueError('Fine-tuned checkpoint has a different expert-prior identity')
     elif sha(complete['evaluation']) != complete['evaluation_sha256']:
         raise ValueError('Fine-tuned candidate evaluation changed')
     return actor
@@ -342,17 +343,18 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
         raise ValueError('BO measurements require the fully configured motor curves')
     mixed = uses_current_schedule(a.updates, conditions)
     if not mixed or conditions.get('measurement_dt_s') != PHYSICS_DT:
-        raise ValueError('New BO evaluations require the V4 100-update, fixed 200 Hz protocol')
+        raise ValueError('New BO evaluations require the 100-update, fixed 200 Hz protocol')
     explicit = getattr(a, 'finetuned', None)
     tuning = (explicit if explicit else work/'tuning').resolve()
-    # Historical reports remain readable but the retired learners do not
-    # produce new BO measurements. Only the current expert-prior V4 runs.
-    algorithm = getattr(a, 'ppo_algorithm', NATIVE_PPO_ALGORITHM if mixed else None)
-    if explicit and not hasattr(a, 'ppo_algorithm'):
-        algorithm = read(tuning/'manifest.json').get('ppo_algorithm')
+    # New measurements use the selected B protocol. V4 is retained only for
+    # explicitly requested historical reproduction, never for default BO.
+    algorithm = getattr(a, 'ppo_algorithm', CURRENT_PPO_ALGORITHM)
     settings = NATIVE_PPO_PROFILES.get(algorithm)
-    if algorithm != NATIVE_PPO_ALGORITHM or settings != NATIVE_PPO_SETTINGS:
-        raise ValueError('New BO measurements require the V4 expert-prior PPO algorithm')
+    if algorithm not in EXPERT_PRIOR_ALGORITHMS or settings is None:
+        raise ValueError('New BO measurements require the selected expert-prior PPO algorithm')
+    if explicit and (read(tuning/'manifest.json').get('ppo_algorithm') != algorithm
+                     or read(tuning/'manifest.json').get('native_ppo_settings') != settings):
+        raise ValueError('The reused policy does not match the requested PPO algorithm')
     identity = dict(kind='rpo_bo_candidate_v1', source_plan_sha256=sha(source), candidate=candidate,
         initial_actor_sha256=sha(initial), conditions_sha256=digest(conditions), updates=a.updates,
         sources={p.name: sha(p) for p in (Path(__file__), SHARED/'bo_capture.py', SHARED/'shared_bo_metrics.py', SHARED/'stair_course.py',
@@ -369,10 +371,12 @@ def evaluate(a, work, source, original, initial, design_id, conditions):
         command = [sys.executable, '-u', entry, '--plan', source, '--student', initial,
                    '--output', tuning, '--design-id', design_id, '--updates', str(a.updates),
                    '--device', 'cuda:0', '--headless', '--num-envs', str(MIXED_BO_ENVS)]
+        if algorithm == NATIVE_PPO_ALGORITHM:
+            command += ['--experimental-profile', 'native']
         tuning_manifest = tuning/'manifest.json'
         if tuning_manifest.is_file():
             if read(tuning_manifest).get('ppo_algorithm') != algorithm:
-                raise ValueError('Existing tuning belongs to a different PPO algorithm; use a new V4 output')
+                raise ValueError('Existing tuning belongs to a different PPO algorithm; use a separate output')
             command.append('--resume')
             if a.resume_paused:
                 command.append('--resume-paused')
@@ -723,13 +727,15 @@ def checked_original_rpo_reference(root, benchmark, conditions):
     archive_path = ORIGINAL_RPO_ARCHIVE/'manifest.json'
     archive = read(archive_path)
     from original_reference import ARCHIVE_KIND, check_v4_archive
-    if archive.get('kind') == ARCHIVE_KIND or benchmark.get('ppo_algorithm') == NATIVE_PPO_ALGORITHM:
+    if benchmark.get('ppo_algorithm') == NATIVE_PPO_ALGORITHM:
         # Formal V4 scoring has exactly one baseline: the checked-in measured
         # update-100 milestone. Do not launch or substitute a new RPO run.
         if (archive.get('kind') != ARCHIVE_KIND or benchmark.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM
                 or Path(root).resolve() != ORIGINAL_RPO_ARCHIVE.resolve()):
             raise ValueError('Formal V4 BO requires the canonical archived expert-prior update-100 original RPO reference')
         return check_v4_archive(ORIGINAL_RPO_ARCHIVE, benchmark, conditions)
+    if benchmark.get('ppo_algorithm') == CURRENT_PPO_ALGORITHM and Path(root).resolve() == ORIGINAL_RPO_ARCHIVE.resolve():
+        raise ValueError('Scheme B requires its own measured 100-update original RPO reference; the V4 archive is historical')
     protocol_path = root/'reference_protocol.json'
     protocol = read(protocol_path)
     archived_protocol = ORIGINAL_RPO_ARCHIVE/'reference_protocol.json'
@@ -896,18 +902,18 @@ def read_search_benchmark(scoring_path, scoring, conditions):
 
 
 def initialize(a, work, source, plan, actor, conditions):
-    """Create the fixed V4 measurement panel, never a legacy percentile score."""
+    """Create the fixed selected-scheme-B measurement panel."""
     if a.updates != DEFAULT_BO_UPDATES or official_conditions_path(digest(conditions)) != PHYSICS_CONDITIONS:
-        raise ValueError('New BO measurements require the V4 100-update, fixed 200 Hz protocol')
+        raise ValueError('New BO measurements require the 100-update, fixed 200 Hz protocol')
     keys=calibration_keys()
     lookup={tuple(row['key']):row for row in read(plan['shared_bank'])['structures']}
     if not set(keys) <= set(map(tuple,plan['selected_structure_keys'])):
         raise ValueError('Missing fixed calibration structures in shared plan')
-    a.ppo_algorithm=NATIVE_PPO_ALGORITHM
+    a.ppo_algorithm=CURRENT_PPO_ALGORITHM
     benchmark=dict(initial_actor_sha256=sha(actor),source_plan_sha256=sha(source),updates=a.updates,
         selection_velocity_frame=EVALUATION_VELOCITY_FRAME,ppo_schedule=PPO_SCHEDULE,
         init_at_random_ep_len=True,envs_per_task=MIXED_BO_LAYOUT,
-        ppo_algorithm=NATIVE_PPO_ALGORITHM,native_ppo_settings=NATIVE_PPO_SETTINGS)
+        ppo_algorithm=CURRENT_PPO_ALGORITHM,native_ppo_settings=CURRENT_PPO_SETTINGS)
     manifest=dict(**benchmark,conditions_sha256=digest(conditions),structure_keys=list(map(list,keys)))
     reuse=getattr(a,'reuse_finetuned_panel',None)
     if reuse is not None:
@@ -959,19 +965,55 @@ def search(a, work, source, plan, actor, conditions):
     """Canonical continuous BO using the current four-metric ratios."""
     scoring = read(a.scoring)
     if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD or
-            scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or
-            scoring['benchmark'].get('native_ppo_settings') != NATIVE_PPO_SETTINGS):
-        raise ValueError('Native PPO BO requires a newly measured native panel and original-RPO reference; old data remain historical')
-    a.ppo_algorithm = NATIVE_PPO_ALGORITHM
+            scoring.get('benchmark', {}).get('ppo_algorithm') != CURRENT_PPO_ALGORITHM or
+            scoring['benchmark'].get('native_ppo_settings') != CURRENT_PPO_SETTINGS):
+        raise ValueError('Scheme B BO requires a newly measured B panel and original-RPO reference; old data remain historical')
+    a.ppo_algorithm = CURRENT_PPO_ALGORITHM
     from bo_continuous import search as continuous_search
     from bo_continuous_assets import prepare_candidate
     return continuous_search(sys.modules[__name__], a, work, source, plan, actor,
                              conditions, prepare=prepare_candidate)
 
+
+def prepare_scheme_b_reference(a, work, source, initial, conditions):
+    """Measure the original predicted morphology under the new formal B protocol."""
+    import shutil
+    from finetune_state import select_candidate
+    expected = read(ORIGINAL_RPO_ARCHIVE/'manifest.json')['design_key']
+    original = load_plan(a.reference_plan)
+    shared = load_plan(source)
+    if (original['schema'] != shared['schema'] or
+            any(original['teachers'][t]['checkpoint_sha256'] != shared['teachers'][t]['checkpoint_sha256']
+                for t in TASKS)):
+        raise ValueError('Original reference must use the same shared schema and teacher priors as the candidates')
+    _, candidate = select_candidate(original, design_key=expected)
+    if (list(candidate['structure_key']) != expected or original['selected_structure_keys'] != [expected]
+            or any(len(spec['design_ids']) != 1 for spec in original['teachers'].values())):
+        raise ValueError('Reference plan must describe the single verified original predicted morphology')
+    a.ppo_algorithm=CURRENT_PPO_ALGORITHM
+    a.search_root=work
+    protocol=dict(source_plan_sha256=sha(source), initial_actor_sha256=sha(initial), updates=a.updates,
+        conditions_sha256=digest(conditions), ppo_algorithm=CURRENT_PPO_ALGORITHM,
+        native_ppo_settings=CURRENT_PPO_SETTINGS)
+    resume_pause(work, a.resume_paused)
+    freeze(work/'reference_protocol.json', protocol)
+    reference_plan=work/'reference_plan.json'
+    if not reference_plan.exists(): shutil.copyfile(a.reference_plan, reference_plan)
+    if sha(reference_plan) != sha(a.reference_plan):
+        raise ValueError('Frozen original morphology reference plan changed')
+    result=evaluate(a, work/'candidate', reference_plan, original, initial,
+                    candidate['design_ids']['stairs'],conditions)
+    freeze(work/'reference_result.json',dict(candidate=candidate,student_sha256=result['student_sha256'],
+        ppo_algorithm=CURRENT_PPO_ALGORITHM,report_sha256=sha(work/'candidate/bo_evaluation.json')))
+    measured,_=checked_original_rpo_reference(work,protocol,conditions)
+    if len(measured['pairs']) != 1 or measured['pairs'][0]['feasible'] is not True:
+        raise ValueError('Scheme B original RPO failed one or more tasks; no scoring reference is ready')
+    print('SCHEME_B_ORIGINAL_RPO_REFERENCE_READY',work,flush=True)
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('evaluate', 'initialize', 'search'):
+    for command in ('evaluate', 'initialize', 'search', 'reference'):
         p = sub.add_parser(command)
         roots = p.add_mutually_exclusive_group()
         roots.add_argument('--root', type=Path)
@@ -993,7 +1035,7 @@ def main(argv=None):
             p.add_argument('--measure-only', action='store_true', default=True,
                            help='Prepare only the 50 measured observations (the only current initialize mode)')
         elif command == 'search':
-            p.add_argument('--scoring', type=Path, help='Frozen V4 four-metric original-RPO scoring JSON')
+            p.add_argument('--scoring', type=Path, help='Frozen scheme B four-metric original-RPO scoring JSON')
             p.add_argument('--seed', type=int, default=42)
             p.add_argument('--trials', type=int, default=100, help='Total evaluations including the original 50 initial observations')
             p.add_argument('--history', type=Path, help='Completed prior search to read without modifying it')
@@ -1004,6 +1046,9 @@ def main(argv=None):
             p.add_argument('--warp-cache', type=Path)
             p.add_argument('--template', type=Path)
             p.add_argument('--mesh-dir', type=Path)
+        elif command == 'reference':
+            p.add_argument('--reference-plan', type=Path, required=True,
+                           help='Existing verified original singleton SW-GP/AMP asset plan')
     p = sub.add_parser('score')
     p.add_argument('report', type=Path)
     p.add_argument('--scoring', required=True, type=Path)
@@ -1027,6 +1072,8 @@ def main(argv=None):
         if not work.is_dir():
             parser.error('Completed measurement panel directory does not exist')
         if a.original_rpo_reference is None:
+            if read(work/'manifest.json').get('ppo_algorithm') == CURRENT_PPO_ALGORITHM:
+                parser.error('Scheme B requires --original-rpo-reference pointing to the measured B update-100 reference')
             a.original_rpo_reference = ORIGINAL_RPO_ARCHIVE
         output = a.output.resolve()
         if output.is_relative_to(work) or output.is_relative_to(a.original_rpo_reference.resolve()):
@@ -1044,17 +1091,19 @@ def main(argv=None):
     if a.command == 'score':
         scoring = read(a.scoring)
         report = checked_report(a.report)
+        algorithm = scoring.get('benchmark', {}).get('ppo_algorithm')
         if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD
-                or scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM
-                or report.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM):
-            raise ValueError('The score CLI only accepts V4 four-metric original-RPO scoring')
-        reference, source = checked_original_rpo_reference(ORIGINAL_RPO_ARCHIVE, scoring['benchmark'], report['conditions'])
+                or algorithm not in EXPERT_PRIOR_ALGORITHMS or report.get('ppo_algorithm') != algorithm):
+            raise ValueError('The measurement and four-metric scoring must use the same expert-prior PPO algorithm')
+        reference_root = (ORIGINAL_RPO_ARCHIVE if algorithm == NATIVE_PPO_ALGORITHM
+                          else Path(scoring['original_rpo_reference']['root']))
+        reference, source = checked_original_rpo_reference(reference_root, scoring['benchmark'], report['conditions'])
         weights = {task:{name:row['weight'] for name,row in items.items()}
                    for task,items in scoring['metrics'].items()}
         expected = original_rpo_scoring(reference, source, scoring['benchmark'], scoring['measurement_panel'],
                                         report['conditions'], metric_weights=weights)
         if expected != scoring:
-            raise ValueError('Scoring differs from the canonical V4 original-RPO normalization')
+            raise ValueError('Scoring differs from the measured original-RPO normalization')
         print(json.dumps(objective(report, scoring), indent=2, allow_nan=False))
         return
     if min(a.updates,a.timeout) < 1 or a.gpu < 0 or (a.command == 'search' and a.trials < 50):
@@ -1062,12 +1111,12 @@ def main(argv=None):
     a.root = (a.root or (MIGRATED_ROOT if a.migrated else DEFAULT_ROOT)).resolve()
     if (a.migrated or (a.root/'migration_in_progress.json').is_file()) and not (a.root/'migration_completed.json').is_file():
         parser.error('Complete migration of the selected experiment root before BO')
-    formal = a.command == 'initialize'
+    formal = a.command in ('initialize','reference')
     conditions_path = a.conditions or PHYSICS_CONDITIONS
     conditions = read_conditions(conditions_path)
-    if a.command in ('initialize','evaluate') and (a.updates != DEFAULT_BO_UPDATES or
+    if a.command in ('initialize','evaluate','reference') and (a.updates != DEFAULT_BO_UPDATES or
             official_conditions_path(digest(conditions)) != PHYSICS_CONDITIONS):
-        raise ValueError('New BO measurements require the V4 100-update, fixed 200 Hz protocol')
+        raise ValueError('New BO measurements require the 100-update, fixed 200 Hz protocol')
     if (getattr(a, 'reuse_finetuned_panel', None) or getattr(a, 'measure_only', False)) and 'measurement_dt_s' not in conditions:
         parser.error('Panel reevaluation and measurement-only calibration require 200 Hz conditions')
     if a.command == 'search':
@@ -1077,14 +1126,14 @@ def main(argv=None):
             parser.error('--history-budget requires --history')
         if a.history is not None:
             a.history = a.history.resolve()
-        default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_native_expert_prior'/'scoring.json'
+        default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_pcgrad'/'scoring.json'
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
         if scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD:
             raise ValueError('Continuous BO requires the four-metric original-RPO ratio scoring; historical scores are read-only')
-        if (scoring.get('benchmark', {}).get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or
-                scoring['benchmark'].get('native_ppo_settings') != NATIVE_PPO_SETTINGS):
-            raise ValueError('Native PPO BO requires native original-RPO measurements and initial panel; old scoring remains available for read-only scoring')
+        if (scoring.get('benchmark', {}).get('ppo_algorithm') != CURRENT_PPO_ALGORITHM or
+                scoring['benchmark'].get('native_ppo_settings') != CURRENT_PPO_SETTINGS):
+            raise ValueError('Scheme B BO requires its own original-RPO measurements and initial panel; V4 remains read-only')
         formal = True
         if a.conditions is None:
             conditions_path = official_conditions_path(scoring['conditions_sha256'])
@@ -1110,14 +1159,16 @@ def main(argv=None):
     if getattr(a, 'finetuned', None) and not actor_receipt(a.finetuned).is_file():
         parser.error('--finetuned needs the completed candidate run directory')
     if a.command == 'initialize':
-        label = ('calibration50_native_expert_prior_ppo100_200hz' if uses_current_schedule(a.updates, conditions)
+        label = ('calibration50_pcgrad_ppo100_200hz' if uses_current_schedule(a.updates, conditions)
                  and 'measurement_dt_s' in conditions else calibration_label(conditions, a.updates))
     elif a.command == 'search':
         label = 'search_continuous_four_metrics'
+    elif a.command == 'reference':
+        label = 'original_rpo_reference'
     else:
         label = a.candidate + '_single_seed' if conditions.get('reset_mode') == 'fixed' else a.candidate
     if a.command != 'initialize' and uses_current_schedule(a.updates, conditions):
-        label += '_native_expert_prior_ppo100'
+        label += '_pcgrad_ppo100'
     if a.command != 'initialize' and 'measurement_dt_s' in conditions:
         label += '_200hz'
     work = (a.output or a.root/'bo'/label).resolve()
@@ -1128,6 +1179,8 @@ def main(argv=None):
                 search(a, work, source, plan, actor, conditions)
             elif a.command == 'initialize':
                 initialize(a, work, source, plan, actor, conditions)
+            elif a.command == 'reference':
+                prepare_scheme_b_reference(a, work, source, actor, conditions)
             else:
                 evaluate(a, work, source, plan, actor, a.candidate, conditions)
         except KeyboardInterrupt:

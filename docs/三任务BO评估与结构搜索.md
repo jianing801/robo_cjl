@@ -1,8 +1,8 @@
 # 三任务 BO 评估与连续结构搜索
 
-更新：2026-11-25。本流程从同一份获选共享 Actor 出发，给每个结构相同的 100 次三任务联合 PPO 微调预算，再用固定工况实测指标比较硬件。正式搜索分为前 50 个已测结构和后 50 个连续 BO 候选；2500 个格点是专家训练结构库，**不是 BO 的搜索边界**。
+更新：2026-11-26。本流程从同一份获选共享 Actor 出发，给每个结构相同的 100 次三任务联合 PPO 微调预算，再用固定工况实测指标比较硬件。正式搜索分为前 50 个已测结构和后 50 个连续 BO 候选；2500 个格点是专家训练结构库，**不是 BO 的搜索边界**。
 
-本轮正式方法为 `shared_native_ppoamp_expert_prior_v4`。原机第 100 次更新的三任务固定工况测量已完成，归档及十二项分母已更新。后续 1000 代训练用于独立的收敛诊断，旧算法的初始 50 个观测和原机实测用于历史对照。前 50 个结构和后 50 个候选均需要采用 V4 协议。详见[共享策略原生 PPO 微调说明](共享策略原生PPO微调说明.md)。
+正式候选微调采用已验证的方案 B，算法身份 `shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std`（AMP 保持专家原始动作噪声向量，Actor 采用 PCGrad）。前 50 个和后 50 个候选均采用 B；以前的 V4 评估及分母保留为历史对照，不可混合。新 B 的第 100 代原机基准尚需实测，未实测前不能启动正式 BO。详见[方案 B 对照结果](共享微调三任务收敛纠正实验.md)。
 
 [总流程](跨形态多任务共享策略训练流程.md) · [共享蒸馏与选模](共享策略蒸馏详细说明.md) · [原机实测基准](原始配置基准.md)
 
@@ -17,10 +17,10 @@ entry="$PWD/robolab/experiments/multitask_morphology"
 experiment="$PWD/robolab/logs/multitask_full2500_physical_migrated"
 continuation="$experiment/shared_policy_round5"
 data="$experiment/bo"
-panel="$data/calibration50_native_expert_prior_ppo100_200hz"
-reference="$PWD/docs/reference/rpo_original_configuration"
-scoring="$data/scoring_original_rpo_four_metrics_native_expert_prior"
-search="$data/search_continuous_four_native_expert_prior_100"
+panel="$data/calibration50_pcgrad_ppo100_200hz"
+reference="$data/original_rpo_reference_pcgrad_ppo100_200hz"
+scoring="$data/scoring_original_rpo_four_metrics_pcgrad"
+search="$data/search_continuous_four_pcgrad_100"
 ```
 
 已有 `measurements_completed.json` 且与原机基准的共享起点、原生 PPO 算法身份、微调、工况一致时，直接使用原始测量进入第二步，**无需重做微调或评估**。旧算法的 50 个观测虽保留，但不是新算法的数据。否则准备前 50 个结构：
@@ -31,11 +31,24 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
   --output "$panel" --measure-only --gpu 0
 ```
 
-程序按原第 21 组固定顺序得到 50 个观测（与 200 个蒸馏选模结构无重叠）。已有同协议微调产物可用 `--reuse-finetuned-panel <目录>` 复用模型，只补缺失的固定工况测量。原机直接使用仓库中 SHA-256 校验的正式第 100 代归档，包含 `reference_protocol.json`、`bo_evaluation.json`、源训练与检查点身份和三项原始轨迹。[原机基准](原始配置基准.md#2026-11-25-实测基准) 前 50 个结构和后续新候选均从同一获选 Actor 独立开始。
+程序按原第 21 组固定顺序得到 50 个观测（与 200 个蒸馏选模结构无重叠）。已有同协议微调产物可用 `--reuse-finetuned-panel <目录>` 复用模型，只补缺失的固定工况测量。方案 B 的原机基准先用已验证的原机单结构预测资产及参考动作计划重新实测；V4 档案不作为 B 的分母。原机基准包含 `reference_protocol.json`、`candidate/bo_evaluation.json`、源训练与检查点身份和三项原始轨迹。[历史 V4 基准](原始配置基准.md#2026-11-25-实测基准) 前 50 个结构和后续新候选均从同一获选 Actor 独立开始。
+
+### 准备方案 B 的原机基准
+
+`reference_plan.json` 必须是已验证的原机预测模型单结构计划（不是原厂 URDF，也不是全结构库）。例如租卡已经保存的 `/root/sj-tmp/bo-ppo100-round5-data/rpo_original_025_030_10010l_4340p_ppo100_200hz/evaluation/reference_plan.json`。
+
+```bash
+conda run --no-capture-output -n robo_cjl python "$entry/bo.py" reference \
+  --root "$experiment" --shared-continuation "$continuation" \
+  --reference-plan /root/sj-tmp/bo-ppo100-round5-data/rpo_original_025_030_10010l_4340p_ppo100_200hz/evaluation/reference_plan.json \
+  --output "$reference" --gpu 0
+```
+
+原机和候选均用同一个获选共享 Actor，100 次 B 更新和三项固定 200 Hz 测量。只有实测成功并通过全部身份校验后才能冻结新分母。
 
 ### 微调与固定工况
 
-- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor，各自复制专家原生 Critic、实际归一化及 23 维动作标准差，按任务门控选择独立 Critic/探索参数；AMP 判别器在独立副本上随训练同步更新，老师和物理参数不改。
+- 单仿真进程 4096 个环境，上楼、负重、跑步分别 1366、1365、1365 个；三任务共享 Actor，各自复制专家原生 Critic、实际归一化及 23 维动作标准差，按任务门控选择独立 Critic/探索参数；AMP 的探索向量冻结，其他两任务可学习，三任务 Actor 梯度采用 PCGrad；AMP 判别器在独立副本上随训练同步更新，老师和物理参数不改。
 - 普通 PPO 随机初始化回合步数计数，先做 10 次只更新 Critic 的预热（不计入正式预算），每个候选做 **100 次原生 PPO 更新**，每次每环境采 24 步，训练 5 个 epoch、4 个小批/epoch；禁止用近邻结构替代实际提议。
 - 微调后冻结 Actor，固定种子 `20261118`，每任务一条 20 秒试次（50 个结构共 150 条）。评估关闭观测噪声、推力、动力学和初态随机化及动作采样，50 Hz 控制、200 Hz 物理采样（步长 5 ms，每任务 4000 个物理步）。
 
@@ -74,7 +87,7 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
 | 膝踝最大额定扭矩占比 | 0.10 | 0.15 | 0.20 |
 | 合计 | 1.00 | 1.00 | 1.00 |
 
-上表是本轮正式搜索采用的默认权重。上楼优先考虑机身平稳性，负重优先考虑运输成本，跑步优先考虑速度跟踪。权重是工程偏好，保留完整原始指标以便做敏感性分析。原机十二项分母见[实测基准](原始配置基准.md#2026-11-25-实测基准)，完整精度的分母及其倒数见[归一化文件](reference/rpo_original_configuration/normalization.json)。固定参照和线性加权可参考 [OECD/JRC 综合指标构建手册](https://doi.org/10.1787/9789264043466-en)。
+上表是本轮正式搜索采用的默认权重。上楼优先考虑机身平稳性，负重优先考虑运输成本，跑步优先考虑速度跟踪。权重是工程偏好，保留完整原始指标以便做敏感性分析。B 的十二项分母由本轮原机第100代真实测量确定；[既有 V4 分母](reference/rpo_original_configuration/normalization.json)仅为历史对照。固定参照和线性加权可参考 [OECD/JRC 综合指标构建手册](https://doi.org/10.1787/9789264043466-en)。
 
 ```bash
 conda run --no-capture-output -n robo_cjl python "$entry/bo.py" freeze-scoring \
@@ -102,7 +115,7 @@ conda run --no-capture-output -n robo_cjl python start.py bo --gpu 0 \
   --scoring "$scoring/scoring.json" --bo-output "$search"
 ```
 
-不传 `--scoring` 时，搜索默认读取实验根目录下 `bo/scoring_original_rpo_four_metrics_native_expert_prior/scoring.json`。这个文件必须先冻结成功；其他四指标权重配置的评分目录显式传 `--scoring`。库外 AMP 参考动作使用独立 HHTools Python；默认自动定位，必要时传 `--reference-python <HHTools Python 路径>`。
+不传 `--scoring` 时，搜索默认读取实验根目录下 `bo/scoring_original_rpo_four_metrics_pcgrad/scoring.json`。这个文件必须先冻结成功；其他四指标权重配置的评分目录显式传 `--scoring`。库外 AMP 参考动作使用独立 HHTools Python；默认自动定位，必要时传 `--reference-python <HHTools Python 路径>`。
 
 - 前 50 个结构只加载冻结的原始观测和本次评分；首个新提议是 `BO_TRIAL 51 / 100`。新设计在大腿 0.20–0.40 m、小腿 0.25–0.45 m 的连续范围内搜索，默认五款膝电机和五款踝电机全部参与（25 种离散电机组合）。
 - 约束 GP 对全部已完成的历史观测拟合，提议来自 Sobol 点与 L-BFGS-B 有界局部优化，最大化约束期望改进（EI × 可行概率）。改进阈值为所有已实测可行结构中的全局最优综合代价。不能把有限格点采样作为连续优化，也不因某款电机额外加罚。
@@ -124,7 +137,7 @@ conda run --no-capture-output -n robo_cjl python start.py bo --gpu 0 \
 --allowed-ankles DM-J4340P-2EC DM-J4340P-2EC-V1.1-48V DM-J6216P-2EC
 ```
 
-此参数只限制新增提议，不删除已测的 RS06/8009P 观测，也不修改评分。对在同一评分和协议下已完成的搜索，使用 `--history <已完成搜索目录>` 和新的独立 `--output`，若历史目录包含多个完成预算，应以 `--history-budget <编号>` 明确选择；总 `--trials` 设为希望达到的完整预算。调整四指标任务内权重时使用新的评分文件，并从前 50 个 V4 观测开始独立搜索。
+此参数只限制新增提议，不删除已测的 RS06/8009P 观测，也不修改评分。对在同一评分和协议下已完成的搜索，使用 `--history <已完成搜索目录>` 和新的独立 `--output`，若历史目录包含多个完成预算，应以 `--history-budget <编号>` 明确选择；总 `--trials` 设为希望达到的完整预算。调整四指标任务内权重时使用新的评分文件，并从前 50 个 B 观测开始独立搜索。
 
 ## 暂停恢复与保存产物
 
@@ -157,7 +170,7 @@ conda run --no-capture-output -n robo_cjl python start.py 微调 \
   --candidate-task stairs --candidate-design-id 真实结构ID --gpu 0
 ```
 
-`--candidate-task` 可选 `stairs`、`backpack` 和 `run`，以所在任务库查询结构 ID。默认微调 100 代、4096 环境、独立 10 代 Critic 预热，使用同一原生 V4 PPO 及三项各一条 20 秒、200 Hz 固定工况评估。输出正式 `bo_evaluation.json`。通过 `--finetune-output` 指定单候选输出目录，人工暂停后用相同命令加 `--resume-paused` 恢复。已有相同候选、起始模型、预算和 PPO 配置的完整微调可用 `bo.py evaluate --finetuned` 复用。
+`--candidate-task` 可选 `stairs`、`backpack` 和 `run`，以所在任务库查询结构 ID。默认微调 100 代、4096 环境、独立 10 代 Critic 预热，使用同一方案 B PPO 及三项各一条 20 秒、200 Hz 固定工况评估。输出正式 `bo_evaluation.json`。通过 `--finetune-output` 指定单候选输出目录，人工暂停后用相同命令加 `--resume-paused` 恢复。已有相同候选、起始模型、预算和 PPO 配置的完整微调可用 `bo.py evaluate --finetuned` 复用。
 
 硬件性能 GP 实现也用于独立 [Rough BO](../rough_bo/粗糙地形优化说明.md)；其旧单任务教师和评价协议不等于三任务正式 BO。
 

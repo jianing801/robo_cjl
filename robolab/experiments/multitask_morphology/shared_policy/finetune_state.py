@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from contract import sha, structure_key, write_new
-from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, NATIVE_PPO_STATE_KIND
+from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, NATIVE_PPO_STATE_KIND, EXPERT_PRIOR_ALGORITHMS
 from ppo_channel import publish
 
 
@@ -190,13 +190,13 @@ def _v4_policy_contract(policy):
 
 
 def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, metrics=None, *,
-                           warmup_completed=10, training_reward=None):
+                           warmup_completed=10, training_reward=None, ppo_algorithm=NATIVE_PPO_ALGORITHM):
     """Atomically commit the v4 native state without mutating old v2/v3 archives.
 
     Index zero is the actor's original state *after* the separate Critic-only
     warmup. The actor never changes during that warmup.
     """
-    if (type(completed_updates) != int or completed_updates < 0
+    if (ppo_algorithm not in EXPERT_PRIOR_ALGORITHMS or type(completed_updates) != int or completed_updates < 0
             or warmup_completed != NATIVE_PPO_SETTINGS['critic_warmup_updates']):
         raise ValueError('Native checkpoint requires the completed Critic-only warmup')
     folder = Path(root).resolve()/'checkpoints'
@@ -207,7 +207,7 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
     path = folder/f'update_{completed_updates:06d}_{uuid.uuid4().hex}.pt'
     actor = learner.policy.actor
     prior = _v4_policy_contract(learner.policy)
-    value = dict(kind=NATIVE_PPO_STATE_KIND, ppo_algorithm=NATIVE_PPO_ALGORITHM,
+    value = dict(kind=NATIVE_PPO_STATE_KIND, ppo_algorithm=ppo_algorithm,
         actor=actor.state_dict(), policy=learner.policy.state_dict(),
         optimizer=learner.optimizer.state_dict(), learning_rate=float(learner.learning_rate),
         amp_discriminator=learner.amp_discriminator.state_dict(), disc_optimizer=learner.disc_optimizer.state_dict(),
@@ -221,7 +221,7 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
         value['training_reward'] = training_reward
     publish(path, value)
     record = dict(completed_updates=completed_updates, manifest_sha256=manifest_sha256,
-        ppo_algorithm=NATIVE_PPO_ALGORITHM, state_kind=NATIVE_PPO_STATE_KIND,
+        ppo_algorithm=ppo_algorithm, state_kind=NATIVE_PPO_STATE_KIND,
         teacher_checkpoint_sha256=prior['teacher_checkpoint_sha256'], warmup_completed=warmup_completed,
         path=path.name, sha256=sha(path), metrics=metrics)
     if training_reward is not None:
@@ -230,13 +230,14 @@ def save_native_checkpoint(root, learner, completed_updates, manifest_sha256, me
     return record
 
 
-def load_native_checkpoint(root, learner, manifest_sha256):
+def load_native_checkpoint(root, learner, manifest_sha256, *, ppo_algorithm=NATIVE_PPO_ALGORITHM):
     folder = Path(root).resolve()/'checkpoints'
     history = checkpoint_history(root, manifest_sha256)
     if not history:
         return None
     record = history[-1]
-    if record.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM or record.get('state_kind') != NATIVE_PPO_STATE_KIND:
+    if (ppo_algorithm not in EXPERT_PRIOR_ALGORITHMS or record.get('ppo_algorithm') != ppo_algorithm
+            or record.get('state_kind') != NATIVE_PPO_STATE_KIND):
         raise ValueError('Cannot resume legacy PPO or native V3 state as a native expert-prior V4 learner')
     state_path = _checkpoint_blob(folder, record)
     if sha(state_path) != record['sha256']:
@@ -282,7 +283,8 @@ def prune_native_checkpoints(root, history, retain_updates=(0, 100, 200, 500, 80
     folder = Path(root).resolve()/'checkpoints'
     if folder.resolve() != folder or not history:
         raise ValueError('Native PPO checkpoint directory/history differs')
-    if any(row.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM for row in history):
+    algorithm = history[-1].get('ppo_algorithm')
+    if algorithm not in EXPERT_PRIOR_ALGORITHMS or any(row.get('ppo_algorithm') != algorithm for row in history):
         raise ValueError('Native PPO pruning may not touch legacy state')
     latest = history[-1]
     if sha(_checkpoint_blob(folder, latest)) != latest['sha256']:

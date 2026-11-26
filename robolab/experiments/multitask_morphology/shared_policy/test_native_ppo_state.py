@@ -91,6 +91,20 @@ def test_native_resume_rejects_legacy_learning_state(tmp_path):
         load_native_checkpoint(tmp_path,learner(),'a'*64)
 
 
+def test_formal_scheme_b_checkpoint_isolated_from_v4(tmp_path):
+    from finetune_settings import CURRENT_PPO_ALGORITHM
+    original=learner(); update(original)
+    digest='e'*64
+    for n in range(3):
+        receipt=save_native_checkpoint(tmp_path,original,n,digest,ppo_algorithm=CURRENT_PPO_ALGORITHM)
+        assert receipt['ppo_algorithm']==CURRENT_PPO_ALGORITHM
+    history=checkpoint_history(tmp_path,digest)
+    prune_native_checkpoints(tmp_path,history)
+    with pytest.raises(ValueError,match='Cannot resume'):
+        load_native_checkpoint(tmp_path,learner(),digest)
+    assert load_native_checkpoint(tmp_path,learner(),digest,ppo_algorithm=CURRENT_PPO_ALGORITHM)['completed_updates']==2
+
+
 def test_native_settings_match_joint_ppo_contract():
     assert NATIVE_PPO_SETTINGS['critic_warmup_updates']==10
     assert NATIVE_PPO_ALGORITHM == 'shared_native_ppoamp_expert_prior_v4'

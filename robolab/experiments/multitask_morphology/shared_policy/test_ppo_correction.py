@@ -17,12 +17,19 @@ def test_fixed_amp_std_preserves_exact_inherited_vector():
     assert not torch.equal(learner.policy.std[:2],before[:2])
 
 
-def test_experimental_settings_cannot_be_official_bo():
+def test_legacy_ablation_identity_and_formal_scheme_b():
     from finetune_settings import NATIVE_PPO_SETTINGS, correction_settings
     assert correction_settings('native')==NATIVE_PPO_SETTINGS
     fixed=correction_settings('fixed_amp_std')
     assert fixed!=NATIVE_PPO_SETTINGS and fixed['fixed_expert_std_tasks']==['run']
     assert 'fixed_expert_std_tasks' not in NATIVE_PPO_SETTINGS
+    from finetune_settings import (CURRENT_PPO_ALGORITHM,CURRENT_PPO_SETTINGS,NATIVE_PPO_ALGORITHM,
+                                   NATIVE_PPO_PROFILES,resolve_training_profile)
+    algorithm,profile,settings=resolve_training_profile()
+    assert algorithm==CURRENT_PPO_ALGORITHM!=NATIVE_PPO_ALGORITHM
+    assert profile=='fixed_amp_std_pcgrad' and settings==correction_settings(profile)
+    assert settings==CURRENT_PPO_SETTINGS==NATIVE_PPO_PROFILES[algorithm]
+    assert resolve_training_profile(profile)==(NATIVE_PPO_ALGORITHM,profile,settings)
 
 
 def test_pcgrad_removes_pairwise_conflicting_component_without_changing_aligned_sum():

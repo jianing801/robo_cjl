@@ -44,7 +44,7 @@ CORRECTION_PROFILES = ('native', 'fixed_amp_std', 'fixed_amp_std_pcgrad')
 
 
 def correction_settings(profile):
-    """Ablation identities cannot qualify as the unchanged official BO setup."""
+    """The tested correction profiles retain distinct settings."""
     if profile == 'native':
         return dict(NATIVE_PPO_SETTINGS)
     if profile == 'fixed_amp_std':
@@ -52,3 +52,19 @@ def correction_settings(profile):
     if profile == 'fixed_amp_std_pcgrad':
         return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic')
     raise ValueError(f'Unknown experimental PPO profile: {profile}')
+
+
+# A new identity keeps the selected B protocol distinct from the archived V4
+# calibration and from the original controlled ablation receipts.
+CURRENT_PPO_PROFILE = 'fixed_amp_std_pcgrad'
+CURRENT_PPO_ALGORITHM = 'shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std'
+CURRENT_PPO_SETTINGS = correction_settings(CURRENT_PPO_PROFILE)
+NATIVE_PPO_PROFILES[CURRENT_PPO_ALGORITHM] = CURRENT_PPO_SETTINGS
+EXPERT_PRIOR_ALGORITHMS = (NATIVE_PPO_ALGORITHM, CURRENT_PPO_ALGORITHM)
+
+
+def resolve_training_profile(experimental_profile=None):
+    """Default to the selected B; explicit profiles reproduce the isolated studies."""
+    if experimental_profile is None:
+        return CURRENT_PPO_ALGORITHM, CURRENT_PPO_PROFILE, CURRENT_PPO_SETTINGS
+    return NATIVE_PPO_ALGORITHM, experimental_profile, correction_settings(experimental_profile)

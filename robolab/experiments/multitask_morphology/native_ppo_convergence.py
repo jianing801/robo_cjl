@@ -87,7 +87,7 @@ def run_training(bo, a, root, tuning, source, initial, candidate, updates):
                    '--student', initial, '--output', tuning, '--design-id', candidate['design_ids']['stairs'],
                    '--updates', str(updates), '--num-envs', '4096', '--seed', str(a.seed),
                    '--profile', 'robust', '--randomization-strength', '1', '--init-at-random-ep-len',
-                   '--headless', '--device', 'cuda:0']
+                   '--headless', '--device', 'cuda:0', '--experimental-profile', 'native']
         if (tuning/'manifest.json').exists():
             command.append('--resume')
         status(root, 'smoke' if updates == 1 else 'training', log_dir=str(log_dir), updates=updates)

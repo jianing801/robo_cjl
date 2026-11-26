@@ -231,7 +231,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         tasks=verify_expert_initialization(tasks, learner, adapter, expected_hashes)))
     print('NATIVE_EXPERT_PRIORS_VERIFIED',
           {task:float(learner.policy.std[i].detach().mean()) for i,task in enumerate(TASKS)},flush=True)
-    restored = load_native_checkpoint(root, learner, digest)
+    restored = load_native_checkpoint(root, learner, digest, ppo_algorithm=a.ppo_algorithm)
     learner.verify_fixed_std()
     if restored is not None and restored['completed_updates'] != completed:
         raise ValueError('Restored native learning state differs from its committed update')
@@ -283,7 +283,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         del original_actor
         write_new(attempt/'critic_warmup.json', warmup_rows)
         receipt = save_native_checkpoint(root, learner, 0, digest, warmup_completed=warmup,
-                                         training_reward=reward_summary)
+                                         training_reward=reward_summary, ppo_algorithm=a.ppo_algorithm)
         history.append(receipt)
     elif restored['warmup_completed'] != warmup:
         raise ValueError('Native checkpoint has an incomplete Critic warmup')
@@ -303,7 +303,8 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         del batches
         check_pause(root)
         receipt = save_native_checkpoint(root, learner, update, digest, metrics,
-                                         warmup_completed=warmup, training_reward=reward_summary)
+                                         warmup_completed=warmup, training_reward=reward_summary,
+                                         ppo_algorithm=a.ppo_algorithm)
         history.append(receipt)
         prune_native_checkpoints(root, history, retain_updates=retain_updates)
         step_history.extend(reward_history_rows([receipt], TASKS))
@@ -315,7 +316,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
 
 
 def main():
-    from finetune_settings import NATIVE_PPO_ALGORITHM, NATIVE_PPO_SETTINGS, CORRECTION_PROFILES, correction_settings
+    from finetune_settings import CORRECTION_PROFILES, resolve_training_profile
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -333,10 +334,12 @@ def main():
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-paused', action='store_true')
     parser.add_argument('--compact-training-artifacts', action='store_true')
-    parser.add_argument('--experimental-profile', choices=CORRECTION_PROFILES, default='native',
-                        help='Isolated correction study; non-native settings are not valid formal BO scoring')
+    parser.add_argument('--experimental-profile', choices=CORRECTION_PROFILES, default=None,
+                        help='Explicit isolated legacy control/ablation; default is formal scheme B')
     AppLauncher.add_app_launcher_args(parser)
     a = parser.parse_args()
+    explicit_profile = a.experimental_profile
+    a.ppo_algorithm, a.experimental_profile, settings = resolve_training_profile(explicit_profile)
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
         parser.error('Mixed training requires a CUDA device, headless mode and a positive update budget')
     counts = task_counts(a.num_envs)
@@ -353,13 +356,13 @@ def main():
     manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
               updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
-              ppo_algorithm=NATIVE_PPO_ALGORITHM, native_ppo_settings=correction_settings(a.experimental_profile),
+              ppo_algorithm=a.ppo_algorithm, native_ppo_settings=settings,
               teacher_checkpoint_sha256={name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS},
               init_at_random_ep_len=a.init_at_random_ep_len,
               envs_per_task=dict(zip(TASKS, counts, strict=True)), steps_per_task=STEPS_PER_TASK,
               compact_training_artifacts=a.compact_training_artifacts,
               sources={name: sha(HERE/name) for name in files})
-    if a.experimental_profile != 'native':
+    if explicit_profile not in (None, 'native'):
         manifest['experimental_profile'] = a.experimental_profile
     with run_lock(root):
         if a.resume or a.resume_paused:

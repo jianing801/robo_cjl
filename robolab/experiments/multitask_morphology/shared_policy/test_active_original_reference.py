@@ -109,9 +109,16 @@ def test_score_cli_refuses_old_profile_or_fabricated_reference_scale(tmp_path,ca
     assert json.loads(capsys.readouterr().out)['mean_objective']==pytest.approx(1.)
     scoring['metrics']['stairs']['cot']['baseline']*=2
     path.write_text(json.dumps(scoring),encoding='utf8')
-    with pytest.raises(ValueError,match='canonical V4'):
+    with pytest.raises(ValueError,match='measured original-RPO'):
         bo.main(flags)
     scoring['method']=bo.ORIGINAL_RPO_SCORING_METHOD
     path.write_text(json.dumps(scoring),encoding='utf8')
-    with pytest.raises(ValueError,match='only accepts V4'):
+    with pytest.raises(ValueError,match='four-metric scoring'):
         bo.main(flags)
+
+
+def test_scheme_b_refuses_v4_reference_archive():
+    new_protocol=dict(protocol(),ppo_algorithm=bo.CURRENT_PPO_ALGORITHM,
+                      native_ppo_settings=bo.CURRENT_PPO_SETTINGS)
+    with pytest.raises(ValueError,match='Scheme B requires its own measured'):
+        bo.checked_original_rpo_reference(bo.ORIGINAL_RPO_ARCHIVE,new_protocol,conditions())
