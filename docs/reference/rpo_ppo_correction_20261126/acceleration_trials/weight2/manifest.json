@@ -1,0 +1,138 @@
+{
+  "kind": "shared_candidate_finetuning_mixed",
+  "plan_sha256": "f04cd26293b0d5ce286b09316b98dc282a7b3ac4244af99e71fe3de570e1a3e9",
+  "initial_actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "updates": 1000,
+  "seed": 20261104,
+  "collection_protocol": {
+    "version": "shared_randomization_v2",
+    "profile": "robust",
+    "protocol_hash": "19bf167e5ae88091c8441ceb59f193e145c01595ee002e71a2526711f78d66d0",
+    "strength": 1.0,
+    "source_sha256": {
+      "randomization.py": "952a3a8764af1e1ade1e75002d042a8b4d6cc757b93983ee5b47496a87e1a717",
+      "student_observations.py": "4b1b57891253ad1fb17390d7c7e854638211ca84a0eb1c4b73257a8eda5b302e",
+      "scenario_sampling.py": "db44e3cc8ee477f70ca77a93cff1bf3db2519ab0bae88d8771e7d2f02d4920c8",
+      "rollout.py": "ee89155427cc77dd27661041fe81ad8bc44a8ace452d059402fa4bee6c283c03",
+      "rollout_amp.py": "122e2845a383fd637a1e385b1541d60f6d6f69f51447ccb602b70b3e0666f675",
+      "stair_course.py": "3aa475887743b5a8c136994b75516a542bf303bccac6b1a14a97f70d442d0280"
+    }
+  },
+  "ppo_schedule": {
+    "epochs": 5,
+    "minibatches": 4
+  },
+  "ppo_algorithm": "shared_native_ppoamp_expert_prior_v4",
+  "native_ppo_settings": {
+    "steps_per_env": 24,
+    "epochs": 5,
+    "minibatches": 4,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip_param": 0.2,
+    "value_loss_coef": 1.0,
+    "use_clipped_value_loss": true,
+    "schedule": "adaptive",
+    "desired_kl": 0.01,
+    "initial_learning_rate": 0.0001,
+    "adaptive_learning_rate_bounds": [
+      1e-05,
+      0.01
+    ],
+    "max_grad_norm": 1.0,
+    "learn_noise_std": true,
+    "entropy_coefficients": {
+      "stairs": 0.005,
+      "backpack": 0.005,
+      "run": 0.01
+    },
+    "symmetry_augmentation": true,
+    "symmetry_tasks": [
+      "stairs",
+      "run"
+    ],
+    "mirror_loss_coef": 0.2,
+    "critic_warmup_updates": 10,
+    "critic_observation_normalization": {
+      "stairs": "identity",
+      "backpack": "identity",
+      "run": "teacher_native_prefix"
+    },
+    "amp_discriminator_training": true,
+    "amp_disc_learning_rate": 0.0001,
+    "amp_disc_buffer_size": 100,
+    "amp_style_reward_scale": 1.5,
+    "amp_task_style_lerp": 0.6,
+    "amp_loss_type": "LSGAN",
+    "amp_gradient_penalty": 10.0,
+    "amp_disc_trunk_weight_decay": 0.001,
+    "amp_disc_linear_weight_decay": 0.1,
+    "actor_initialization": "frozen_round5_shared_actor",
+    "noise_initialization": "frozen_expert_learned_std",
+    "noise_std_shape": [
+      3,
+      23
+    ],
+    "critic_initialization": "frozen_expert_critic",
+    "critic_architecture": "three_independent_teacher_native",
+    "ppo_optimizer_initialization": "fresh_adam",
+    "amp_disc_optimizer_initialization": "fresh_adam",
+    "fixed_expert_std_tasks": [
+      "run"
+    ],
+    "actor_gradient_projection": "pcgrad_cyclic",
+    "actor_gradient_weights": {
+      "stairs": 2.0,
+      "backpack": 1.0,
+      "run": 1.0
+    },
+    "actor_gradient_weight_normalization": "mean_one"
+  },
+  "teacher_checkpoint_sha256": {
+    "stairs": "dbbe631bf0b95d3484e9014ec98b5c9766ea080eee5fa968a3848eb40ba0275b",
+    "backpack": "095c5d11147f0c1df52539157ca49f4a3254750bf4b6fc435e9481aa22b1d259",
+    "run": "e2116d5d173955dba8ac446825110ada24f8f96d0a3244c7708f3b510b6995d0"
+  },
+  "init_at_random_ep_len": true,
+  "envs_per_task": {
+    "stairs": 1366,
+    "backpack": 1365,
+    "run": 1365
+  },
+  "steps_per_task": 24,
+  "compact_training_artifacts": false,
+  "sources": {
+    "mixed_finetune.py": "14b0b55061c8ffca9d1363ae8e5e3095412753b1110e55b42e52eb4e735e0743",
+    "finetune_common.py": "466423f4b356f53330daaca583c84302f5c9f208361d56405464c271e617d800",
+    "mixed_scene.py": "fc7e60c6a74bcbbbabe0b91388f651eb8d7b4f9e71397f7df1651284fd317f70",
+    "mixed_batch.py": "a974692776d125358cc7ca473aa9bd02b326b9a634b5be1f34b6eae06ece0904",
+    "native_ppo.py": "a2b3c9f8c202f2f4ec7604c65eec6bb0f5edc735b770b8080210fd2b64548acd",
+    "native_observations.py": "337ebb71724b1f615eee88a359d14993c2862617bcbf12e28c706884624dea1c",
+    "rollout.py": "ee89155427cc77dd27661041fe81ad8bc44a8ace452d059402fa4bee6c283c03",
+    "rollout_amp.py": "122e2845a383fd637a1e385b1541d60f6d6f69f51447ccb602b70b3e0666f675",
+    "student.py": "fb485ddba283e30314d8b46fa27ae09bcba2f5ff4bbdcf111ffe934e7962022d",
+    "training_reward.py": "415cb20c7e3fc6f7cbe6edacbc387cfa2012bc38e1f6b51c250cab222f9af398",
+    "finetune_state.py": "e91952e79169a1cdd3b02413cd080f89621f055aa1aed292df55220b49cc1a73",
+    "finetune_settings.py": "ed8314a036ad38bdb638a3e8944ec18f6aa276b0ed0b737beecc7acfb35c4c75",
+    "native_resume_compat.py": "e301a9082029ea4094aeab7f23345c5fda775faac4ebb07a7452d1c6977cb201",
+    "../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py": "5bcbf4f706fc854673f1f0ac9c2e3b1d0cfe74e4e765c7972a9c60a6dc806898",
+    "../../../../rsl_rl/rsl_rl/algorithms/ppo.py": "9a817fa4e97de3baa48a6b1c9acc1da3873627eed28d494d11468851a7ba6a57",
+    "../../../../rsl_rl/rsl_rl/storage/rollout_storage.py": "aa3a33b4b8e912520fc6e3f157fd1350f730a3f507a856bdfab48249e0701202",
+    "../../../../rsl_rl/rsl_rl/storage/circular_buffer.py": "ac06641bc867d523cdf90b18148b2df244c036647564058342b3731365958723",
+    "../../../../rsl_rl/rsl_rl/modules/amp.py": "988161dc5cdc4f5bba4fcb1bd348f9075f78e0b50ec87c8af963333b9e4c009f"
+  },
+  "experimental_profile": "fixed_amp_std_pcgrad_stairs_weight2"
+}
