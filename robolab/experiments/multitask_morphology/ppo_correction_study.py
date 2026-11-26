@@ -79,9 +79,16 @@ def write_diagnostics(bo,folder,tuning,previous):
         ax.set_title(label);ax.set_xlabel('PPO updates');ax.set_ylabel('Mean reward');ax.grid(alpha=.2)
     fig.savefig(folder/'mean_reward.png',dpi=170);plt.close(fig)
     history=checkpoint_history(tuning,bo.sha(tuning/'manifest.json'))[1:]
-    expected_weights=bo.read(tuning/'manifest.json')['native_ppo_settings'].get('actor_gradient_weights')
+    settings=bo.read(tuning/'manifest.json')['native_ppo_settings']
+    expected_weights=settings.get('actor_gradient_weights')
     if expected_weights and (len(history)!=UPDATES or any(r['metrics'].get('actor_gradient_weights')!=expected_weights for r in history)):
         raise ValueError('Weighted Actor task gradients were not used on every formal update')
+    if layout:=settings.get('envs_per_task'):
+        samples=read_csv(tuning/'training_reward.csv')
+        expected={(i,t):layout[t]*settings['steps_per_env'] for i in range(1,UPDATES+1) for t in TASKS}
+        actual={(int(r['update']),r['task']):int(r['reward_samples']) for r in samples}
+        if len(samples)!=len(expected) or actual!=expected:
+            raise ValueError('Actual sample allocation differs from the experimental environment layout')
     with (folder/'ppo_diagnostics.csv').open('w',newline='',encoding='utf8') as stream:
         keys=('learning_rate','mean_action_std','value','surrogate','entropy','collection_seconds','update_seconds')
         subs=('kl','clip_fraction','explained_variance','mean_action_std')
@@ -108,8 +115,10 @@ def verified_corrected_actor(tuning, origin_manifest, profile, updates=UPDATES):
     if (manifest.get('experimental_profile')!=profile or manifest['native_ppo_settings']!=correction_settings(profile)
             or manifest['native_ppo_settings']==NATIVE_PPO_SETTINGS or manifest['updates']!=updates):
         raise ValueError('Unexpected experimental training identity')
-    for k in ('plan_sha256','initial_actor_sha256','candidate','seed','envs_per_task','collection_protocol','ppo_schedule','init_at_random_ep_len','teacher_checkpoint_sha256'):
+    for k in ('plan_sha256','initial_actor_sha256','candidate','seed','collection_protocol','ppo_schedule','init_at_random_ep_len','teacher_checkpoint_sha256'):
         if manifest[k]!=origin_manifest[k]: raise ValueError(f'Correction changed frozen control setting {k}')
+    if manifest['envs_per_task']!=correction_settings(profile).get('envs_per_task',origin_manifest['envs_per_task']):
+        raise ValueError('Correction changed the specified environment allocation')
     receipt=bo.read(tuning/'training_completed.json');actor=tuning/'shared_actor_finetuned.pt'
     if (receipt['manifest_sha256']!=digest or receipt['ppo_updates']!=updates or Path(receipt['student']).resolve()!=actor
             or receipt['student_sha256']!=bo.sha(actor) or receipt['candidate']!=manifest['candidate']):

@@ -353,7 +353,13 @@ def main():
     a.ppo_algorithm, a.experimental_profile, settings = resolve_training_profile(explicit_profile)
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
         parser.error('Mixed training requires a CUDA device, headless mode and a positive update budget')
-    counts = task_counts(a.num_envs)
+    layout=settings.get('envs_per_task')
+    if layout is not None:
+        if set(layout)!=set(TASKS) or sum(layout.values())!=a.num_envs or any(type(v) is not int or v<1 for v in layout.values()):
+            parser.error('Experimental environment allocation requires the exact frozen per-task counts')
+        counts=tuple(layout[t] for t in TASKS)
+    else:
+        counts=task_counts(a.num_envs)
     plan, candidate = select_candidate(load_plan(a.plan), design_id=a.design_id)
     if tuple(plan['schema']['tasks']) != TASKS:
         raise ValueError('Mixed pilot requires the three-task student')

@@ -93,3 +93,26 @@ def test_kl_pilot_changes_only_desired_kl_and_uses_native_value():
     alg.fix_expert_std(('run',));alg.actor_projection=True
     metrics=alg.compute_returns_and_update(fill_rollout(alg))
     assert metrics['desired_kl']==.02 and 'actor_gradient_weights' not in metrics
+
+
+def test_stairs_larger_sample_profile_uses_unweighted_unequal_native_batches():
+    from finetune_settings import STAIRS_SAMPLE_PROFILE,CURRENT_PPO_SETTINGS,correction_settings
+    from native_ppo import build_native_learner
+    from test_native_ppo import observation,amp_obs
+    settings=correction_settings(STAIRS_SAMPLE_PROFILE)
+    assert settings==dict(CURRENT_PPO_SETTINGS,envs_per_task=dict(stairs=2048,backpack=1024,run=1024))
+    counts=(4,2,2);cfg,state=amp_settings()
+    alg=build_native_learner(Actor(),counts,(4,6,3),cfg,state,None,'cpu',teacher_priors=teacher_priors(),
+                            steps=2,num_epochs=1,num_minibatches=1)
+    alg.fix_expert_std(('run',));alg.actor_projection=True
+    std=alg.policy.std[2].detach().clone();obs=observation(counts)
+    for i in range(2):
+        with torch.inference_mode():
+            alg.act(obs);following=observation(counts);raw=torch.arange(1.,9.);dones=torch.zeros(8,dtype=torch.bool)
+            merged=alg.process_mixed_env_step(following,raw,dones,dones,amp_obs(value=1.+i))
+            torch.testing.assert_close(merged[:6],raw[:6])
+            assert alg.disc_obs_buffer.batch_size==2
+            obs=following
+    metrics=alg.compute_returns_and_update(obs)
+    assert metrics['samples']==16 and 'actor_gradient_weights' not in metrics
+    assert torch.equal(alg.policy.std[2],std)

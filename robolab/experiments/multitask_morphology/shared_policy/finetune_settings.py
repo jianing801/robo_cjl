@@ -43,7 +43,8 @@ NATIVE_PPO_PROFILES = {NATIVE_PPO_ALGORITHM_V3: NATIVE_PPO_SETTINGS_V3,
 CORRECTION_PROFILES = ('native', 'fixed_amp_std', 'fixed_amp_std_pcgrad')
 STAIRS_WEIGHT_PROFILE = 'fixed_amp_std_pcgrad_stairs_weight2'
 KL_PILOT_PROFILE = 'fixed_amp_std_pcgrad_kl002'
-TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE, KL_PILOT_PROFILE)
+STAIRS_SAMPLE_PROFILE = 'fixed_amp_std_pcgrad_stairs_samples_2048'
+TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE, KL_PILOT_PROFILE, STAIRS_SAMPLE_PROFILE)
 
 
 def correction_settings(profile):
@@ -60,6 +61,9 @@ def correction_settings(profile):
                     actor_gradient_weight_normalization='mean_one')
     if profile == KL_PILOT_PROFILE:
         return dict(correction_settings('fixed_amp_std_pcgrad'), desired_kl=.02)
+    if profile == STAIRS_SAMPLE_PROFILE:
+        return dict(correction_settings('fixed_amp_std_pcgrad'),
+                    envs_per_task={'stairs':2048,'backpack':1024,'run':1024})
     raise ValueError(f'Unknown experimental PPO profile: {profile}')
 
 
