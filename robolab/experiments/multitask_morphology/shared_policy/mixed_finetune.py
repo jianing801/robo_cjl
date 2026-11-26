@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from contract import load_plan, sha, write_new
-from finetune_settings import MIXED_BO_ENVS, PPO_SCHEDULE
+from finetune_settings import MIXED_BO_ENVS, V4_STAIRS5120_EPOCH10_PROFILE
 from finetune_state import select_candidate
 from finetune_common import STEPS_PER_TASK, check_pause, publish_training_completion
 from mixed_batch import advance, initialize_episode_length, task_counts
@@ -188,6 +188,41 @@ def verify_expert_initialization(tasks, learner, adapter, expected_hashes):
     return audits
 
 
+def configured_task_counts(num_envs, settings):
+    """Bind experimental layouts to the requested total; native defaults stay balanced."""
+    layout = settings.get('envs_per_task')
+    if layout is None:
+        return task_counts(num_envs)
+    if (set(layout) != set(TASKS) or any(type(v) is not int or v < 1 for v in layout.values())
+            or sum(layout.values()) != num_envs):
+        raise ValueError('Experimental environment allocation requires the exact frozen per-task counts')
+    return tuple(layout[t] for t in TASKS)
+
+
+def configured_ppo_schedule(settings):
+    return dict(epochs=settings['epochs'], minibatches=settings['minibatches'])
+
+
+def inspect_actor_gradients(profile, update):
+    # The V4 sample/epoch experiment changes only those variables, not gradient diagnostics.
+    return profile not in ('native', V4_STAIRS5120_EPOCH10_PROFILE) and update % 25 == 0
+
+
+def build_configured_learner(model, counts, widths, amp_cfg, amp_state, augment, device,
+                              teacher_priors, settings, *, steps=STEPS_PER_TASK):
+    from native_ppo import build_native_learner
+    learner = build_native_learner(model, counts, widths, amp_cfg, amp_state, augment, device,
+                                   teacher_priors=teacher_priors, steps=steps,
+                                   num_epochs=settings['epochs'], num_minibatches=settings['minibatches'],
+                                   desired_kl=settings['desired_kl'])
+    if settings.get('fixed_expert_std_tasks'):
+        learner.fix_expert_std(tuple(settings['fixed_expert_std_tasks']))
+    learner.actor_projection = settings.get('actor_gradient_projection') == 'pcgrad_cyclic'
+    if weights:=settings.get('actor_gradient_weights'):
+        learner.actor_gradient_weights=tuple(weights[t] for t in TASKS)
+    return learner
+
+
 def train(a, root, attempt, plan, candidate, protocol, counts):
     from finetune_settings import NATIVE_PPO_SETTINGS, correction_settings
     from finetune_state import (load_native_checkpoint, save_native_checkpoint, prune_native_checkpoints,
@@ -195,7 +230,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     from native_observations import NativeObservationAdapter
     # Pin the current bundled RSL-RL before frozen teacher runtime paths are installed.
     sys.path.insert(0, str(HERE.parents[3] / 'rsl_rl'))
-    from native_ppo import build_native_learner
+    import native_ppo  # Pin the active learner before frozen runtime paths are installed.
     import inspect
     from rsl_rl.algorithms.ppo_amp import PPOAMP
     if Path(inspect.getfile(PPOAMP)).resolve() != HERE.parents[3]/'rsl_rl/rsl_rl/algorithms/ppo_amp.py':
@@ -205,7 +240,10 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     if model.schema != plan['schema']:
         raise ValueError('Candidate actor schema differs')
     digest = sha(root/'manifest.json')
-    history = native_checkpoint_history_for_resume(root, digest, recovery_dir=attempt/'rolled_back_metrics', ppo_algorithm=a.ppo_algorithm)
+    settings=correction_settings(a.experimental_profile)
+    checkpoint_interval=settings.get('checkpoint_interval', 10)
+    history = native_checkpoint_history_for_resume(root, digest, recovery_dir=attempt/'rolled_back_metrics',
+                                                   ppo_algorithm=a.ppo_algorithm, checkpoint_interval=checkpoint_interval)
     completed = history[-1]['completed_updates'] if history else 0
     if completed > a.updates:
         raise ValueError('Mixed PPO checkpoint exceeds its frozen update budget')
@@ -222,27 +260,24 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
     adapter = NativeObservationAdapter(widths)
     amp = tasks[-1].amp_training
     teacher_priors = {task.name:task.training_prior['expert_prior'] for task in tasks}
-    settings=correction_settings(a.experimental_profile)
-    learner = build_native_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
-                                   adapter.augment, a.device, teacher_priors=teacher_priors, steps=STEPS_PER_TASK,
-                                   desired_kl=settings['desired_kl'])
-    if settings.get('fixed_expert_std_tasks'):
-        learner.fix_expert_std(tuple(settings['fixed_expert_std_tasks']))
-    learner.actor_projection = settings.get('actor_gradient_projection') == 'pcgrad_cyclic'
-    if weights:=settings.get('actor_gradient_weights'):
-        learner.actor_gradient_weights=tuple(weights[t] for t in TASKS)
+    learner = build_configured_learner(model, counts, widths, amp['amp_cfg'], amp['amp_state'],
+                                       adapter.augment, a.device, teacher_priors, settings)
     expected_hashes = {name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS}
     write_new(attempt/'expert_prior_audit.json', dict(initial_actor_sha256=sha(a.student),
         tasks=verify_expert_initialization(tasks, learner, adapter, expected_hashes)))
     print('NATIVE_EXPERT_PRIORS_VERIFIED',
           {task:float(learner.policy.std[i].detach().mean()) for i,task in enumerate(TASKS)},flush=True)
-    restored = load_native_checkpoint(root, learner, digest, ppo_algorithm=a.ppo_algorithm)
+    restored = load_native_checkpoint(root, learner, digest, ppo_algorithm=a.ppo_algorithm,
+                                      checkpoint_interval=checkpoint_interval)
     learner.verify_fixed_std()
     if restored is not None and restored['completed_updates'] != completed:
         raise ValueError('Restored native learning state differs from its committed update')
     retain_updates = {0, a.updates, *[i for i in (100, 200, 500, 800, 1000) if i <= a.updates]}
+    if a.experimental_profile == V4_STAIRS5120_EPOCH10_PROFILE:
+        retain_updates = {0, a.updates, *range(checkpoint_interval, a.updates+1, checkpoint_interval)}
     if history:
-        prune_native_checkpoints(root, history, retain_updates=retain_updates)
+        prune_native_checkpoints(root, history, retain_updates=retain_updates,
+                                 checkpoint_interval=checkpoint_interval)
     step_history = reward_history_rows(history, TASKS)
     mean_history = list(mean_reward_rows(history, TASKS))
     if history:
@@ -265,6 +300,10 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
                                     joints=task.wrapper.num_actions) for task in tasks},
               physics_dt=sim.get_physics_dt(), control_dt=tasks[0].raw.step_dt))
     print('MIXED_SCENE_READY', counts, flush=True)
+    print('NATIVE_PPO_CONFIG', dict(envs_per_task=dict(zip(TASKS, counts, strict=True)),
+        samples_per_task={t:count*STEPS_PER_TASK for t,count in zip(TASKS, counts, strict=True)},
+        epochs=learner.num_learning_epochs, minibatches=learner.num_mini_batches,
+        checkpoint_interval=checkpoint_interval, profile=a.experimental_profile), flush=True)
     rewards = RolloutRewards(history[-1].get('training_reward', {}).get('mean_reward_windows') if history else None)
     warmup = NATIVE_PPO_SETTINGS['critic_warmup_updates']
     if restored is None:
@@ -300,7 +339,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         torch.cuda.synchronize(a.device)
         collected = time.monotonic()
         reward_summary = rewards.summarize(batches, attempt.name)
-        learner.inspect_actor_gradients = getattr(a,'experimental_profile','native') != 'native' and update % 25 == 0
+        learner.inspect_actor_gradients = inspect_actor_gradients(a.experimental_profile, update)
         metrics = learner.compute_returns_and_update(next_obs)
         torch.cuda.synchronize(a.device)
         metrics.update(collection_seconds=collected-begin, update_seconds=time.monotonic()-collected,
@@ -308,13 +347,16 @@ def train(a, root, attempt, plan, candidate, protocol, counts):
         del batches
         check_pause(root)
         persist_started = time.monotonic()
-        full_checkpoint = native_checkpoint_due(update, a.updates)
+        full_checkpoint = native_checkpoint_due(update, a.updates, checkpoint_interval=checkpoint_interval)
         save = save_native_checkpoint if full_checkpoint else save_native_metrics
+        persistence_settings = {} if full_checkpoint else dict(checkpoint_interval=checkpoint_interval)
         receipt = save(root, learner, update, digest, metrics,
-                       warmup_completed=warmup, training_reward=reward_summary, ppo_algorithm=a.ppo_algorithm)
+                       warmup_completed=warmup, training_reward=reward_summary, ppo_algorithm=a.ppo_algorithm,
+                       **persistence_settings)
         history.append(receipt)
         if full_checkpoint:
-            prune_native_checkpoints(root, history, retain_updates=retain_updates)
+            prune_native_checkpoints(root, history, retain_updates=retain_updates,
+                                     checkpoint_interval=checkpoint_interval)
         step_history.extend(reward_history_rows([receipt], TASKS))
         mean_history.extend(mean_reward_rows([receipt], TASKS))
         write_training_reward_csv(root, step_history)
@@ -353,13 +395,10 @@ def main():
     a.ppo_algorithm, a.experimental_profile, settings = resolve_training_profile(explicit_profile)
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
         parser.error('Mixed training requires a CUDA device, headless mode and a positive update budget')
-    layout=settings.get('envs_per_task')
-    if layout is not None:
-        if set(layout)!=set(TASKS) or sum(layout.values())!=a.num_envs or any(type(v) is not int or v<1 for v in layout.values()):
-            parser.error('Experimental environment allocation requires the exact frozen per-task counts')
-        counts=tuple(layout[t] for t in TASKS)
-    else:
-        counts=task_counts(a.num_envs)
+    try:
+        counts=configured_task_counts(a.num_envs, settings)
+    except ValueError as error:
+        parser.error(str(error))
     plan, candidate = select_candidate(load_plan(a.plan), design_id=a.design_id)
     if tuple(plan['schema']['tasks']) != TASKS:
         raise ValueError('Mixed pilot requires the three-task student')
@@ -372,7 +411,7 @@ def main():
              '../../../../rsl_rl/rsl_rl/storage/circular_buffer.py', '../../../../rsl_rl/rsl_rl/modules/amp.py']
     manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
-              updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=PPO_SCHEDULE,
+              updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=configured_ppo_schedule(settings),
               ppo_algorithm=a.ppo_algorithm, native_ppo_settings=settings,
               teacher_checkpoint_sha256={name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS},
               init_at_random_ep_len=a.init_at_random_ep_len,

@@ -293,3 +293,75 @@ def test_v3_actor_remains_verifiable_but_not_v4(tmp_path):
         ppo_algorithm=NATIVE_PPO_ALGORITHM_V3)==actor
     with pytest.raises(ValueError,match='algorithm'):
         bo.completed_actor_from_hashes(root,'p','i',candidate,100,mixed_bo=True,ppo_algorithm=NATIVE_PPO_ALGORITHM)
+
+def test_native_hundred_update_interval_keeps_every_requested_full_checkpoint(tmp_path):
+    from finetune_state import native_checkpoint_due, save_native_metrics
+    from training_reward import mean_reward_rows
+
+    assert [i for i in range(1001) if native_checkpoint_due(
+        i, 1000, checkpoint_interval=100)] == list(range(0, 1001, 100))
+    assert native_checkpoint_due(203, 203, checkpoint_interval=100)
+    assert native_checkpoint_due(10, 100)  # Default BO cadence is unchanged.
+
+    agent=learner(); digest='7'*64
+    full=[]
+    for n in range(304):
+        reward={'session_id':'experiment','mean_reward':{'all':{'mean_reward':n,'window_episodes':100}}}
+        if native_checkpoint_due(n, 303, checkpoint_interval=100):
+            row=save_native_checkpoint(tmp_path,agent,n,digest,{'kl':.01},training_reward=reward)
+            full.append(n)
+            prune_native_checkpoints(tmp_path,checkpoint_history(tmp_path,digest),
+                retain_updates=(0,100,200,300,303),checkpoint_interval=100)
+        else:
+            row=save_native_metrics(tmp_path,agent,n,digest,{'kl':.01},training_reward=reward,
+                                    checkpoint_interval=100)
+            assert 'path' not in row
+    history=checkpoint_history(tmp_path,digest)
+    assert len(history)==304 and full==[0,100,200,300,303]
+    assert [r['completed_updates'] for r in history if 'path' in r]==full
+    assert all((tmp_path/'checkpoints'/history[n]['path']).is_file() for n in full)
+    assert len(list((tmp_path/'checkpoints').glob('*.pt')))==len(full)
+    assert [r['mean_reward'] for r in mean_reward_rows(history,('stairs','backpack','run'))]==list(range(1,304))
+    assert load_native_checkpoint(tmp_path,learner(),digest,checkpoint_interval=100)['completed_updates']==303
+
+
+def test_native_hundred_update_interval_recovers_99_uncommitted_metric_rows(tmp_path):
+    from finetune_state import native_checkpoint_history_for_resume, save_native_metrics
+
+    agent=learner(); digest='8'*64
+    save_native_checkpoint(tmp_path,agent,0,digest)
+    for n in range(1,100):
+        save_native_metrics(tmp_path,agent,n,digest,{'kl':.02},checkpoint_interval=100)
+    # The interval is part of the training manifest; accidentally using the
+    # default would encounter a metrics-only receipt at a required save index.
+    archive=tmp_path/'attempts'/'recovered'
+    with pytest.raises(ValueError,match='metrics-only'):
+        native_checkpoint_history_for_resume(tmp_path,digest,recovery_dir=archive)
+    with pytest.raises(ValueError,match='reconcil'):
+        load_native_checkpoint(tmp_path,learner(),digest,checkpoint_interval=100)
+    assert not archive.exists()
+    prefix=native_checkpoint_history_for_resume(tmp_path,digest,recovery_dir=archive,checkpoint_interval=100)
+    assert len(prefix)==1 and len(list(archive.glob('*.json')))==99
+    assert load_native_checkpoint(tmp_path,learner(),digest,checkpoint_interval=100)['completed_updates']==0
+    for n in range(1,100):
+        save_native_metrics(tmp_path,agent,n,digest,{'kl':.03},checkpoint_interval=100)
+    with pytest.raises(ValueError,match='scheduled full checkpoint'):
+        save_native_metrics(tmp_path,agent,100,digest,checkpoint_interval=100)
+    save_native_checkpoint(tmp_path,agent,100,digest)
+    assert checkpoint_history(tmp_path,digest)[99]['metrics']=={'kl':.03}
+    assert load_native_checkpoint(tmp_path,learner(),digest,checkpoint_interval=100)['completed_updates']==100
+
+
+@pytest.mark.parametrize('bad_interval',[0,-1,True,1.5,None])
+def test_native_checkpoint_interval_rejects_invalid_values(tmp_path,bad_interval):
+    from finetune_state import native_checkpoint_due, save_native_metrics, native_checkpoint_history_for_resume
+
+    for call in (
+        lambda: native_checkpoint_due(3,100,checkpoint_interval=bad_interval),
+        lambda: save_native_metrics(tmp_path,learner(),3,'9'*64,checkpoint_interval=bad_interval),
+        lambda: native_checkpoint_history_for_resume(tmp_path,'9'*64,
+            recovery_dir=tmp_path/'attempts'/'recovered',checkpoint_interval=bad_interval),
+        lambda: load_native_checkpoint(tmp_path,learner(),'9'*64,checkpoint_interval=bad_interval),
+    ):
+        with pytest.raises(ValueError,match='checkpoint interval'):
+            call()

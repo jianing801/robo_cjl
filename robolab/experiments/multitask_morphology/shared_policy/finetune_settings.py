@@ -44,7 +44,9 @@ CORRECTION_PROFILES = ('native', 'fixed_amp_std', 'fixed_amp_std_pcgrad')
 STAIRS_WEIGHT_PROFILE = 'fixed_amp_std_pcgrad_stairs_weight2'
 KL_PILOT_PROFILE = 'fixed_amp_std_pcgrad_kl002'
 STAIRS_SAMPLE_PROFILE = 'fixed_amp_std_pcgrad_stairs_samples_2048'
-TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE, KL_PILOT_PROFILE, STAIRS_SAMPLE_PROFILE)
+V4_STAIRS5120_EPOCH10_PROFILE = 'v4_stairs5120_epoch10'
+TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE, KL_PILOT_PROFILE, STAIRS_SAMPLE_PROFILE,
+                                          V4_STAIRS5120_EPOCH10_PROFILE)
 
 
 def correction_settings(profile):
@@ -64,6 +66,9 @@ def correction_settings(profile):
     if profile == STAIRS_SAMPLE_PROFILE:
         return dict(correction_settings('fixed_amp_std_pcgrad'),
                     envs_per_task={'stairs':2048,'backpack':1024,'run':1024})
+    if profile == V4_STAIRS5120_EPOCH10_PROFILE:
+        return dict(NATIVE_PPO_SETTINGS, epochs=10,
+                    envs_per_task={'stairs':5120,'backpack':512,'run':512}, checkpoint_interval=100)
     raise ValueError(f'Unknown experimental PPO profile: {profile}')
 
 

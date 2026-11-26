@@ -8,7 +8,7 @@ immutable because its hash binds every committed checkpoint.
 """
 import re
 
-from finetune_settings import NATIVE_PPO_ALGORITHM, correction_settings
+from finetune_settings import NATIVE_PPO_ALGORITHM, correction_settings, V4_STAIRS5120_EPOCH10_PROFILE
 
 
 # e94fafa25a91c3ccf916082f58c69c500905bedd: original expert-prior V4.
@@ -96,6 +96,9 @@ _B_DEFAULT_SETTINGS_HASHES = (
     '71f4517c19d9f416818ecf9a909bae0f0ace842e33d7f92f395a399823fcc4a9',
     '7811b45ff795c23c4429eab100f1116fa05150e4aea4895cc16638331775f4b1',
     '42618c479545deb8b91946d4138fbbaff967d8ecf45000c4446155aa586609e6',
+    # Isolated V4 5120/512/512, ten-epoch profile; native and B settings unchanged.
+    '244e4374ab1d6ea58a38d9d6fcd0b787000a34f64cd2ca2ec6e73c622766c6cb',
+    'a6243fd2b1a3eb6bea79f4d105d6bb4c1ac353ed88f2ba27e61c8b377de05842',
 )
 _OPTIONAL_ACTOR_WEIGHT_HASHES = (
     'a2b3c9f8c202f2f4ec7604c65eec6bb0f5edc735b770b8080210fd2b64548acd',
@@ -144,6 +147,9 @@ def validate_native_resume_manifest(saved, current):
             or current.get('ppo_algorithm') != NATIVE_PPO_ALGORITHM):
         return False
     profile = current.get('experimental_profile', 'native')
+    # The new experiment has no historical migration path; require exact identity.
+    if profile == V4_STAIRS5120_EPOCH10_PROFILE:
+        return False
     # Native runs omit the experimental_profile field. Reject invented
     # combinations of old source identity and learning hyperparameters.
     if profile == 'native' and 'experimental_profile' in current:
