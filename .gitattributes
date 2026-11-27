@@ -25,3 +25,6 @@ legacy/expert_sources_20261114/** -text
 
 # The legacy backpack tools verify this copy against the archived LF bytes.
 robolab/scripts/tools/full_body_torque.py text eol=lf
+
+# Byte-exact measured reference receipts; hashes refer to the original files.
+docs/reference/rpo_original_round5_ppo200/*.json -text

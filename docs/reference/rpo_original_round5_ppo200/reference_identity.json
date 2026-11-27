@@ -1,0 +1,92 @@
+{
+  "kind": "original_rpo_round5_update200_prefix_reference",
+  "source_training_root": "/root/sj-tmp/rpo_native_conditions_all_fixed_std1000_20261127/tuning",
+  "source_manifest_sha256": "0a095698a7f3d75d83fb7797cae07844c1f4658bbd9848e64f5671a78b119193",
+  "source_plan_sha256": "b7bd47f0d4643c31586541c55dfe0f6ffbb12b37fe53b3ae34e8acd3d683eeb1",
+  "evaluation_plan_sha256": "0d7e7bd951d500e53e94d40c0ee8544f30a824884030b8a2a362f2993cd3cd49",
+  "initial_actor_sha256": "ccc8fae759cf0eff5db8df43b908fd29eb8cc12ce4216c467ed1d2a8759d4c90",
+  "source_checkpoint_sha256": "7b1987f8783b8df858b35f523810598b267427669375998e8d5693abb2787ce4",
+  "source_checkpoint_receipt_sha256": "0415f37d29a8c5659fe63957ea5b36fa437c7bc3c86155a8d677d5d169364ed7",
+  "actor_sha256": "8497f80a21decc652f0d16cdfb38ce0243b99808fecdcf7cf360b38937ebb174",
+  "candidate": {
+    "structure_key": [
+      0.25,
+      0.3,
+      "DM-J10010L-2EC",
+      "DM-J4340P-2EC"
+    ],
+    "design_ids": {
+      "stairs": "tr_792ca9f47877",
+      "backpack": "tr_792ca9f47877",
+      "run": "tr_792ca9f47877"
+    }
+  },
+  "updates": 200,
+  "source_run_budget": 1000,
+  "source_checkpoint_interval": 100,
+  "ppo_algorithm": "shared_native_ppoamp_expert_prior_pcgrad_fixed_all_std",
+  "native_ppo_settings": {
+    "steps_per_env": 24,
+    "epochs": 5,
+    "minibatches": 4,
+    "gamma": 0.99,
+    "lam": 0.95,
+    "clip_param": 0.2,
+    "value_loss_coef": 1.0,
+    "use_clipped_value_loss": true,
+    "schedule": "adaptive",
+    "desired_kl": 0.01,
+    "initial_learning_rate": 0.0001,
+    "adaptive_learning_rate_bounds": [
+      1e-05,
+      0.01
+    ],
+    "max_grad_norm": 1.0,
+    "learn_noise_std": true,
+    "entropy_coefficients": {
+      "stairs": 0.005,
+      "backpack": 0.005,
+      "run": 0.01
+    },
+    "symmetry_augmentation": true,
+    "symmetry_tasks": [
+      "stairs",
+      "run"
+    ],
+    "mirror_loss_coef": 0.2,
+    "critic_warmup_updates": 10,
+    "critic_observation_normalization": {
+      "stairs": "identity",
+      "backpack": "identity",
+      "run": "teacher_native_prefix"
+    },
+    "amp_discriminator_training": true,
+    "amp_disc_learning_rate": 0.0001,
+    "amp_disc_buffer_size": 100,
+    "amp_style_reward_scale": 1.5,
+    "amp_task_style_lerp": 0.6,
+    "amp_loss_type": "LSGAN",
+    "amp_gradient_penalty": 10.0,
+    "amp_disc_trunk_weight_decay": 0.001,
+    "amp_disc_linear_weight_decay": 0.1,
+    "actor_initialization": "frozen_round5_shared_actor",
+    "noise_initialization": "frozen_expert_learned_std",
+    "noise_std_shape": [
+      3,
+      23
+    ],
+    "critic_initialization": "frozen_expert_critic",
+    "critic_architecture": "three_independent_teacher_native",
+    "ppo_optimizer_initialization": "fresh_adam",
+    "amp_disc_optimizer_initialization": "fresh_adam",
+    "fixed_expert_std_tasks": [
+      "stairs",
+      "backpack",
+      "run"
+    ],
+    "actor_gradient_projection": "pcgrad_cyclic",
+    "training_conditions": "native_expert"
+  },
+  "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
+  "runtime_commit": "bea148cd5a7901dec6757340990ab64d13814b00"
+}

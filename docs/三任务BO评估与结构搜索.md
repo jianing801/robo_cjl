@@ -2,7 +2,7 @@
 
 更新：2026-11-27。本流程从第五轮最终共享 Actor 出发，给每个结构相同的 200 次三任务联合 PPO 微调预算，再用固定工况实测指标比较硬件。正式搜索分为前 50 个已测结构和后 50 个连续 BO 候选；2500 个格点是专家训练结构库，**不是 BO 的搜索边界**。
 
-正式候选微调采用已验证的方案 B，算法身份 `shared_native_ppoamp_expert_prior_pcgrad_fixed_all_std`（三个任务分别固定各自专家的23维动作标准差，Actor 采用 PCGrad）。前 50 个和后 50 个候选均采用 B；以前的 V4 评估及分母保留为历史对照，不可混合。新 B 的第 200 代原机基准尚需实测，未实测前不能启动正式 BO。详见[原生 PPO 微调](共享策略原生PPO微调说明.md)。
+正式候选微调采用已验证的方案 B，算法身份 `shared_native_ppoamp_expert_prior_pcgrad_fixed_all_std`（三个任务分别固定各自专家的23维动作标准差，Actor 采用 PCGrad）。前 50 个和后 50 个候选均采用 B；以前的 V4 评估及分母保留为历史对照，不可混合。新 B 的第 200 代原机基准已实测并核验，归一化系数见[原机实测归档](reference/rpo_original_round5_ppo200/normalization.json)。前50个结构测量完成后才冻结正式评分并启动搜索。详见[原生 PPO 微调](共享策略原生PPO微调说明.md)。
 
 **2026-11-27 工况更新：** 新方案 B 微调继承三个专家的完整原生训练工况；200 代预算、固定种子、20 秒正式评估工况及四项指标不变。`native_ppo_settings.training_conditions=native_expert` 区分新旧训练数据，旧工况的校准和原机分母均保留为历史，不能用作新协议的正式 BO 数据。详见[原生 PPO 微调说明](共享策略原生PPO微调说明.md)。
 
@@ -37,7 +37,9 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
 
 程序按原第 21 组固定顺序得到 50 个观测（与 200 个蒸馏选模结构无重叠）。已有同协议微调产物可用 `--reuse-finetuned-panel <目录>` 复用模型，只补缺失的固定工况测量。方案 B 的原机基准先用已验证的原机单结构预测资产及参考动作计划重新实测；V4 档案不作为 B 的分母。原机基准包含 `reference_protocol.json`、`candidate/bo_evaluation.json`、源训练与检查点身份和三项原始轨迹。[历史 V4 基准](原始配置基准.md) 前 50 个结构和后续新候选均从同一第五轮 Actor 独立开始。
 
-### 准备方案 B 的原机基准
+### 准备或复用方案 B 的原机基准
+
+5090实例已存在经真实测量的原机200代参考目录 `/root/sj-tmp/rpo_native_conditions_all_fixed_std200_reference_20261127`。将上面的 `reference` 变量指向该目录（原始数据必须仍可读取），直接使用后面的 `freeze-scoring`，不重复训练或评估原机。其他实例缺少完整原始证据时，可按以下方式重新准备。
 
 `reference_plan.json` 必须是已验证的原机预测模型单结构计划（不是原厂 URDF，也不是全结构库）。例如租卡已经保存的 `/root/sj-tmp/rpo_native_conditions_all_fixed_std1000_20261127/plan.json`。
 

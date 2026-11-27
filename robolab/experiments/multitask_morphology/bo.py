@@ -736,6 +736,9 @@ def checked_measurement_panel(work):
 
 
 def checked_original_rpo_reference(root, benchmark, conditions):
+    if (Path(root)/'reference_identity.json').is_file():
+        from prefix_reference import checked_prefix_reference
+        return checked_prefix_reference(sys.modules[__name__], root, benchmark, conditions)
     if benchmark.get('ppo_algorithm') == NATIVE_PPO_ALGORITHM:
         from original_reference import ARCHIVE_KIND, check_v4_archive
         archive = read(ORIGINAL_RPO_ARCHIVE/'manifest.json')

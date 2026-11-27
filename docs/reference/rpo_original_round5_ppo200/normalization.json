@@ -1,0 +1,132 @@
+{
+  "kind": "rpo_original_round5_ppo200_four_metrics_normalization",
+  "identity_sha256": "349b1b37f99f3c662f2f4012176924d2f03518260359429e64f47865378567ba",
+  "report_sha256": "1c47ad93418882371439fb36eeea24d7fabb9cd42943788520f135814eacf2fd",
+  "conditions_sha256": "eb95982acf56edd218fa9310c8147fa19ab04661944d4a1493364529fd276694",
+  "cot_basis": "absolute_mechanical",
+  "task_weights": {
+    "stairs": 0.4,
+    "backpack": 0.3,
+    "run": 0.3
+  },
+  "metrics": {
+    "stairs": {
+      "cot": {
+        "baseline": 1.6339461890458669,
+        "inverse": 0.6120152589504456,
+        "metric_weight": 0.25,
+        "weighted_inverse": 0.1530038147376114
+      },
+      "forward_rmse_mps": {
+        "baseline": 0.2135287151828671,
+        "inverse": 4.683210869992801,
+        "metric_weight": 0.25,
+        "weighted_inverse": 1.1708027174982003
+      },
+      "roll_pitch_rms_rad_s": {
+        "baseline": 0.4894866422899162,
+        "inverse": 2.0429566684839457,
+        "metric_weight": 0.4,
+        "weighted_inverse": 0.8171826673935784
+      },
+      "knee_ankle_max_rated_ratio": {
+        "baseline": 1.3560212215093737,
+        "inverse": 0.73745158566686,
+        "metric_weight": 0.1,
+        "weighted_inverse": 0.07374515856668601
+      }
+    },
+    "backpack": {
+      "cot": {
+        "baseline": 0.8805535421994529,
+        "inverse": 1.135649284315174,
+        "metric_weight": 0.4,
+        "weighted_inverse": 0.4542597137260696
+      },
+      "forward_rmse_mps": {
+        "baseline": 0.07827207834246032,
+        "inverse": 12.775947964799718,
+        "metric_weight": 0.25,
+        "weighted_inverse": 3.1939869911999295
+      },
+      "roll_pitch_rms_rad_s": {
+        "baseline": 0.3532552333628596,
+        "inverse": 2.830814395813386,
+        "metric_weight": 0.2,
+        "weighted_inverse": 0.5661628791626773
+      },
+      "knee_ankle_max_rated_ratio": {
+        "baseline": 0.8827187289785805,
+        "inverse": 1.1328636939165537,
+        "metric_weight": 0.15,
+        "weighted_inverse": 0.16992955408748306
+      }
+    },
+    "run": {
+      "cot": {
+        "baseline": 0.8717647223587466,
+        "inverse": 1.1470984938393531,
+        "metric_weight": 0.25,
+        "weighted_inverse": 0.2867746234598383
+      },
+      "forward_rmse_mps": {
+        "baseline": 0.23491149977115516,
+        "inverse": 4.256922291902161,
+        "metric_weight": 0.4,
+        "weighted_inverse": 1.7027689167608648
+      },
+      "roll_pitch_rms_rad_s": {
+        "baseline": 0.4337562533395885,
+        "inverse": 2.305442266943177,
+        "metric_weight": 0.15,
+        "weighted_inverse": 0.34581634004147654
+      },
+      "knee_ankle_max_rated_ratio": {
+        "baseline": 1.2675234464949106,
+        "inverse": 0.7889400411213736,
+        "metric_weight": 0.2,
+        "weighted_inverse": 0.15778800822427475
+      }
+    }
+  },
+  "baseline_score": {
+    "observations": [
+      {
+        "seed": 20261118,
+        "replica": 0,
+        "feasible": true,
+        "objective": 1.0,
+        "normalized": {
+          "stairs": {
+            "cot": 1.0,
+            "forward_rmse_mps": 1.0,
+            "roll_pitch_rms_rad_s": 1.0,
+            "knee_ankle_max_rated_ratio": 1.0
+          },
+          "backpack": {
+            "cot": 1.0,
+            "forward_rmse_mps": 1.0,
+            "roll_pitch_rms_rad_s": 1.0,
+            "knee_ankle_max_rated_ratio": 1.0
+          },
+          "run": {
+            "cot": 1.0,
+            "forward_rmse_mps": 1.0,
+            "roll_pitch_rms_rad_s": 1.0,
+            "knee_ankle_max_rated_ratio": 1.0
+          }
+        },
+        "task_objectives": {
+          "stairs": 1.0,
+          "backpack": 1.0,
+          "run": 1.0
+        }
+      }
+    ],
+    "valid_pairs": 1,
+    "joint_successes": 1,
+    "invalid_pairs": 0,
+    "complete_objectives": 1,
+    "mean_objective": 1.0
+  }
+}

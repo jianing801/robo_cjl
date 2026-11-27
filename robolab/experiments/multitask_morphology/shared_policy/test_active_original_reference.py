@@ -122,3 +122,29 @@ def test_scheme_b_refuses_v4_reference_archive():
                       native_ppo_settings=bo.CURRENT_PPO_SETTINGS)
     with pytest.raises(ValueError,match='Scheme B requires its own measured'):
         bo.checked_original_rpo_reference(bo.ORIGINAL_RPO_ARCHIVE,new_protocol,conditions())
+
+
+def test_update200_prefix_receipt_dispatches_without_old_archive(tmp_path, monkeypatch):
+    import prefix_reference
+    root = tmp_path/'real_reference'; root.mkdir()
+    (root/'reference_identity.json').write_text('{}')
+    marker = object()
+    monkeypatch.setattr(prefix_reference, 'checked_prefix_reference',
+                        lambda module, path, benchmark, conditions: (marker, dict(root=str(path))))
+    result, source = bo.checked_original_rpo_reference(root, dict(updates=200), conditions())
+    assert result is marker and source['root'] == str(root)
+
+
+def test_prefix_rejects_wrong_budget_or_actor_before_loading_source(tmp_path):
+    from prefix_reference import KIND, checked_prefix_reference
+    c = conditions()
+    identity = dict(kind=KIND, updates=200, initial_actor_sha256='a'*64,
+                    ppo_algorithm=bo.CURRENT_PPO_ALGORITHM, native_ppo_settings=bo.CURRENT_PPO_SETTINGS,
+                    conditions_sha256=bo.digest(c))
+    p = tmp_path/'reference_identity.json'; bo.freeze(p, identity)
+    report_path = tmp_path/'bo_evaluation.json'; bo.freeze(report_path, {})
+    bo.freeze(tmp_path/'normalization.json', dict(kind='rpo_original_round5_ppo200_four_metrics_normalization',
+              identity_sha256=bo.sha(p), report_sha256=bo.sha(report_path), conditions_sha256=bo.digest(c)))
+    for wrong in (dict(identity, updates=100), dict(identity, initial_actor_sha256='b'*64)):
+        with pytest.raises(ValueError, match='PPO or evidence protocol differs'):
+            checked_prefix_reference(bo, tmp_path, wrong, c)
