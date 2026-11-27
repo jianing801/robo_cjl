@@ -13,6 +13,8 @@ import traceback
 HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context,input_width
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
+from native_training_conditions import (NATIVE_EXPERT_CONDITIONS, LEGACY_CONDITIONS,
+    validate_training_conditions, configure_native_training)
 from scenario_sampling import rollout_env_count, verify_collection_layout, verify_stair_origins
 from stair_course import APPROACH_M, COURSE, outside_flight
 from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
@@ -152,7 +154,7 @@ def canonical_input(base,task,indices,static_context,task_count=2):
     return torch.cat((base,ids,static_context[indices]),-1)
 
 
-def prepare_rollout(argv=None, *, mixed_count=None):
+def prepare_rollout(argv=None, *, mixed_count=None, training_conditions=LEGACY_CONDITIONS):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--plan',required=True);p.add_argument('--task',choices=['stairs','backpack'],required=True)
     p.add_argument('--design-ids',required=True);p.add_argument('--output',required=True)
@@ -179,6 +181,10 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         p.add_argument('--device', default='cuda:0')
         p.set_defaults(kit_args=None)
     args=p.parse_args(argv)
+    native_training = training_conditions == NATIVE_EXPERT_CONDITIONS
+    validate_training_conditions(training_conditions, args.profile, args.randomization_strength)
+    if native_training and (mixed_count is None or not args.ppo_channel or args.mode != "evaluate" or args.bo_conditions):
+        raise ValueError("Native expert conditions are only for joint PPO training")
     if args.video:args.enable_cameras=True
     if min(args.steps,args.stride)<1 or not 0<=args.reset_yaw_range<=.5:raise ValueError('Positive finite sampling budget and bounded reset distribution required')
     plan=load_plan(args.plan);spec=plan['teachers'][args.task]
@@ -244,14 +250,18 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                                 torque_soft_constraint=None,full_body_torque=spec['full_body_torque'])
         kwargs={'configurator':configurator} if configurator else {}
         cfg,agent,source_contract=configure_spatial(options,bank,designs,output,**kwargs)
-        cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
-            strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
+        if native_training:
+            cfg,randomization_audit=configure_native_training(cfg,args.task,profile=args.profile,
+                strength=args.randomization_strength,seed=args.seed)
+        else:
+            cfg,randomization_audit=configure_profile(cfg,args.task,profile=args.profile,
+                strength=args.randomization_strength,seed=args.seed,reset_yaw_range=args.reset_yaw_range)
         cfg.capture_terminal_state=True
         velocity_frame=None
         if args.mode=='evaluate' and not args.ppo_channel:
             velocity_frame=FIXED_COURSE_VELOCITY_FRAME if bo_conditions else EVALUATION_VELOCITY_FRAME
         evaluation_stairs=None
-        if args.task=='stairs' and not bo_conditions:
+        if args.task=='stairs' and not bo_conditions and not native_training:
             timed=args.mode=='evaluate' and not args.ppo_channel
             randomization_audit['stairs']=configure_stairs(cfg,profile=args.profile,seed=args.seed,
                 evaluation_seconds=args.steps*DT if timed else None)
@@ -264,6 +274,8 @@ def prepare_rollout(argv=None, *, mixed_count=None):
             randomization_audit['velocity_frame']=velocity_frame
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=args.reset_yaw_range))
         write_new(output/'randomization_audit.json',randomization_audit)
+        if native_training:
+            write_new(output/'native_expert_source_contract.json',source_contract)
         cfg.sim.render_interval=1000000
         cache_roots=[*spec['asset_cache']]
         if args.asset_cache_root:cache_roots.insert(0,args.asset_cache_root)
@@ -275,7 +287,10 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         cache=reuse_assets(cfg,cache_roots,output,args.task,designs)
         write_new(output/'asset_cache_audit.json',cache)
         class Capture(CaptureReset, Env):
-            def update_terrain_levels(self,env_ids):return {}
+            def update_terrain_levels(self,env_ids):
+                if native_training:
+                    return super().update_terrain_levels(env_ids)
+                return {}
         if args.video:cfg.viewer.resolution=(960,540)
         if mixed_count is None:
             raw=Capture(cfg,render_mode='rgb_array' if args.video else None)
@@ -338,11 +353,14 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         with torch.inference_mode():
             collection_columns=None
             if args.task=='stairs':
-                spatial_training = mixed_count is not None and count > 1
-                validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs,
-                    balanced_morphology_training=spatial_training)
-                if args.num_envs is not None or spatial_training:
-                    collection_columns=raw.scene.terrain.terrain_types.clone()
+                if native_training:
+                    validation=torch.zeros(n,device=raw.device,dtype=torch.bool)
+                else:
+                    spatial_training = mixed_count is not None and count > 1
+                    validation=route_stairs(raw.scene,count,profile=args.profile,paired_validation=paired_stairs,
+                        balanced_morphology_training=spatial_training)
+                    if args.num_envs is not None or spatial_training:
+                        collection_columns=raw.scene.terrain.terrain_types.clone()
                 raw.reset()
                 if evaluation_stairs or (bo_conditions and bo_conditions['tasks']['stairs'].get('course') == COURSE):
                     distance=APPROACH_M-(raw.robot.data.root_pos_w[:,0]-raw.scene.env_origins[:,0])
@@ -354,9 +372,14 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                     verify_stair_origins(raw.scene,collection_columns)
             elif args.task=='backpack':
                 from robolab.tasks.direct.backpack_walk import backpack_urdf as module
-                properties=payload_properties(module,n,count,seed=args.seed,profile=args.profile,
-                    strength=args.randomization_strength,fixed_mass=args.payload_kg,
-                    balanced_morphology_training=mixed_count is not None and count > 1)
+                if native_training:
+                    from native_training_conditions import native_payload_properties
+                    from hybrid_payload import payload_range
+                    properties=native_payload_properties(module,n,seed=args.seed,payload_range=payload_range)
+                else:
+                    properties=payload_properties(module,n,count,seed=args.seed,profile=args.profile,
+                        strength=args.randomization_strength,fixed_mass=args.payload_kg,
+                        balanced_morphology_training=mixed_count is not None and count > 1)
                 raw.reset();audit=module.apply_backpack_properties(raw.robot,properties);raw.reset()
                 write_new(output/'payload_audit.json',dict(properties=properties,audit=audit))
                 validation=(copy_index%2)==1
@@ -365,8 +388,12 @@ def prepare_rollout(argv=None, *, mixed_count=None):
                 spawn_x=torch.tensor(evaluation_stairs['origin_x_by_stratum_m'],device=raw.device)[terrain_indices]
                 outside_course=torch.zeros(n,dtype=torch.bool,device=raw.device)
                 first_exit=torch.zeros((n,4),device=raw.device)
-            scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
-                profile=args.profile,properties=properties)
+            if native_training and args.task=='stairs':
+                from native_training_conditions import native_terrain_scenarios
+                scenarios=native_terrain_scenarios(n,selected,terrain_indices,raw.scene.terrain.terrain_levels)
+            else:
+                scenarios=scenario_table(args.task,n,selected,terrain_indices=terrain_indices,
+                    profile=args.profile,properties=properties)
             if bo_conditions:
                 fixed = bo_conditions['tasks'][args.task]
                 for scenario in scenarios:

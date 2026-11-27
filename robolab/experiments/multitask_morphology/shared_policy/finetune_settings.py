@@ -56,7 +56,8 @@ def correction_settings(profile):
     if profile == 'fixed_amp_std':
         return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'])
     if profile == 'fixed_amp_std_pcgrad':
-        return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic')
+        return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic',
+                    training_conditions='native_expert')
     if profile == STAIRS_WEIGHT_PROFILE:
         return dict(correction_settings('fixed_amp_std_pcgrad'),
                     actor_gradient_weights={'stairs': 2., 'backpack': 1., 'run': 1.},

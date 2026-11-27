@@ -122,10 +122,15 @@ def test_e94_has_no_experimental_profile_but_391_same_profile_is_eligible():
     saved['native_ppo_settings']['fixed_expert_std_tasks'] = ['stairs']
     assert not validate_native_resume_manifest(saved, current)
 
-def test_real_source_files_are_eligible_for_migrating_linux_receipt():
+def test_real_source_files_require_frozen_legacy_conditions_for_old_receipt():
     import hashlib
 
     here = Path(__file__).resolve().parent
     current_sources = {key: hashlib.sha256((here / key).read_bytes()).hexdigest()
                        for key in (*LATEST_SOURCES, 'native_resume_compat.py')}
-    assert validate_native_resume_manifest(manifest(OLD_SOURCES), manifest(current_sources))
+    assert not validate_native_resume_manifest(manifest(OLD_SOURCES), manifest(current_sources))
+    fresh = manifest(dict(current_sources, **{'native_training_conditions.py': hashlib.sha256((here/'native_training_conditions.py').read_bytes()).hexdigest()}))
+    fresh['training_conditions'] = 'native_expert'
+    assert validate_native_resume_manifest(fresh, fresh)
+    legacy = dict(fresh, training_conditions='continuous_locomotion')
+    assert not validate_native_resume_manifest(legacy, fresh)

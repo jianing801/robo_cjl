@@ -252,7 +252,8 @@ def worker_main():
     manifest=dict(kind='shared_spatial_pretrain_400',provenance=provenance,plan_sha256=provenance['source_plan_sha256'],
         initial_actor_sha256=provenance['initial_actor_sha256'],updates=a.updates,seed=a.seed,
         collection_protocol=protocol,ppo_schedule=PPO_SCHEDULE,ppo_algorithm=CURRENT_PPO_ALGORITHM,
-        native_ppo_settings=CURRENT_PPO_SETTINGS,teacher_checkpoint_sha256={t:frozen['teachers'][t]['checkpoint_sha256'] for t in TASKS},
+        # This independent 400-morphology pretrain retains its frozen six-stratum protocol.
+        native_ppo_settings={k:v for k,v in CURRENT_PPO_SETTINGS.items() if k!='training_conditions'},teacher_checkpoint_sha256={t:frozen['teachers'][t]['checkpoint_sha256'] for t in TASKS},
         init_at_random_ep_len=True,envs_per_task=LAYOUT,steps_per_task=STEPS,study=study,
         sources={name:sha(HERE/name) for name in SOURCE_FILES})
     with run_lock(root):

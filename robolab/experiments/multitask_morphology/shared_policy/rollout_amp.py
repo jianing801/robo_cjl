@@ -12,9 +12,11 @@ HERE=Path(__file__).resolve().parent
 from contract import load_plan,sha,write_new,graph_features,unified_context
 from evaluation import EVALUATION_VELOCITY_FRAME, FIXED_COURSE_VELOCITY_FRAME
 from randomization import configure_profile, rollout_metadata, assert_protocol_unchanged
+from native_training_conditions import (NATIVE_EXPERT_CONDITIONS, LEGACY_CONDITIONS,
+    validate_training_conditions, configure_native_training)
 from scenario_sampling import last_design_copy, rollout_env_count, verify_collection_layout
 
-def prepare_rollout(argv=None, *, mixed_count=None):
+def prepare_rollout(argv=None, *, mixed_count=None, training_conditions=LEGACY_CONDITIONS):
     from isaaclab.app import AppLauncher
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('plan','design-ids','output'):p.add_argument('--'+name,required=True)
@@ -36,6 +38,10 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         p.add_argument('--device', default='cuda:0')
         p.set_defaults(kit_args=None)
     a=p.parse_args(argv)
+    native_training = training_conditions == NATIVE_EXPERT_CONDITIONS
+    validate_training_conditions(training_conditions, a.profile, a.randomization_strength)
+    if native_training and (mixed_count is None or not a.ppo_channel or a.mode != "evaluate" or a.bo_conditions):
+        raise ValueError("Native expert conditions are only for joint PPO training")
     if a.video:a.enable_cameras=True
     if min(a.steps,a.stride)<1 or not 0<=a.reset_yaw_range<=.5:raise ValueError('Positive bounded rollout/reset distribution required')
     plan=load_plan(a.plan);spec=plan['teachers']['run'];code=Path(spec['code_root'])
@@ -81,14 +87,20 @@ def prepare_rollout(argv=None, *, mixed_count=None):
         options=SimpleNamespace(num_envs=n,device=a.device,asset_cache=None,allow_cache_misses=True,
             reference_library=spec['reference_library'],full_body_torque=spec['full_body_torque'])
         cfg,agent,source_contract=configure_spatial(options,bank,designs,out,configurator=configure_amp)
-        cfg,randomization_audit=configure_profile(cfg,'run',profile=a.profile,strength=a.randomization_strength,
-            seed=a.seed,reset_yaw_range=a.reset_yaw_range,speed=a.speed)
+        if native_training:
+            cfg,randomization_audit=configure_native_training(cfg,'run',profile=a.profile,
+                strength=a.randomization_strength,seed=a.seed)
+        else:
+            cfg,randomization_audit=configure_profile(cfg,'run',profile=a.profile,strength=a.randomization_strength,
+                seed=a.seed,reset_yaw_range=a.reset_yaw_range,speed=a.speed)
         if bo_conditions:
             configure_conditions(cfg, 'run', bo_conditions, a.seed, randomization_audit)
         if velocity_frame:
             randomization_audit['velocity_frame']=velocity_frame
         metadata=rollout_metadata(randomization_audit,dict(reset_yaw_range_rad=a.reset_yaw_range,speed_command=a.speed))
         write_new(out/'randomization_audit.json',randomization_audit)
+        if native_training:
+            write_new(out/'native_expert_source_contract.json',source_contract)
         expected_terms=['base_ang_vel','projected_gravity','velocity_commands','joint_pos','joint_vel','actions']
         for name in expected_terms:
             term=getattr(cfg.observations.policy,name)

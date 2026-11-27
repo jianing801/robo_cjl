@@ -20,6 +20,8 @@ from finetune_common import STEPS_PER_TASK, check_pause, publish_training_comple
 from mixed_batch import advance, initialize_episode_length, task_counts
 from persistence import resume_pause, run_lock
 from randomization import protocol_metadata, assert_protocol_unchanged
+from native_training_conditions import (NATIVE_EXPERT_CONDITIONS, LEGACY_CONDITIONS,
+    TRAINING_CONDITIONS, validate_training_conditions)
 from student import load_student
 from training_reward import RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv, write_training_reward_csv
 
@@ -101,7 +103,9 @@ def prepare_tasks(a, plan, root, attempt, protocol, counts, worker_seed):
             if task != 'run':
                 args.extend(('--task', task))
                 entry = prepare_rollout
-            generator = entry(args, mixed_count=count)
+            condition = getattr(a, "training_conditions", LEGACY_CONDITIONS)
+            generator = (entry(args, mixed_count=count, training_conditions=condition)
+                         if condition != LEGACY_CONDITIONS else entry(args, mixed_count=count))
             preparers.append(generator)
             stack.callback(generator.close)
             recipes.append(next(generator))
@@ -241,6 +245,8 @@ def train(a, root, attempt, plan, candidate, protocol, counts, *, layout_callbac
         raise ValueError('Candidate actor schema differs')
     digest = sha(root/'manifest.json')
     settings=correction_settings(a.experimental_profile)
+    if getattr(a, 'checkpoint_interval', None) is not None:
+        settings=dict(settings,checkpoint_interval=a.checkpoint_interval)
     checkpoint_interval=settings.get('checkpoint_interval', 10)
     history = native_checkpoint_history_for_resume(root, digest, recovery_dir=attempt/'rolled_back_metrics',
                                                    ppo_algorithm=a.ppo_algorithm, checkpoint_interval=checkpoint_interval)
@@ -386,6 +392,9 @@ def main():
     parser.add_argument('--seed', type=int, default=20261104)
     parser.add_argument('--profile', choices=('nominal', 'robust'), default='robust')
     parser.add_argument('--randomization-strength', type=float, default=1.)
+    parser.add_argument('--training-conditions', choices=TRAINING_CONDITIONS, default=NATIVE_EXPERT_CONDITIONS,
+                        help='PPO-only native expert conditions; continuous_locomotion reproduces older pilots')
+    parser.add_argument('--checkpoint-interval', type=int, default=None, help='Override full checkpoint cadence for a separate experiment')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--resume-paused', action='store_true')
     parser.add_argument('--compact-training-artifacts', action='store_true')
@@ -395,6 +404,15 @@ def main():
     a = parser.parse_args()
     explicit_profile = a.experimental_profile
     a.ppo_algorithm, a.experimental_profile, settings = resolve_training_profile(explicit_profile)
+    try:
+        validate_training_conditions(a.training_conditions, a.profile, a.randomization_strength)
+    except ValueError as error:
+        parser.error(str(error))
+    if 'training_conditions' in settings:
+        settings = dict(settings, training_conditions=a.training_conditions)
+    if a.checkpoint_interval is not None:
+        if a.checkpoint_interval < 1: parser.error("Checkpoint interval must be positive")
+        settings = dict(settings, checkpoint_interval=a.checkpoint_interval)
     if not a.headless or not a.device.startswith('cuda') or a.updates < 1:
         parser.error('Mixed training requires a CUDA device, headless mode and a positive update budget')
     try:
@@ -408,12 +426,13 @@ def main():
     root = a.output.resolve()
     files = ['mixed_finetune.py', 'finetune_common.py', 'mixed_scene.py', 'mixed_batch.py', 'native_ppo.py', 'native_observations.py',
              'rollout.py', 'rollout_amp.py', 'student.py', 'training_reward.py', 'finetune_state.py',
-             'finetune_settings.py', 'native_resume_compat.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
+             'finetune_settings.py', 'native_resume_compat.py', 'native_training_conditions.py', '../../../../rsl_rl/rsl_rl/algorithms/ppo_amp.py',
              '../../../../rsl_rl/rsl_rl/algorithms/ppo.py', '../../../../rsl_rl/rsl_rl/storage/rollout_storage.py',
              '../../../../rsl_rl/rsl_rl/storage/circular_buffer.py', '../../../../rsl_rl/rsl_rl/modules/amp.py']
     manifest = dict(kind='shared_candidate_finetuning_mixed',
               plan_sha256=sha(a.plan), initial_actor_sha256=sha(a.student), candidate=candidate,
-              updates=a.updates, seed=a.seed, collection_protocol=protocol, ppo_schedule=configured_ppo_schedule(settings),
+              updates=a.updates, seed=a.seed, collection_protocol=protocol, training_conditions=a.training_conditions,
+              ppo_schedule=configured_ppo_schedule(settings),
               ppo_algorithm=a.ppo_algorithm, native_ppo_settings=settings,
               teacher_checkpoint_sha256={name:plan['teachers'][name]['checkpoint_sha256'] for name in TASKS},
               init_at_random_ep_len=a.init_at_random_ep_len,
