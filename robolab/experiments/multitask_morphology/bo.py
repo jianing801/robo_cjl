@@ -25,6 +25,16 @@ PRE_SHARD_BO_SHA256 = {
     'bc55b5b738561afa2c6dc584429eacf872e31af51161ae26a4a8b363c3774edb',
     '037b36b39fc6e6dbcb049e4ba566db48f6c7640831a89dc0b09f23d769235ea6',
 }
+# Exact pre-fix sources: successful trials retain identical scoring; only a
+# fully terminated first attempt previously failed to publish its raw trace.
+PRE_EARLY_FALL_CAPTURE_SHA256 = {
+    'f10ffb49a354e8b9b7814563ffd3f08a657b6a2fbcabc79e5aec3d2c8da6829d',
+    'c7534cd4e99e5f7f5879429091e2c07ad58d8410bb30b4bf1be78549df8e89b9',
+}
+PRE_EARLY_FALL_BO_SHA256 = {
+    '58b7183168fe70e179a92442d81a9f2d79080cb9d5047237e37ce806074eae52',
+    'db1525818ac61f0896281b233261fae726348400206ebc41a5615d262f4ffc6b',
+}
 PRE_INGEST_ALIGNMENT_BO_SHA256 = {
     'fead4dca36355e514f86981a1526cd79c1bb96ce7ee12a7c8e7d16cde9773233',
     'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
@@ -86,6 +96,12 @@ def freeze_candidate_manifest(path, identity, *, fixed_reset=False):
         coordinator = saved.get('sources', {}).get('bo.py')
         if (coordinator in PRE_INGEST_ALIGNMENT_BO_SHA256 | PRE_SHARD_BO_SHA256
                 and saved == dict(identity, sources={**identity['sources'], 'bo.py': coordinator})):
+            return
+        capture = saved.get('sources', {}).get('bo_capture.py')
+        if (coordinator in PRE_EARLY_FALL_BO_SHA256 | PRE_INGEST_ALIGNMENT_BO_SHA256 | PRE_SHARD_BO_SHA256
+                and capture in PRE_EARLY_FALL_CAPTURE_SHA256
+                and saved == dict(identity, sources={**identity['sources'], 'bo.py': coordinator,
+                                                     'bo_capture.py': capture})):
             return
         if not fixed_reset:
             for coordinators, capture, metrics in PRE_FIXED_BO_SOURCES:

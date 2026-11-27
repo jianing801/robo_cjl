@@ -236,7 +236,13 @@ class TrialCapture:
         self.raw.bo_recorder = None
         if self.scene_update is not None:
             self.raw.scene.update = self.scene_update
-        if len(self.active_samples) != self.steps or len(self.samples) != self.steps * self.samples_per_control:
+        # A complete first attempt may end early when every replica falls.
+        # Preserve only measured pre-reset physics samples; never pad or score
+        # an incomplete live trajectory as a failed trial.
+        captured = len(self.active_samples)
+        complete_failure = 0 < captured < self.steps and not self.active.any() and self.fell.all()
+        if ((captured != self.steps and not complete_failure)
+                or len(self.samples) != captured * self.samples_per_control):
             raise ValueError('BO trace does not cover the declared measurement horizon')
         columns = zip(self.fields, zip(*self.samples, strict=True), strict=True)
         extras = {}

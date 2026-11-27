@@ -726,8 +726,8 @@ def test_physics_protocol_preserves_tasks_and_separates_scores():
     assert bo.official_conditions_path(digest(current)) == bo.PHYSICS_CONDITIONS
 
 
-@pytest.mark.parametrize('fell', [False, True])
-def test_physics_step_capture_records_braking_and_excludes_reset_state(tmp_path, fell):
+@pytest.mark.parametrize('fell,early_stop', [(False, False), (True, False), (True, True), (False, True)])
+def test_physics_step_capture_records_braking_and_excludes_reset_state(tmp_path, fell, early_stop):
     import torch
     from bo_capture import TrialCapture
 
@@ -752,13 +752,17 @@ def test_physics_step_capture_records_braking_and_excludes_reset_state(tmp_path,
 
     scene.update = physics_update
     recorder = TrialCapture(raw, 'stairs', cfg, 20261118, motors)
-    for done in (fell, False):
+    for done in ((fell,) if early_stop else (fell, False)):
         for _ in range(4):
             scene.update(dt=.005)
         if done:
             recorder.before_reset(torch.tensor([0]))
             data.root_pos_w[0, 0] = 99.
         recorder.capture(torch.tensor([[.5, 0., 0.]]), torch.tensor([done]))
+    if early_stop and not fell:
+        with pytest.raises(ValueError, match="measurement horizon"):
+            recorder.publish(tmp_path, {})
+        return
     recorder.publish(tmp_path, {})
     assert scene.update is physics_update
     row = bo.read(tmp_path/'bo_trials.json')['trials'][0]
@@ -905,3 +909,17 @@ def test_shard_manifest_reuses_exact_pre_sharding_coordinator_only(tmp_path):
         bo.freeze_candidate_manifest(path,dict(current,updates=100),fixed_reset=True)
     with pytest.raises(ValueError,match='Frozen BO identity'):
         bo.freeze_candidate_manifest(path,dict(current,sources={'bo.py':'new-shard-code','rollout.py':'different'}),fixed_reset=True)
+
+
+def test_early_fall_capture_compatibility_preserves_candidate_manifest(tmp_path):
+    old_sources = dict(**{'bo.py': next(iter(bo.PRE_EARLY_FALL_BO_SHA256)),
+                          'bo_capture.py': next(iter(bo.PRE_EARLY_FALL_CAPTURE_SHA256)),
+                          'rollout.py': 'unchanged'})
+    old = dict(updates=200, sources=old_sources)
+    path = tmp_path/'manifest.json'
+    bo.freeze(path, old)
+    current = dict(updates=200, sources={**old_sources, 'bo.py':'new', 'bo_capture.py':'fixed'})
+    bo.freeze_candidate_manifest(path, current, fixed_reset=True)
+    assert bo.read(path) == old
+    with pytest.raises(ValueError, match='Frozen BO identity'):
+        bo.freeze_candidate_manifest(path, dict(current, updates=100), fixed_reset=True)
