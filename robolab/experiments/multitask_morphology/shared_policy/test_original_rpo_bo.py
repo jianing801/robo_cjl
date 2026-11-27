@@ -53,7 +53,7 @@ def original_rpo_panel(tmp_path, monkeypatch):
     summary = bo.read(archive/'reference_result.json')
     reference_report = dict(
         kind=bo.REPORT_VERSION, domain='simulation', candidate=summary['candidate'],
-        conditions=conditions, conditions_sha256=conditions_sha256, ppo_updates=100, pairs=pairs,
+        conditions=conditions, conditions_sha256=conditions_sha256, ppo_updates=200, pairs=pairs,
     )
     reference = tmp_path/'reference'
     (reference/'candidate').mkdir(parents=True)
@@ -64,7 +64,8 @@ def original_rpo_panel(tmp_path, monkeypatch):
     actor = tmp_path/'selected.pt'
     actor.write_bytes(b'test selected actor')
     protocol = dict(bo.read(archive/'reference_protocol.json'),
-                    source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor))
+                    source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),
+                    updates=200, ppo_algorithm=bo.CURRENT_PPO_ALGORITHM, native_ppo_settings=bo.CURRENT_PPO_SETTINGS)
     if protocol.get('ppo_algorithm') is not None:
         reference_report['ppo_algorithm'] = protocol['ppo_algorithm']
         # Synthetic fixture authority, not the repository's byte-proven archive.
@@ -257,12 +258,13 @@ def test_freeze_scoring_cli_retires_three_metric_formal_profile(original_rpo_pan
         bo.main(['freeze-scoring','--measurements-root',str(panel),'--output',str(output),'--metric-profile','three'])
 
 
-def test_freeze_scoring_cli_defaults_to_checked_in_reference(original_rpo_panel, monkeypatch):
+def test_freeze_scoring_cli_requires_new_measured_reference(original_rpo_panel, monkeypatch):
     panel, _, output, _, _, _, _ = original_rpo_panel
     received = []
     monkeypatch.setattr(bo, 'freeze_original_rpo_scoring', lambda panel,root,output,**kwargs: received.append((root,kwargs)))
-    bo.main(['freeze-scoring','--measurements-root',str(panel),'--output',str(output)])
-    assert received == [(bo.ORIGINAL_RPO_ARCHIVE,dict(metric_profile='four',metric_weights=None))]
+    with pytest.raises(SystemExit):
+        bo.main(['freeze-scoring','--measurements-root',str(panel),'--output',str(output)])
+    assert not received
 
 
 def test_four_metric_custom_weights_are_frozen_and_independent_of_current_default(original_rpo_panel, monkeypatch):

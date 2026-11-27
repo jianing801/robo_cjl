@@ -80,12 +80,12 @@ def correction_settings(profile):
 
 # A new identity keeps the selected B protocol distinct from the archived V4
 # calibration and from the original controlled ablation receipts.
-CURRENT_PPO_PROFILE = 'fixed_amp_std_pcgrad'
-CURRENT_PPO_ALGORITHM = 'shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std'
+CURRENT_PPO_PROFILE = ALL_FIXED_STD_PROFILE
+CURRENT_PPO_ALGORITHM = ALL_FIXED_STD_ALGORITHM
 CURRENT_PPO_SETTINGS = correction_settings(CURRENT_PPO_PROFILE)
 NATIVE_PPO_PROFILES[CURRENT_PPO_ALGORITHM] = CURRENT_PPO_SETTINGS
-NATIVE_PPO_PROFILES[ALL_FIXED_STD_ALGORITHM] = correction_settings(ALL_FIXED_STD_PROFILE)
-EXPERT_PRIOR_ALGORITHMS = (NATIVE_PPO_ALGORITHM, CURRENT_PPO_ALGORITHM, ALL_FIXED_STD_ALGORITHM)
+NATIVE_PPO_PROFILES['shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std'] = correction_settings('fixed_amp_std_pcgrad')
+EXPERT_PRIOR_ALGORITHMS = (NATIVE_PPO_ALGORITHM, CURRENT_PPO_ALGORITHM, 'shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std')
 
 
 def resolve_training_profile(experimental_profile=None):

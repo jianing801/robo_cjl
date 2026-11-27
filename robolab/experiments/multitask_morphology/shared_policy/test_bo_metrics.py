@@ -229,7 +229,7 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     initial.write_bytes(b'initial')
     conditions_path = bo.PHYSICS_CONDITIONS
     conditions = bo.read_conditions(conditions_path)
-    updates = 100
+    updates = bo.DEFAULT_BO_UPDATES
     plan = dict(teachers={task: dict(design_ids=[task+'id'], bank_sha256=task, full_body_torque=True)
                           for task in bo.TASKS})
     candidate = dict(structure_key=[.3,.35,'K','A'], design_ids={t:t+'id' for t in bo.TASKS})
@@ -260,7 +260,7 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
         dest=Path(arg('--output')); dest.mkdir(parents=True,exist_ok=True)
         if Path(command[2]).name=='mixed_finetune.py':
             calls.append('finetune')
-            assert arg('--updates')=='100' and arg('--num-envs')=='4096'
+            assert arg('--updates')=='200' and arg('--num-envs')=='4096'
             assert '--training-only' not in command and arg('--device')=='cuda:0'
             assert ('--compact-training-artifacts' in command) is expect_compact
             assert ('--resume' in command) is (frozen_compaction is not None)
@@ -291,7 +291,7 @@ def test_candidate_evaluation_checks_handoff_and_reuses_measurements(
     bo.main(args)
     assert not (out/'USER_PAUSED').exists()
     first=bo.read(out/'bo_evaluation.json')
-    assert first['ppo_updates']==100 and first['ppo_algorithm']==bo.CURRENT_PPO_ALGORITHM
+    assert first['ppo_updates']==200 and first['ppo_algorithm']==bo.CURRENT_PPO_ALGORITHM
     assert all(pair['feasible'] for pair in first['pairs'])
     assert calls==['finetune',*bo.TASKS]
     assert len(list((out/'measurements').glob('*/accepted.json')))==3
@@ -572,6 +572,9 @@ def official_panel(tmp_path, monkeypatch):
         bo.freeze(folder/'bo_evaluation.json',report)
         return report
     monkeypatch.setattr(bo,'evaluate',synthetic)
+    # The real continuation chain is independently exercised by test_dagger_bo_input.
+    import dagger_bo_input
+    monkeypatch.setattr(dagger_bo_input, 'continuation_actor', lambda *_: actor)
 
     return SimpleNamespace(root=tmp_path,calls=calls,selection=selection_path,student=actor,
                            fixed_ids=[ids[k]['stairs'] for k in fixed])
@@ -579,10 +582,10 @@ def official_panel(tmp_path, monkeypatch):
 def test_official_panel_initializes_once_and_only_measures(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
-    assert p.calls==[(k,bo.sha(p.student),100) for k in p.fixed_ids]
-    panel=p.root/'bo/calibration50_pcgrad_ppo100_200hz'
+    assert p.calls==[(k,bo.sha(p.student),200) for k in p.fixed_ids]
+    panel=p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
     manifest=bo.read(panel/'manifest.json')
-    assert manifest['updates']==100 and manifest['selection_velocity_frame']=='horizontal_heading'
+    assert manifest['updates']==200 and manifest['selection_velocity_frame']=='horizontal_heading'
     assert manifest['ppo_schedule']==dict(epochs=5,minibatches=4)
     assert manifest['init_at_random_ep_len'] is True
     assert manifest['envs_per_task']==dict(stairs=1366,backpack=1365,run=1365)
@@ -600,9 +603,9 @@ def test_scheme_b_reference_freezes_and_validates_matching_native_measurements(o
     p=official_panel; source=p.root/'shared_plan/plan.json'
     row=next(r for r in bo.read(p.root/'bank.json')['structures'] if r['design_ids']['stairs']==p.fixed_ids[1])
     candidate=dict(structure_key=row['key'],design_ids=row['design_ids'])
-    archive=p.root/'historical_reference'; archive.mkdir()
-    (archive/'manifest.json').write_text(json.dumps(dict(design_key=row['key'])))
-    monkeypatch.setattr(bo,'ORIGINAL_RPO_ARCHIVE',archive)
+    # A new reference must not depend on the obsolete V4 archive.
+    monkeypatch.setattr(bo,'ORIGINAL_RPO_ARCHIVE',p.root/'absent_historical_reference')
+    monkeypatch.setattr(bo,'RPO_REFERENCE_KEY',tuple(row['key']))
     shared=bo.read(source)
     shared['teachers']={t:dict(checkpoint_sha256=str(n)*64) for n,t in enumerate(bo.TASKS,1)}
     source.write_text(json.dumps(shared))
@@ -612,7 +615,7 @@ def test_scheme_b_reference_freezes_and_validates_matching_native_measurements(o
     monkeypatch.setattr(finetune_state,'select_candidate',lambda *_args,**_kw:(plan,candidate))
     conditions=bo.read_conditions(bo.PHYSICS_CONDITIONS)
     dest=p.root/'reference_b'; dest.mkdir()
-    args=SimpleNamespace(reference_plan=plan_path,resume_paused=False,updates=100)
+    args=SimpleNamespace(reference_plan=plan_path,resume_paused=False,updates=200)
     bo.prepare_scheme_b_reference(args,dest,source,p.student,conditions)
     protocol=bo.read(dest/'reference_protocol.json')
     assert protocol['ppo_algorithm']==bo.CURRENT_PPO_ALGORITHM
@@ -624,10 +627,10 @@ def test_scheme_b_reference_freezes_and_validates_matching_native_measurements(o
 @pytest.mark.parametrize('flags', [
     ['--conditions',str(bo.LEGACY_FORMAL_CONDITIONS)],
     ['--conditions',str(bo.FORMAL_CONDITIONS)],
-    ['--updates','200'],
+    ['--updates','100'],
 ])
 def test_formal_cli_retires_old_measurement_protocols(official_panel,flags):
-    with pytest.raises(ValueError,match='100-update'):
+    with pytest.raises(ValueError,match='200-update'):
         bo.main(['initialize','--migrated',*flags])
     assert not official_panel.calls
 
@@ -636,7 +639,7 @@ def test_formal_cli_retires_old_measurement_protocols(official_panel,flags):
 def test_official_panel_rejects_changed_evidence_on_reuse(official_panel,change):
     p=official_panel
     bo.main(['initialize','--root',str(p.root)])
-    calib=p.root/'bo/calibration50_pcgrad_ppo100_200hz'
+    calib=p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
     args=['initialize','--root',str(p.root),'--output',str(calib)]
     if change=='actor':
         p.student.write_bytes(b'changed')
@@ -791,7 +794,7 @@ def test_calibration_evaluation_timer_counts_only_accepted_new_measurements(tmp_
 def test_measurement_only_panel_defers_scoring(official_panel):
     p = official_panel
     bo.main(['initialize', '--migrated', '--measure-only'])
-    out = p.root/'bo/calibration50_pcgrad_ppo100_200hz'
+    out = p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
     assert len(bo.read(out/'measurements_completed.json')['reports']) == 50
     assert bo.read(out/'evaluation_timing.json') == dict(accepted_measurements=150, evaluation_seconds=450.)
     assert not (out/'scoring.json').exists()
@@ -800,7 +803,7 @@ def test_measurement_only_panel_defers_scoring(official_panel):
 def test_scheme_b_panel_reuses_tuning_without_legacy_scoring_file(official_panel):
     p=official_panel
     bo.main(['initialize','--migrated'])
-    original=p.root/'bo/calibration50_pcgrad_ppo100_200hz'
+    original=p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
     frozen=bo.sha(original/'manifest.json'),bo.sha(original/'measurements_completed.json')
     target=p.root/'remeasured'
     assert not (original/'scoring.json').exists()
@@ -815,7 +818,7 @@ def test_scheme_b_panel_reuses_tuning_without_legacy_scoring_file(official_panel
 def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, monkeypatch):
     p = official_panel
     bo.main(['initialize', '--migrated', '--measure-only'])
-    out = p.root/'bo/calibration50_pcgrad_ppo100_200hz'
+    out = p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
     scoring_out=p.root/'new_scoring'
     args=['freeze-scoring','--measurements-root',str(out),'--output',str(scoring_out),'--original-rpo-reference',str(p.root/'reference')]
     reference=bo.read(out/'design_02/bo_evaluation.json')

@@ -11,11 +11,11 @@ import bo
 import bo_continuous
 
 
-def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypatch):
+def test_search_cli_defaults_to_200_updates_and_routes_to_continuous(tmp_path, monkeypatch):
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
     scoring = tmp_path/'scoring.json'
     scoring.write_text(json.dumps({'method': bo.ORIGINAL_RPO_FOUR_METRIC_METHOD, 'conditions_sha256': bo.digest(conditions),
-        'benchmark': dict(ppo_algorithm=bo.CURRENT_PPO_ALGORITHM, native_ppo_settings=bo.CURRENT_PPO_SETTINGS)}))
+        'benchmark': dict(ppo_algorithm=bo.CURRENT_PPO_ALGORITHM, native_ppo_settings=bo.CURRENT_PPO_SETTINGS, updates=200)}))
     source, actor = tmp_path/'plan', tmp_path/'actor'
     plan = {'marker': 'frozen plan'}
     output = tmp_path/'new_continuous'
@@ -32,7 +32,7 @@ def test_search_cli_defaults_to_100_and_routes_to_continuous(tmp_path, monkeypat
     bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring), '--output', str(output)])
     (b, a, work), = calls
     assert b is bo and work == output.resolve()
-    assert a.trials == 100 and a.updates == 100
+    assert a.trials == 100 and a.updates == 200
     assert a.ppo_algorithm == bo.CURRENT_PPO_ALGORITHM
     assert a.history is None and a.history_budget is None and a.allowed_ankles is None
 
@@ -46,7 +46,7 @@ def test_search_cli_rejects_retired_percentile_default(tmp_path, method):
         bo.main(['search', '--root', str(tmp_path), '--scoring', str(scoring), '--trials', '100'])
 
 
-@pytest.mark.parametrize('old_native', [False, True, 'v4'])
+@pytest.mark.parametrize('old_native', [False, True, 'v4', 'fixed_amp_only'])
 def test_search_cli_rejects_old_ppo_before_any_worker(tmp_path, monkeypatch, old_native):
     from finetune_settings import NATIVE_PPO_ALGORITHM_V3, NATIVE_PPO_SETTINGS_V3
     conditions = bo.read_conditions(bo.PHYSICS_CONDITIONS)
@@ -55,6 +55,9 @@ def test_search_cli_rejects_old_ppo_before_any_worker(tmp_path, monkeypatch, old
                       native_ppo_settings=NATIVE_PPO_SETTINGS_V3) if old_native else {})
     if old_native=='v4':
         benchmark=dict(ppo_algorithm=bo.NATIVE_PPO_ALGORITHM,native_ppo_settings=bo.NATIVE_PPO_SETTINGS)
+    if old_native=='fixed_amp_only':
+        algorithm='shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std'
+        benchmark=dict(ppo_algorithm=algorithm,native_ppo_settings=bo.NATIVE_PPO_PROFILES[algorithm])
     scoring.write_text(json.dumps({'method': bo.ORIGINAL_RPO_FOUR_METRIC_METHOD,
                                   'conditions_sha256': bo.digest(conditions), 'benchmark': benchmark}))
     monkeypatch.setattr(bo, 'shared_input', lambda *args, **kwargs: pytest.fail('old scoring cannot launch new BO'))

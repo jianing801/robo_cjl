@@ -104,8 +104,11 @@ def test_bo_uses_twenty_percent_success_across_all_rounds_including_the_base(cha
     latest = base.parent/f'round_{index}'
     archived = read(latest/'comparison.json')
     assert archived['selected_round'] == (4 if archived['rule'] == SELECTION_RULE else 2)
-    winner = base/'bc_round_2'/'attempt_fixture'/'student_epoch_0009.pt'
-    assert continuation_actor(latest, base, plan_path, plan, base_actor) == winner
+    if index != 5:
+        with pytest.raises(ValueError, match='fifth DAgger round'):
+            continuation_actor(latest, base, plan_path, plan, base_actor)
+    else:
+        assert continuation_actor(latest, base, plan_path, plan, base_actor) == Path(read(latest/'completed.json')['student'])
 
 
 @pytest.mark.parametrize('mismatch', ['base_directory', 'base_actor', 'base_as_extension', 'unfinished'])

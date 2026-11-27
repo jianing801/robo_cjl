@@ -8,7 +8,7 @@ import bo
 from contract import structure_key
 
 
-RPO_REFERENCE = (0.25, 0.30, 'DM-J10010L-2EC', 'DM-J4340P-2EC')
+RPO_REFERENCE = bo.RPO_REFERENCE_KEY
 BANKS = {'stairs': 'rough', 'backpack': 'backpack', 'run': 'amp'}
 
 

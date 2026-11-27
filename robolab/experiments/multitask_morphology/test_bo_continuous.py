@@ -97,7 +97,7 @@ def test_trial_materialization_exact_key_reuses_only_matching_bank(tmp_path):
 def test_verify_old_trial_is_read_only_and_checks_native_reports(tmp_path, monkeypatch):
     root = tmp_path/'trial_0050'/'candidate'
     root.mkdir(parents=True)
-    benchmark = dict(source_plan_sha256='source', initial_actor_sha256='actor', updates=100)
+    benchmark = dict(source_plan_sha256='source', initial_actor_sha256='actor', updates=200)
     report = dict(candidate=dict(design_ids=dict(stairs='id', backpack='b',run='r'),
                                  structure_key=[.4, .3, 'k0', 'a0']))
     file = root/'bo_evaluation.json'
@@ -148,7 +148,7 @@ def synthetic_initial(tmp_path, monkeypatch):
     source = tmp_path/'plan.json'; source.write_text('{}')
     actor = tmp_path/'actor.pt'; actor.write_text('actor')
     scoring = tmp_path/'scoring.json'; scoring.write_text('{}')
-    a = SimpleNamespace(history=None, history_budget=None, scoring=scoring, updates=100, seed=42,
+    a = SimpleNamespace(history=None, history_budget=None, scoring=scoring, updates=200, seed=42,
                         trials=51, allowed_ankles=None, resume_paused=False)
     keys = [(round(.2+i*.003,10),.3,'k0','a0') for i in range(50)]
     grid = {k:dict(key=list(k),design_ids={t:f'{t}-{i}' for t in bo.TASKS}) for i,k in enumerate(keys)}
@@ -158,11 +158,11 @@ def synthetic_initial(tmp_path, monkeypatch):
     evidence = []
     for i,k in enumerate(keys):
         p = panel/f'report-{i}.json'
-        r = dict(candidate=dict(structure_key=list(k),design_ids=grid[k]['design_ids']),ppo_updates=100,
+        r = dict(candidate=dict(structure_key=list(k),design_ids=grid[k]['design_ids']),ppo_updates=200,
                  objective=1+i*.001)
         p.write_text(json.dumps(r)); reports[p] = r
         evidence.append(dict(report=p.name,sha256=bo.sha(p)))
-    benchmark = dict(source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),updates=100,
+    benchmark = dict(source_plan_sha256=bo.sha(source), initial_actor_sha256=bo.sha(actor),updates=200,
                      reports=evidence)
     monkeypatch.setattr(bo,'read_search_benchmark',lambda *args:(panel,benchmark))
     monkeypatch.setattr(bo,'calibration_keys',lambda:keys)
@@ -191,7 +191,7 @@ def test_initial50_only_and_new_trial_51_then_resume(tmp_path,monkeypatch):
         calls.append('prepare');assert args[-1]==k
         return native_source,native_plan,'stairs'
     candidate_report=dict(candidate=dict(structure_key=list(k),design_ids={t:t for t in bo.TASKS}),
-                          ppo_updates=100,objective=.8)
+                          ppo_updates=200,objective=.8)
     def evaluate(a,folder,*args):
         calls.append('evaluate');folder.mkdir();bo.freeze(folder/'bo_evaluation.json',candidate_report)
         return candidate_report
@@ -233,7 +233,7 @@ def test_completed_history_import_same_protocol_read_only(tmp_path,monkeypatch):
     manifest['coordinator_sha256']='a'*64  # historical coordinator, not rewritten current version
     bo.freeze(old/'manifest.json',manifest)
     trial=old/'trial_0050';candidate=trial/'candidate';candidate.mkdir(parents=True)
-    k=(.4,.3295602428,'k4','a4'); report=dict(candidate=dict(structure_key=list(k),design_ids={t:t for t in bo.TASKS}),ppo_updates=100,objective=.8)
+    k=(.4,.3295602428,'k4','a4'); report=dict(candidate=dict(structure_key=list(k),design_ids={t:t for t in bo.TASKS}),ppo_updates=200,objective=.8)
     proposal=dict(kind='continuous_bo_proposal_v1',trial_number=51,structure_key=list(k),existing_grid_design_id=None,acquisition={})
     bo.freeze(trial/'proposal.json',proposal)
     bo.freeze(candidate/'bo_evaluation.json',report)
@@ -270,7 +270,7 @@ def test_import_inherited_offgrid_budget_keeps_earlier_paths(tmp_path,monkeypatc
     def committed(root,i,k,cost):
         trial=root/f'trial_{i:04d}';candidate=trial/'candidate';candidate.mkdir(parents=True)
         r=dict(candidate=dict(structure_key=list(k),design_ids={t:t+str(i) for t in bo.TASKS}),
-               ppo_updates=100,objective=cost)
+               ppo_updates=200,objective=cost)
         # Stub IDs by trial; actual source/asset checks have separate tests.
         reports_by_path[candidate]=(native_source,{'schema':SCHEMA,'teachers':{t:{'design_ids':[t+str(i)]} for t in bo.TASKS}},'stairs'+str(i),r)
         proposal=dict(kind='continuous_bo_proposal_v1',trial_number=i+1,structure_key=list(k),existing_grid_design_id=None,acquisition={})
@@ -429,7 +429,7 @@ def test_full_formal_quota_search_resumes_and_counts_only_committed_new_trials(t
         ids={t:spec['design_ids'][0] for t,spec in native_plan['teachers'].items()}
         k=native_plan['selected_structure_keys'][0]
         assert design_id==ids['stairs']
-        report=dict(candidate=dict(structure_key=k,design_ids=ids),ppo_updates=100,
+        report=dict(candidate=dict(structure_key=k,design_ids=ids),ppo_updates=200,
                     objective=.9+.001*len(accepted))
         folder.mkdir()
         bo.freeze(folder/'bo_evaluation.json',report)

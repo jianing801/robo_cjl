@@ -742,7 +742,7 @@ def distill(root, gpu, preview=False, collection_profile='robust', randomization
     run(command, preview=preview)
 
 
-def finetune(root, gpu, design_id, design_task='stairs', updates=100, preview=False,
+def finetune(root, gpu, design_id, design_task='stairs', updates=200, preview=False,
              resume_paused=False, output=None, continuation=None):
     plan_path = root/'shared_plan/plan.json'
     complete_path = root/'shared_policy/completed.json'
@@ -757,7 +757,7 @@ def finetune(root, gpu, design_id, design_task='stairs', updates=100, preview=Fa
         raise ValueError('候选结构必须在共同结构表中唯一对应。')
     key = matches[0]['key']
     token = hashlib.sha256(json.dumps(key,separators=(',',':')).encode()).hexdigest()[:16]
-    output = Path(output).resolve() if output else root/'candidate_finetuning'/token
+    output = Path(output).resolve() if output else root/'candidate_finetuning_round5_ppo200'/token
     command = [sys.executable, '-u', ENTRY/'bo.py', 'evaluate', '--root', root,
         '--output', output, '--candidate', matches[0]['design_ids']['stairs'],
         '--updates', str(updates), '--gpu', str(gpu)]
@@ -803,7 +803,7 @@ def main(argv=None):
     parser.add_argument('--结构', type=int, default=0, help='录像的结构序号，从0开始')
     parser.add_argument('--candidate-design-id', help='微调所选任务结构库中的真实结构ID')
     parser.add_argument('--candidate-task', choices=['stairs','backpack','run'], default='stairs')
-    parser.add_argument('--finetune-updates', type=int, default=100)
+    parser.add_argument('--finetune-updates', type=int, default=200)
     parser.add_argument('--finetune-output', type=Path, help='可选：为候选微调指定独立实验目录')
     parser.add_argument('--scoring', type=Path, help='BO：新版专家先验 PPO 微调的四指标原机比值评分文件')
     parser.add_argument('--shared-continuation', type=Path, help='BO：已完成的共享策略续轮目录')

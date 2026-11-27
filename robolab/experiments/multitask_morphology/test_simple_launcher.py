@@ -111,7 +111,7 @@ def test_finetune_launcher_routes_to_current_bo_evaluator(tmp_path, monkeypatch)
     assert command[2:4] == [str(launcher.ENTRY/'bo.py'), 'evaluate']
     assert command[command.index('--candidate')+1] == 'stairs-id'
     assert command[command.index('--shared-continuation')+1] == str(continuation)
-    assert command[command.index('--updates')+1] == '100'
+    assert command[command.index('--updates')+1] == '200'
     assert command[command.index('--gpu')+1] == '2'
     assert '--evaluation-profile' not in command
     assert options['preview'] is True

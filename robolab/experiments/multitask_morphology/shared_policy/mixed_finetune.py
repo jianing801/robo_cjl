@@ -392,7 +392,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--design-id', required=True)
     parser.add_argument('--num-envs', type=int, default=MIXED_BO_ENVS)
-    parser.add_argument('--updates', type=int, default=100)
+    parser.add_argument('--updates', type=int, default=200)
     parser.add_argument('--init-at-random-ep-len', action=argparse.BooleanOptionalAction, default=True,
                         help='Use ordinary RSL-RL episode counter initialization before the first update')
     parser.add_argument('--seed', type=int, default=20261104)

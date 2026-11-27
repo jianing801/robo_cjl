@@ -513,7 +513,7 @@ def search(bo, a, work, donor_source, donor_plan, actor, conditions, *, prepare=
     if getattr(a,'history',None) is not None:
         check_separation(a.history,work)
     if a.trials < INITIAL_PANEL_SIZE or a.updates != bo.DEFAULT_BO_UPDATES:
-        raise ValueError('BO requires >=50 total structures with the original 100-update PPO protocol')
+        raise ValueError('BO requires >=50 total structures with the current 200-update PPO protocol')
     scoring = bo.read(a.scoring)
     scoring_protocol(bo, scoring, conditions)
     grid = grid_lookup(bo, donor_plan)

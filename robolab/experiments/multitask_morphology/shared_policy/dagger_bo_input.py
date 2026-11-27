@@ -44,6 +44,8 @@ def continuation_actor(extension: Path, base: Path, plan_path: Path, plan: dict,
 def _continuation_actor(extension, base, plan_path, plan, base_actor, engine):
     plan_path = plan_path.resolve()
     source = load_parent(extension, plan_path, engine=engine)
+    if source['round_index'] != 5:
+        raise ValueError('Formal BO requires the completed fifth DAgger round')
     if source['completion'].get('kind') != CONTINUATION_KIND:
         raise ValueError('BO requires a completed DAgger continuation')
     if source['base'] != base.resolve() or Path(source['selection']['selected_student']) != base_actor.resolve():
@@ -61,4 +63,5 @@ def _continuation_actor(extension, base, plan_path, plan, base_actor, engine):
     validation = {} if engine == HERE else {'frozen_protocol': protocol['selection']}
     _, _, incumbent = verify_selection_history(settings, source, plan, ids, jobs,
                                                protocol['selection_seeds'], criteria, **validation)
-    return Path(incumbent['student'])
+    # The approved BO baseline is round five itself, not the historically best incumbent.
+    return Path(source['student'])

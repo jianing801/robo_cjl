@@ -27,9 +27,9 @@ def test_legacy_ablation_identity_and_formal_scheme_b():
                                    NATIVE_PPO_PROFILES,resolve_training_profile)
     algorithm,profile,settings=resolve_training_profile()
     assert algorithm==CURRENT_PPO_ALGORITHM!=NATIVE_PPO_ALGORITHM
-    assert profile=='fixed_amp_std_pcgrad' and settings==correction_settings(profile)
+    assert profile=='fixed_all_std_pcgrad' and settings==correction_settings(profile)
     assert settings==CURRENT_PPO_SETTINGS==NATIVE_PPO_PROFILES[algorithm]
-    assert resolve_training_profile(profile)==(NATIVE_PPO_ALGORITHM,profile,settings)
+    assert resolve_training_profile(profile)==(CURRENT_PPO_ALGORITHM,profile,settings)
 
 
 def test_pcgrad_removes_pairwise_conflicting_component_without_changing_aligned_sum():
@@ -48,7 +48,7 @@ def test_weighted_stairs_profile_preserves_formal_b_and_scales_contributions():
     settings=correction_settings(STAIRS_WEIGHT_PROFILE)
     assert settings['actor_gradient_weights']==dict(stairs=2.,backpack=1.,run=1.)
     assert settings['actor_gradient_weight_normalization']=='mean_one'
-    assert {k:v for k,v in settings.items() if not k.startswith('actor_gradient_weight')}==CURRENT_PPO_SETTINGS
+    assert {k:v for k,v in settings.items() if not k.startswith('actor_gradient_weight')}==correction_settings('fixed_amp_std_pcgrad')
     assert resolve_training_profile()[2]==CURRENT_PPO_SETTINGS
     aligned=torch.eye(3)
     weights=(2.,1.,1.)
@@ -85,7 +85,7 @@ def test_kl_pilot_changes_only_desired_kl_and_uses_native_value():
     from finetune_settings import KL_PILOT_PROFILE, CURRENT_PPO_SETTINGS, correction_settings
     from native_ppo import build_native_learner
     settings=correction_settings(KL_PILOT_PROFILE)
-    assert settings==dict(CURRENT_PPO_SETTINGS,desired_kl=.02)
+    assert settings==dict(correction_settings('fixed_amp_std_pcgrad'),desired_kl=.02)
     cfg,state=amp_settings()
     alg=build_native_learner(Actor(),(2,2,2),(4,6,3),cfg,state,None,'cpu',teacher_priors=teacher_priors(),
                             steps=2,num_epochs=1,num_minibatches=1,desired_kl=settings['desired_kl'])
@@ -100,7 +100,7 @@ def test_stairs_larger_sample_profile_uses_unweighted_unequal_native_batches():
     from native_ppo import build_native_learner
     from test_native_ppo import observation,amp_obs
     settings=correction_settings(STAIRS_SAMPLE_PROFILE)
-    assert settings==dict(CURRENT_PPO_SETTINGS,envs_per_task=dict(stairs=2048,backpack=1024,run=1024))
+    assert settings==dict(correction_settings('fixed_amp_std_pcgrad'),envs_per_task=dict(stairs=2048,backpack=1024,run=1024))
     counts=(4,2,2);cfg,state=amp_settings()
     alg=build_native_learner(Actor(),counts,(4,6,3),cfg,state,None,'cpu',teacher_priors=teacher_priors(),
                             steps=2,num_epochs=1,num_minibatches=1)
@@ -122,10 +122,10 @@ def test_all_teacher_exploration_profile_changes_only_frozen_rows():
     from finetune_settings import (ALL_FIXED_STD_PROFILE, ALL_FIXED_STD_ALGORITHM,
         CURRENT_PPO_ALGORITHM, CURRENT_PPO_SETTINGS, EXPERT_PRIOR_ALGORITHMS, resolve_training_profile)
     algorithm,profile,settings=resolve_training_profile(ALL_FIXED_STD_PROFILE)
-    assert profile==ALL_FIXED_STD_PROFILE and algorithm==ALL_FIXED_STD_ALGORITHM!=CURRENT_PPO_ALGORITHM
+    assert profile==ALL_FIXED_STD_PROFILE and algorithm==ALL_FIXED_STD_ALGORITHM==CURRENT_PPO_ALGORITHM
     assert algorithm in EXPERT_PRIOR_ALGORITHMS
     assert settings==dict(CURRENT_PPO_SETTINGS,fixed_expert_std_tasks=['stairs','backpack','run'])
-    assert CURRENT_PPO_SETTINGS['fixed_expert_std_tasks']==['run']
+    assert CURRENT_PPO_SETTINGS['fixed_expert_std_tasks']==['stairs','backpack','run']
     alg=learner(None)
     alg.fix_expert_std(tuple(settings['fixed_expert_std_tasks']));alg.actor_projection=True
     initial=alg.policy.std.detach().clone();disc=alg.amp_discriminator.disc_linear.weight.detach().clone()
