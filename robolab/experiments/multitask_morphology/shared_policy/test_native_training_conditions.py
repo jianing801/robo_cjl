@@ -51,3 +51,16 @@ def test_formal_scheme_b_identity_rejects_prechange_measurements():
     assert CURRENT_PPO_SETTINGS['training_conditions']==NATIVE_EXPERT_CONDITIONS
     legacy={k:v for k,v in CURRENT_PPO_SETTINGS.items() if k!='training_conditions'}
     assert legacy!=NATIVE_PPO_PROFILES[CURRENT_PPO_ALGORITHM]
+
+
+def test_live_terrain_statistics_are_not_startup_snapshot():
+    import torch
+    from training_reward import rough_terrain_snapshot, terrain_curriculum_rows
+    raw=NS(scene=NS(terrain=NS(terrain_levels=torch.tensor([0,1,1,4]))),num_envs=4)
+    a=rough_terrain_snapshot(raw)
+    assert a==dict(mean=1.5,min=0,max=4,environment_count=4,level_counts={'0':1,'1':2,'4':1})
+    raw.scene.terrain.terrain_levels[:] = torch.tensor([2,2,3,5])
+    b=rough_terrain_snapshot(raw)
+    assert b['mean']==3. and a['mean']==1.5
+    rows=list(terrain_curriculum_rows([dict(completed_updates=1,metrics=dict(rough_terrain=a)),dict(completed_updates=2,metrics=dict(rough_terrain=b))]))
+    assert [r['mean'] for r in rows]==[1.5,3.]

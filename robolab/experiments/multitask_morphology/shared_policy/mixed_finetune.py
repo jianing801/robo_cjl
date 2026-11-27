@@ -23,7 +23,8 @@ from randomization import protocol_metadata, assert_protocol_unchanged
 from native_training_conditions import (NATIVE_EXPERT_CONDITIONS, LEGACY_CONDITIONS,
     TRAINING_CONDITIONS, validate_training_conditions)
 from student import load_student
-from training_reward import RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv, write_training_reward_csv
+from training_reward import (RolloutRewards, mean_reward_rows, reward_history_rows, write_mean_reward_csv,
+    write_training_reward_csv, rough_terrain_snapshot, write_terrain_curriculum_csv)
 
 
 HERE = Path(__file__).resolve().parent
@@ -281,16 +282,18 @@ def train(a, root, attempt, plan, candidate, protocol, counts, *, layout_callbac
     if restored is not None and restored['completed_updates'] != completed:
         raise ValueError('Restored native learning state differs from its committed update')
     retain_updates = {0, a.updates, *[i for i in (100, 200, 500, 800, 1000) if i <= a.updates]}
-    if a.experimental_profile == V4_STAIRS5120_EPOCH10_PROFILE:
+    if a.experimental_profile == V4_STAIRS5120_EPOCH10_PROFILE or getattr(a, "checkpoint_interval", None) is not None:
         retain_updates = {0, a.updates, *range(checkpoint_interval, a.updates+1, checkpoint_interval)}
     if history:
         prune_native_checkpoints(root, history, retain_updates=retain_updates,
                                  checkpoint_interval=checkpoint_interval)
+    native_conditions = getattr(a, "training_conditions", LEGACY_CONDITIONS) == NATIVE_EXPERT_CONDITIONS
     step_history = reward_history_rows(history, TASKS)
     mean_history = list(mean_reward_rows(history, TASKS))
     if history:
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
+        if native_conditions: write_terrain_curriculum_csv(root, history)
     if completed == a.updates:
         completion_callback(a, root, model.cpu(), candidate, digest, protocol)
         return
@@ -352,6 +355,8 @@ def train(a, root, attempt, plan, candidate, protocol, counts, *, layout_callbac
         torch.cuda.synchronize(a.device)
         metrics.update(collection_seconds=collected-begin, update_seconds=time.monotonic()-collected,
                        torch_peak_mib=torch.cuda.max_memory_allocated(a.device)/2**20)
+        if native_conditions:
+            metrics["rough_terrain"] = rough_terrain_snapshot(tasks[0].raw)
         del batches
         check_pause(root)
         persist_started = time.monotonic()
@@ -369,6 +374,7 @@ def train(a, root, attempt, plan, candidate, protocol, counts, *, layout_callbac
         mean_history.extend(mean_reward_rows([receipt], TASKS))
         write_training_reward_csv(root, step_history)
         write_mean_reward_csv(root, TASKS, mean_history)
+        if native_conditions: write_terrain_curriculum_csv(root, history)
         print('NATIVE_UPDATE_ARTIFACT', update, 'full_checkpoint' if full_checkpoint else 'metrics_only',
               f'seconds={time.monotonic()-persist_started:.3f}', flush=True)
         print('MIXED_PPO_UPDATE', update, '/', a.updates, metrics, flush=True)

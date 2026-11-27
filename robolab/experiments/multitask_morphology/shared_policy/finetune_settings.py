@@ -45,8 +45,10 @@ STAIRS_WEIGHT_PROFILE = 'fixed_amp_std_pcgrad_stairs_weight2'
 KL_PILOT_PROFILE = 'fixed_amp_std_pcgrad_kl002'
 STAIRS_SAMPLE_PROFILE = 'fixed_amp_std_pcgrad_stairs_samples_2048'
 V4_STAIRS5120_EPOCH10_PROFILE = 'v4_stairs5120_epoch10'
+ALL_FIXED_STD_PROFILE = 'fixed_all_std_pcgrad'
+ALL_FIXED_STD_ALGORITHM = 'shared_native_ppoamp_expert_prior_pcgrad_fixed_all_std'
 TRAINING_PROFILES = CORRECTION_PROFILES + (STAIRS_WEIGHT_PROFILE, KL_PILOT_PROFILE, STAIRS_SAMPLE_PROFILE,
-                                          V4_STAIRS5120_EPOCH10_PROFILE)
+                                          V4_STAIRS5120_EPOCH10_PROFILE, ALL_FIXED_STD_PROFILE)
 
 
 def correction_settings(profile):
@@ -58,6 +60,9 @@ def correction_settings(profile):
     if profile == 'fixed_amp_std_pcgrad':
         return dict(NATIVE_PPO_SETTINGS, fixed_expert_std_tasks=['run'], actor_gradient_projection='pcgrad_cyclic',
                     training_conditions='native_expert')
+    if profile == ALL_FIXED_STD_PROFILE:
+        return dict(correction_settings('fixed_amp_std_pcgrad'),
+                    fixed_expert_std_tasks=['stairs','backpack','run'])
     if profile == STAIRS_WEIGHT_PROFILE:
         return dict(correction_settings('fixed_amp_std_pcgrad'),
                     actor_gradient_weights={'stairs': 2., 'backpack': 1., 'run': 1.},
@@ -79,11 +84,14 @@ CURRENT_PPO_PROFILE = 'fixed_amp_std_pcgrad'
 CURRENT_PPO_ALGORITHM = 'shared_native_ppoamp_expert_prior_pcgrad_fixed_amp_std'
 CURRENT_PPO_SETTINGS = correction_settings(CURRENT_PPO_PROFILE)
 NATIVE_PPO_PROFILES[CURRENT_PPO_ALGORITHM] = CURRENT_PPO_SETTINGS
-EXPERT_PRIOR_ALGORITHMS = (NATIVE_PPO_ALGORITHM, CURRENT_PPO_ALGORITHM)
+NATIVE_PPO_PROFILES[ALL_FIXED_STD_ALGORITHM] = correction_settings(ALL_FIXED_STD_PROFILE)
+EXPERT_PRIOR_ALGORITHMS = (NATIVE_PPO_ALGORITHM, CURRENT_PPO_ALGORITHM, ALL_FIXED_STD_ALGORITHM)
 
 
 def resolve_training_profile(experimental_profile=None):
     """Default to the selected B; explicit profiles reproduce the isolated studies."""
     if experimental_profile is None:
         return CURRENT_PPO_ALGORITHM, CURRENT_PPO_PROFILE, CURRENT_PPO_SETTINGS
+    if experimental_profile == ALL_FIXED_STD_PROFILE:
+        return ALL_FIXED_STD_ALGORITHM, experimental_profile, correction_settings(experimental_profile)
     return NATIVE_PPO_ALGORITHM, experimental_profile, correction_settings(experimental_profile)

@@ -1,6 +1,7 @@
 """Summarize observed PPO rewards within one simulator rollout session."""
-from collections import deque
+from collections import Counter, deque
 import csv
+import json
 import os
 from pathlib import Path
 import statistics
@@ -114,3 +115,31 @@ def write_mean_reward_csv(root, tasks, rows):
     for task in tasks:
         fields.extend((task + '_mean_reward', task + '_window_episodes'))
     write_reward_csv(Path(root) / 'mean_reward.csv', fields, rows)
+
+
+def rough_terrain_snapshot(raw):
+    """Read the live per-environment curriculum state without changing it."""
+    levels = raw.scene.terrain.terrain_levels.detach().cpu()
+    if levels.ndim != 1 or len(levels) != raw.num_envs or not len(levels):
+        raise ValueError('Native terrain levels do not cover all Rough environments')
+    values = levels.tolist()
+    if any(v < 0 or int(v) != v for v in values):
+        raise ValueError('Invalid native terrain level')
+    counts = Counter(int(v) for v in values)
+    return dict(mean=statistics.mean(values), min=min(counts), max=max(counts),
+        environment_count=len(values), level_counts={str(k):counts[k] for k in sorted(counts)})
+
+
+def terrain_curriculum_rows(receipts):
+    for receipt in receipts:
+        update = receipt['completed_updates']
+        terrain = (receipt.get('metrics') or {}).get('rough_terrain')
+        if update > 0 and terrain is not None:
+            yield dict(update=update, **{k:terrain[k] for k in ('mean','min','max','environment_count')},
+                level_counts=json.dumps(terrain['level_counts'], sort_keys=True))
+
+
+def write_terrain_curriculum_csv(root, receipts):
+    rows = list(terrain_curriculum_rows(receipts))
+    write_reward_csv(Path(root)/'terrain_curriculum.csv',
+        ['update','mean','min','max','environment_count','level_counts'], rows)

@@ -116,3 +116,22 @@ def test_stairs_larger_sample_profile_uses_unweighted_unequal_native_batches():
     metrics=alg.compute_returns_and_update(obs)
     assert metrics['samples']==16 and 'actor_gradient_weights' not in metrics
     assert torch.equal(alg.policy.std[2],std)
+
+
+def test_all_teacher_exploration_profile_changes_only_frozen_rows():
+    from finetune_settings import (ALL_FIXED_STD_PROFILE, ALL_FIXED_STD_ALGORITHM,
+        CURRENT_PPO_ALGORITHM, CURRENT_PPO_SETTINGS, EXPERT_PRIOR_ALGORITHMS, resolve_training_profile)
+    algorithm,profile,settings=resolve_training_profile(ALL_FIXED_STD_PROFILE)
+    assert profile==ALL_FIXED_STD_PROFILE and algorithm==ALL_FIXED_STD_ALGORITHM!=CURRENT_PPO_ALGORITHM
+    assert algorithm in EXPERT_PRIOR_ALGORITHMS
+    assert settings==dict(CURRENT_PPO_SETTINGS,fixed_expert_std_tasks=['stairs','backpack','run'])
+    assert CURRENT_PPO_SETTINGS['fixed_expert_std_tasks']==['run']
+    alg=learner(None)
+    alg.fix_expert_std(tuple(settings['fixed_expert_std_tasks']));alg.actor_projection=True
+    initial=alg.policy.std.detach().clone();disc=alg.amp_discriminator.disc_linear.weight.detach().clone()
+    actor={k:v.detach().clone() for k,v in alg.policy.actor.state_dict().items()}
+    for _ in range(2):
+        alg.compute_returns_and_update(fill_rollout(alg));alg.verify_fixed_std()
+        assert torch.equal(alg.policy.std,initial)
+    assert not torch.equal(disc,alg.amp_discriminator.disc_linear.weight)
+    assert any(not torch.equal(v,actor[k]) for k,v in alg.policy.actor.state_dict().items())
