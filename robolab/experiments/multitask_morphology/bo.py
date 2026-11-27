@@ -160,7 +160,12 @@ def check_formal_selection(root, plan, manifest, complete, student, *, require_h
         raise ValueError('Selected DAgger checkpoint differs from the reported winner')
 
 
-def shared_input(root, *, formal=False, require_horizontal_selection=False, continuation=None):
+def shared_input(root, *, formal=False, require_horizontal_selection=False, continuation=None, round5_reference=None):
+    if round5_reference is not None:
+        if not formal or not require_horizontal_selection:
+            raise ValueError("A measured round-five reference requires the formal BO protocol")
+        from round5_reference_input import measured_round5_input
+        return measured_round5_input(sys.modules[__name__], root, continuation or root/'shared_policy_round5', round5_reference)
     path = root/'shared_plan/plan.json'
     plan = load_plan(path)
     manifest = read(root/'shared_policy/manifest.json')
@@ -1037,6 +1042,7 @@ def main(argv=None):
         p.add_argument('--conditions', type=Path)
         p.add_argument('--shared-continuation', type=Path,
                        help='Verified completed fifth DAgger round (default: root/shared_policy_round5)')
+        p.add_argument('--round5-reference', type=Path, help='Verify a migrated round-five Actor against its measured PPO200 original-RPO reference instead of transferring replay')
         p.add_argument('--gpu', type=int, default=0)
         p.add_argument('--updates', type=int, default=DEFAULT_BO_UPDATES)
         p.add_argument('--timeout', type=int, default=1800)
@@ -1166,6 +1172,10 @@ def main(argv=None):
             parser.error('A continuation actor requires formal single-seed conditions and the default PPO budget')
         formal = True
         continuation['continuation'] = a.shared_continuation.resolve()
+    if a.round5_reference is not None:
+        if a.command == 'search' and Path(scoring['original_rpo_reference']['root']).resolve() != a.round5_reference.resolve():
+            parser.error("Search reference differs from the frozen normalization")
+        continuation['round5_reference'] = a.round5_reference.resolve()
     if formal:
         official_conditions_path(digest(conditions))
     source, plan, actor = shared_input(a.root, formal=formal, **continuation,

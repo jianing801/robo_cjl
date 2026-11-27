@@ -148,3 +148,20 @@ def test_prefix_rejects_wrong_budget_or_actor_before_loading_source(tmp_path):
     for wrong in (dict(identity, updates=100), dict(identity, initial_actor_sha256='b'*64)):
         with pytest.raises(ValueError, match='PPO or evidence protocol differs'):
             checked_prefix_reference(bo, tmp_path, wrong, c)
+
+
+def test_migrated_round5_uses_explicit_measured_reference(tmp_path, monkeypatch):
+    import round5_reference_input
+    marker = tmp_path/'shared_actor.pt'
+    reference = tmp_path/'reference'
+    extension = tmp_path/'shared_policy_round5'
+    calls = []
+    def load(module, root, continuation, anchor):
+        calls.append((root, continuation, anchor))
+        return root/'shared_plan/plan.json', {}, marker
+    monkeypatch.setattr(round5_reference_input, 'measured_round5_input', load)
+    assert bo.shared_input(tmp_path, formal=True, require_horizontal_selection=True,
+                           round5_reference=reference)[2] == marker
+    assert calls == [(tmp_path, extension, reference)]
+    with pytest.raises(ValueError, match='formal BO'):
+        bo.shared_input(tmp_path, formal=False, round5_reference=reference)

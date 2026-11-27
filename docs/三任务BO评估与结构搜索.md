@@ -37,6 +37,8 @@ conda run --no-capture-output -n robo_cjl python "$entry/bo.py" initialize \
 
 程序按原第 21 组固定顺序得到 50 个观测（与 200 个蒸馏选模结构无重叠）。已有同协议微调产物可用 `--reuse-finetuned-panel <目录>` 复用模型，只补缺失的固定工况测量。方案 B 的原机基准先用已验证的原机单结构预测资产及参考动作计划重新实测；V4 档案不作为 B 的分母。原机基准包含 `reference_protocol.json`、`candidate/bo_evaluation.json`、源训练与检查点身份和三项原始轨迹。[历史 V4 基准](原始配置基准.md) 前 50 个结构和后续新候选均从同一第五轮 Actor 独立开始。
 
+若租卡仅迁移了完整结构库与专家、第五轮最终Actor和完成凭据，而没有迁移原始蒸馏训练回放，可在 `initialize` 和 `search` 两条命令中附加 `--round5-reference "$reference"`。该入口逐项校验第五轮完成、模型与源计划、三个专家及原机200代检查点和原始测量；仍从同一精确第五轮Actor独立微调，不宣称重新读取了原始蒸馏回放。
+
 ### 准备或复用方案 B 的原机基准
 
 5090实例已存在经真实测量的原机200代参考目录 `/root/sj-tmp/rpo_native_conditions_all_fixed_std200_reference_20261127`。将上面的 `reference` 变量指向该目录（原始数据必须仍可读取），直接使用后面的 `freeze-scoring`，不重复训练或评估原机。其他实例缺少完整原始证据时，可按以下方式重新准备。
