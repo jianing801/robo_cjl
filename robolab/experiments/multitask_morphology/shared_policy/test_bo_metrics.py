@@ -868,3 +868,40 @@ def test_freeze_scoring_only_reads_verified_native_measurements(official_panel, 
     assert scoring['cot_basis'] == 'absolute_mechanical'
     assert bo.read(scoring_out/'completed.json')['scoring_sha256'] == bo.sha(scoring_out/'scoring.json')
     assert len(bo.read(scoring_out/'initial_observations.json')['candidates'])==50
+
+
+def test_panel_shards_do_not_publish_partial_panel_or_repeat_candidates(official_panel):
+    p = official_panel
+    base = ['initialize', '--migrated']
+    panel = p.root/'bo/calibration50_pcgrad_ppo200_fixed_all_std_200hz'
+    bo.main(base + ['--first-index','1','--last-index','27'])
+    assert [c[0] for c in p.calls] == p.fixed_ids[:27]
+    assert not (panel/'measurements_completed.json').exists()
+    assert len(bo.read(panel/'shard_01_27_completed.json')['reports']) == 27
+    with pytest.raises(ValueError, match='missing'):
+        bo.main(base + ['--finalize-only'])
+    bo.main(base + ['--first-index','28','--last-index','50'])
+    assert [c[0] for c in p.calls] == p.fixed_ids
+    assert not (panel/'measurements_completed.json').exists()
+    assert len(bo.read(panel/'shard_28_50_completed.json')['reports']) == 23
+    bo.main(base + ['--first-index','28','--last-index','50'])
+    assert len(p.calls) == 50
+    bo.main(base + ['--finalize-only'])
+    assert len(p.calls) == 50
+    assert len(bo.read(panel/'measurements_completed.json')['reports']) == 50
+    reports, _, _, _ = bo.checked_measurement_panel(panel)
+    assert len(reports) == 50
+
+
+def test_shard_manifest_reuses_exact_pre_sharding_coordinator_only(tmp_path):
+    prefix = next(iter(bo.PRE_SHARD_BO_SHA256))
+    path = tmp_path/'manifest.json'
+    prior = dict(updates=200, conditions_sha256='formal', sources={'bo.py':prefix,'rollout.py':'same'})
+    bo.freeze(path, prior)
+    current = dict(prior, sources={'bo.py':'new-shard-code','rollout.py':'same'})
+    bo.freeze_candidate_manifest(path,current,fixed_reset=True)
+    assert bo.read(path) == prior
+    with pytest.raises(ValueError,match='Frozen BO identity'):
+        bo.freeze_candidate_manifest(path,dict(current,updates=100),fixed_reset=True)
+    with pytest.raises(ValueError,match='Frozen BO identity'):
+        bo.freeze_candidate_manifest(path,dict(current,sources={'bo.py':'new-shard-code','rollout.py':'different'}),fixed_reset=True)

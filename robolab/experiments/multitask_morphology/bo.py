@@ -20,6 +20,11 @@ DEFAULT_BO_UPDATES = 200
 PREVIOUS_BO_UPDATES = 100
 PRE_TRAINING_ONLY_BO_SHA256 = '203b9aada3b4615464b04491ba61f9d59ecd27219f0f061e8540661b4c61d053'
 # LF and CRLF coordinator hashes before the measurement-import default changed.
+# Exact pre-sharding coordinator bytes from 6b9da38 (LF and CRLF).
+PRE_SHARD_BO_SHA256 = {
+    'bc55b5b738561afa2c6dc584429eacf872e31af51161ae26a4a8b363c3774edb',
+    '037b36b39fc6e6dbcb049e4ba566db48f6c7640831a89dc0b09f23d769235ea6',
+}
 PRE_INGEST_ALIGNMENT_BO_SHA256 = {
     'fead4dca36355e514f86981a1526cd79c1bb96ce7ee12a7c8e7d16cde9773233',
     'af10e96ee860c92e62f88f487d19d0d6984b4a32f4bbec27ef5e39f6703d336b',
@@ -79,7 +84,7 @@ def freeze_candidate_manifest(path, identity, *, fixed_reset=False):
     if path.is_file():
         saved = read(path)
         coordinator = saved.get('sources', {}).get('bo.py')
-        if (coordinator in PRE_INGEST_ALIGNMENT_BO_SHA256
+        if (coordinator in PRE_INGEST_ALIGNMENT_BO_SHA256 | PRE_SHARD_BO_SHA256
                 and saved == dict(identity, sources={**identity['sources'], 'bo.py': coordinator})):
             return
         if not fixed_reset:
@@ -737,6 +742,8 @@ def checked_measurement_panel(work):
             raise ValueError('Reused calibration tuning panel changed')
     reports = [checked_panel_candidate(work, index, entry, benchmark, conditions, tuning_panel)
                for index, entry in enumerate(evidence['reports'], 1)]
+    if [tuple(report['candidate']['structure_key']) for report in reports] != list(map(tuple,keys)):
+        raise ValueError('Measurement panel has wrong or duplicate physical structure keys')
     return reports, keys, dict(benchmark, reports=evidence['reports']), conditions
 
 
@@ -957,26 +964,65 @@ def initialize(a, work, source, plan, actor, conditions):
         print('BO_CALIBRATION_MEASUREMENTS_READY',work/'measurements_completed.json',flush=True)
         return
     resume_pause(work,a.resume_paused)
+    first, last = getattr(a,'first_index',1), getattr(a,'last_index',50)
+    finalize = getattr(a,'finalize_only',False)
+    if not 1 <= first <= last <= len(keys) or (finalize and (first,last) != (1,len(keys))):
+        raise ValueError('Invalid fixed 50-structure shard bounds')
+    if finalize:
+        # All transferred receipts must identify the same ordered, frozen panel.
+        coverage = {}
+        for receipt_path in sorted(work.glob('shard_*_completed.json')):
+            receipt=read(receipt_path)
+            begin,end=receipt['first_index'],receipt['last_index']
+            if (not 1 <= begin <= end <= len(keys)
+                    or receipt_path.name != f'shard_{begin:02d}_{end:02d}_completed.json'
+                    or receipt['manifest_sha256'] != sha(work/'manifest.json')
+                    or receipt['conditions_sha256'] != digest(conditions)
+                    or len(receipt['reports']) != end-begin+1):
+                raise ValueError('Invalid shard receipt identity')
+            for index, entry in zip(range(begin,end+1),receipt['reports'],strict=True):
+                if index in coverage:
+                    raise ValueError(f'Overlapping shard receipt at {index}')
+                coverage[index]=entry
+        if set(coverage) != set(range(1,len(keys)+1)):
+            raise ValueError('Cannot finalize: missing fixed panel shard coverage')
     reports,evidence=[],[]
     elapsed=0.
-    for index,key in enumerate(keys,1):
+    tuning_panel=reuse or work
+    for index in range(first,last+1):
+        key=keys[index-1]
         folder=work/f'design_{index:02d}'
-        candidate_args=a
-        if reuse is not None:
-            candidate_args=copy(a)
-            candidate_args.finetuned=reuse/f'design_{index:02d}'/'tuning'
-        report=evaluate(candidate_args,folder,source,plan,actor,lookup[key]['design_ids']['stairs'],conditions)
         path=folder/'bo_evaluation.json'
+        if path.is_file():
+            entry=dict(report=path.relative_to(work).as_posix(),sha256=sha(path))
+            if finalize and coverage[index]!=entry:
+                raise ValueError(f'Shard report changed at {index}')
+            report=checked_panel_candidate(work,index,entry,benchmark,conditions,tuning_panel)
+        else:
+            if finalize:
+                raise ValueError(f'Cannot finalize: missing report {index}')
+            candidate_args=a
+            if reuse is not None:
+                candidate_args=copy(a)
+                candidate_args.finetuned=reuse/f'design_{index:02d}'/'tuning'
+            report=evaluate(candidate_args,folder,source,plan,actor,lookup[key]['design_ids']['stairs'],conditions)
+            entry=dict(report=path.relative_to(work).as_posix(),sha256=sha(path))
+        if tuple(report['candidate']['structure_key']) != tuple(key):
+            raise ValueError(f'Wrong physical structure at fixed panel index {index}')
         reports.append(report)
-        evidence.append(dict(report=path.relative_to(work).as_posix(),sha256=sha(path)))
+        evidence.append(entry)
         elapsed+=calibration_evaluation_timing(work,report['measurements'])['evaluation_seconds']
-        print('CALIBRATION_PROGRESS',index,'/ 50',f'evaluation_seconds={elapsed:.2f}',flush=True)
+        print('CALIBRATION_PROGRESS',index,'/ 50',f'shard={first}-{last}',f'evaluation_seconds={elapsed:.2f}',flush=True)
     timing=calibration_evaluation_timing(work,[row for report in reports for row in report['measurements']])
-    if timing['accepted_measurements'] != len(keys)*len(TASKS)*len(conditions['seeds']):
+    if timing['accepted_measurements'] != (last-first+1)*len(TASKS)*len(conditions['seeds']):
         raise ValueError('Incomplete accepted measurement coverage for the fixed panel')
+    receipt=dict(conditions_sha256=digest(conditions),manifest_sha256=sha(work/'manifest.json'),reports=evidence)
+    if (first,last) != (1,len(keys)):
+        freeze(work/f'shard_{first:02d}_{last:02d}_completed.json',dict(receipt,first_index=first,last_index=last))
+        print('BO_CALIBRATION_SHARD_READY',first,last,flush=True)
+        return
     freeze(work/'evaluation_timing.json',timing)
-    freeze(work/'measurements_completed.json',dict(conditions_sha256=digest(conditions),
-        manifest_sha256=sha(work/'manifest.json'),reports=evidence))
+    freeze(work/'measurements_completed.json',receipt)
     checked_measurement_panel(work)
     print('BO_CALIBRATION_MEASUREMENTS_READY',work/'measurements_completed.json',flush=True)
 
@@ -1051,6 +1097,9 @@ def main(argv=None):
             p.add_argument('--candidate', required=True, help='Exact Rough (stairs) ID in the shared bank')
             p.add_argument('--finetuned', type=Path, help='Reuse a completed candidate run with the same plan and budget')
         elif command == 'initialize':
+            p.add_argument('--first-index',type=int,default=1,help='First fixed panel index, inclusive')
+            p.add_argument('--last-index',type=int,default=50,help='Last fixed panel index, inclusive')
+            p.add_argument('--finalize-only',action='store_true',help='Verify all transferred shard receipts without launching PPO or evaluation')
             p.add_argument('--reuse-finetuned-panel', type=Path,
                            help='Use all 50 completed PPO runs from a separate calibration panel')
             p.add_argument('--measure-only', action='store_true', default=True,
