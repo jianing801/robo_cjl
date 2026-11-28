@@ -41,6 +41,8 @@ PRE_INGEST_ALIGNMENT_BO_SHA256 = {
 }
 PHYSICS_CONDITIONS = HERE/'configs/bo_conditions_physics_step.json'
 FOUR_METRIC_WEIGHTS_PATH = HERE/'configs/bo_metric_weights_four.json'
+FIVE_METRIC_WEIGHTS_PATH = HERE/'configs/bo_metric_weights_five.json'
+MOTOR_PRICES_PATH = HERE/'configs/bo_motor_prices_cny.json'
 ORIGINAL_RPO_ARCHIVE = REPO/'docs/reference/rpo_original_configuration'
 RPO_REFERENCE_KEY = (0.25, 0.30, 'DM-J10010L-2EC', 'DM-J4340P-2EC')
 ORIGINAL_RPO_SCORING_METHOD = 'post_finetune_original_rpo'
@@ -61,6 +63,8 @@ sys.path[:0] = [str(SHARED), str(REPO/'robolab'), str(REPO)]
 
 from shared_bo_metrics import (ABSOLUTE_COT_BASIS, DT, FORMAL_TASK_WEIGHTS, FOUR_METRICS,
                                FOUR_METRIC_SCORING_METHOD, FOUR_METRIC_SCORING_VERSION, KNEE_ANKLE, METRICS, PHYSICS_DT,
+                               FIVE_METRICS, FIVE_METRIC_SCORING_METHOD, FIVE_METRIC_SCORING_VERSION, PRICE_METRIC,
+                               motor_total_price, validate_motor_prices, validate_five_metric_weights,
                                POSITIVE_COT_BASIS, REPORT_VERSION, SCORING_VERSION, TASKS, TRIAL_VERSION,
                                digest, objective, paired_trials, positive, read_conditions, score_trial,
                                scoring_cot_basis, trial_metric, validate_four_metric_weights, validate_scoring)
@@ -74,7 +78,14 @@ from finetune_settings import (MIXED_BO_ENVS, MIXED_BO_LAYOUT, PPO_SCHEDULE,
 from persistence import resume_pause, run_lock
 
 ORIGINAL_RPO_FOUR_METRIC_METHOD = FOUR_METRIC_SCORING_METHOD
-ORIGINAL_RPO_SCORING_METHODS = (ORIGINAL_RPO_SCORING_METHOD, ORIGINAL_RPO_FOUR_METRIC_METHOD)
+ORIGINAL_RPO_FIVE_METRIC_METHOD = FIVE_METRIC_SCORING_METHOD
+ACTIVE_ORIGINAL_RPO_METHODS = (ORIGINAL_RPO_FOUR_METRIC_METHOD, ORIGINAL_RPO_FIVE_METRIC_METHOD)
+ORIGINAL_RPO_SCORING_METHODS = (ORIGINAL_RPO_SCORING_METHOD, *ACTIVE_ORIGINAL_RPO_METHODS)
+
+
+def profile_for_method(method):
+    return {ORIGINAL_RPO_SCORING_METHOD: 'three', ORIGINAL_RPO_FOUR_METRIC_METHOD: 'four',
+            ORIGINAL_RPO_FIVE_METRIC_METHOD: 'five'}[method]
 from stair_course import COURSE, evaluation_flight, outside_flight
 
 
@@ -819,44 +830,57 @@ def checked_original_rpo_reference(root, benchmark, conditions):
             or report['student_sha256'] != archive['final_actor_sha256']):
         raise ValueError('Original RPO structure or final actor differs from the archived reference')
     checked_candidate_measurements(folder, report, singleton, conditions, folder/'tuning')
-    return report, dict(root=str(root), archive_manifest_sha256=sha(archive_path),
+    return report, dict(root=str(root), archive_manifest_sha256=sha(ORIGINAL_RPO_ARCHIVE/'manifest.json'),
                         report_sha256=sha(path), protocol_sha256=sha(protocol_path))
 
 
-def original_rpo_scoring(reference, source, benchmark, panel, conditions, *, metric_profile='four', metric_weights=None):
+def original_rpo_scoring(reference, source, benchmark, panel, conditions, *, metric_profile='four', metric_weights=None, motor_prices=None):
     expected = required_panel_pairs(conditions)
     check_panel_pairs(reference['pairs'], expected)
     (pair,) = reference['pairs']
     if (conditions.get('measurement_dt_s') != PHYSICS_DT or len(expected) != 1
             or pair['feasible'] is not True or any(row['status'] != 'success' for row in pair['tasks'].values())):
         raise ValueError('Original RPO ratios require three successful tasks with one fixed 200 Hz evaluation')
-    if metric_profile not in ('three', 'four'):
+    if metric_profile not in ('three', 'four', 'five'):
         raise ValueError('Unknown Original RPO metric profile')
+    five = metric_profile == 'five'
     four = metric_profile == 'four'
-    if four:
-        metric_weights = validate_four_metric_weights(
-            read(FOUR_METRIC_WEIGHTS_PATH) if metric_weights is None else metric_weights)
+    ratio = four or five
+    if ratio:
+        metric_weights = (validate_five_metric_weights if five else validate_four_metric_weights)(
+            read(FIVE_METRIC_WEIGHTS_PATH if five else FOUR_METRIC_WEIGHTS_PATH)
+            if metric_weights is None else metric_weights)
     elif metric_weights is not None:
-        raise ValueError('Custom metric weights require the four-metric profile')
+        raise ValueError('Custom metric weights require a four- or five-metric profile')
+    if five:
+        motor_prices = validate_motor_prices(read(MOTOR_PRICES_PATH) if motor_prices is None else motor_prices)
+        if tuple(reference['candidate']['structure_key']) != RPO_REFERENCE_KEY:
+            raise ValueError('Motor price normalization requires the original RPO structure')
+        reference_price = motor_total_price(RPO_REFERENCE_KEY, motor_prices)
+    elif motor_prices is not None:
+        raise ValueError('Motor prices require the five-metric profile')
     metrics = {}
-    for task, names in (FOUR_METRICS if four else METRICS).items():
-        weights = (tuple(metric_weights[task][name] for name in names) if four
+    for task, names in (FIVE_METRICS if five else FOUR_METRICS if four else METRICS).items():
+        weights = (tuple(metric_weights[task][name] for name in names) if ratio
                    else ((1/3, 1/3, 1/3) if task == 'stairs' else (.4, .4, .2)))
         metrics[task] = {
-            name: dict(baseline=trial_metric(pair['tasks'][task], name, ABSOLUTE_COT_BASIS,
-                                             metric_profile=metric_profile), weight=weight)
+            name: dict(baseline=reference_price if five and name == PRICE_METRIC else
+                       trial_metric(pair['tasks'][task], name, ABSOLUTE_COT_BASIS,
+                                    metric_profile='four' if five else metric_profile), weight=weight)
             for name, weight in zip(names, weights, strict=True)
         }
-    scoring = dict(kind=FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION,
-                   method=ORIGINAL_RPO_FOUR_METRIC_METHOD if four else ORIGINAL_RPO_SCORING_METHOD,
+    scoring = dict(kind=FIVE_METRIC_SCORING_VERSION if five else FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION,
+                   method=ORIGINAL_RPO_FIVE_METRIC_METHOD if five else ORIGINAL_RPO_FOUR_METRIC_METHOD if four else ORIGINAL_RPO_SCORING_METHOD,
                    domain='simulation',
                    conditions_sha256=digest(conditions), cot_basis=ABSOLUTE_COT_BASIS,
                    task_weights=FORMAL_TASK_WEIGHTS, metrics=metrics, benchmark=benchmark,
                    measurement_panel=panel, original_rpo_reference=source)
+    if five:
+        scoring['motor_prices_cny'] = motor_prices
     score = objective(reference, scoring)
     costs = score['observations'][0]['task_objectives']
     baseline_valid = (score['mean_objective'] == 1.0 and costs == dict.fromkeys(TASKS, 1.0))
-    if four:
+    if ratio:
         baseline_valid = (isclose(score['mean_objective'], 1., rel_tol=0., abs_tol=1e-12)
                           and all(isclose(cost, 1., rel_tol=0., abs_tol=1e-12) for cost in costs.values()))
     if not baseline_valid:
@@ -883,7 +907,7 @@ def measurement_panel_source(root):
                 measurements_completed_sha256=sha(root/'measurements_completed.json'))
 
 
-def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, metric_profile='four', metric_weights=None):
+def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, metric_profile='four', metric_weights=None, motor_prices=None):
     panel, reference_root, output = (Path(path).resolve() for path in (measurements_root, reference_root, output))
     if any(output.is_relative_to(source) or source.is_relative_to(output) for source in (panel, reference_root)):
         raise ValueError('Original RPO scoring needs a separate output directory')
@@ -891,7 +915,7 @@ def freeze_original_rpo_scoring(measurements_root, reference_root, output, *, me
     reports, _, benchmark, conditions = checked_measurement_panel(panel)
     reference, source = checked_original_rpo_reference(reference_root, benchmark, conditions)
     scoring = original_rpo_scoring(reference, source, benchmark, panel_source, conditions,
-                                   metric_profile=metric_profile, metric_weights=metric_weights)
+                                   metric_profile=metric_profile, metric_weights=metric_weights, motor_prices=motor_prices)
     candidates = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
     if measurement_panel_source(panel) != panel_source:
         raise ValueError('Measurement panel changed while freezing Original RPO scoring')
@@ -930,13 +954,14 @@ def read_search_benchmark(scoring_path, scoring, conditions):
     root = (REPO/reference_source['root'] if reference_source.get('source_type') == 'repository_v4_milestone'
             else Path(reference_source['root']))
     reference, source = checked_original_rpo_reference(root, benchmark, conditions)
-    metric_profile = 'four' if scoring['method'] == ORIGINAL_RPO_FOUR_METRIC_METHOD else 'three'
+    metric_profile = profile_for_method(scoring['method'])
     # Existing scores retain the selected weights even if the provisional
     # default configuration was subsequently edited for a new experiment.
     weights = ({task: {name: row['weight'] for name, row in items.items()}
-                for task, items in scoring['metrics'].items()} if metric_profile == 'four' else None)
+                for task, items in scoring['metrics'].items()} if metric_profile in ('four', 'five') else None)
     if original_rpo_scoring(reference, source, benchmark, panel_source, conditions,
-                            metric_profile=metric_profile, metric_weights=weights) != scoring:
+                            metric_profile=metric_profile, metric_weights=weights,
+                            motor_prices=scoring.get('motor_prices_cny')) != scoring:
         raise ValueError('Frozen Original RPO scoring differs from the reference and measured panel')
     records = original_rpo_initial_scores(reports, benchmark['reports'], scoring, conditions)
     if read(observations_path) != dict(scoring_sha256=sha(scoring_path), reference_objective=1.0, candidates=records):
@@ -1046,7 +1071,7 @@ def initialize(a, work, source, plan, actor, conditions):
 def search(a, work, source, plan, actor, conditions):
     """Canonical continuous BO using the current four-metric ratios."""
     scoring = read(a.scoring)
-    if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD or
+    if (scoring.get('method') not in ACTIVE_ORIGINAL_RPO_METHODS or
             scoring.get('benchmark', {}).get('ppo_algorithm') != CURRENT_PPO_ALGORITHM or
             scoring['benchmark'].get('native_ppo_settings') != CURRENT_PPO_SETTINGS):
         raise ValueError('Scheme B BO requires a newly measured B panel and original-RPO reference; old data remain historical')
@@ -1143,10 +1168,10 @@ def main(argv=None):
     p.add_argument('--resume-paused', action='store_true')
     p.add_argument('--original-rpo-reference', type=Path,
                    help='Measured round-5, all-fixed-std, update-200 original RPO reference directory (required)')
-    p.add_argument('--metric-profile', choices=('four',), default='four',
-                   help='Only the four-metric original-RPO profile is active')
+    p.add_argument('--metric-profile', choices=('four','five'), default='four',
+                   help='Original-RPO four metrics or five metrics including motor price')
     p.add_argument('--metric-weights', type=Path,
-                   help='Four-metric weights JSON (default: configs/bo_metric_weights_four.json)')
+                   help='Optional weights JSON for the selected metric profile')
     p.add_argument('--output', type=Path, required=True, help='Separate output directory for original RPO scoring')
     p = sub.add_parser('ingest')
     p.add_argument('--spec', type=Path, required=True)
@@ -1169,7 +1194,7 @@ def main(argv=None):
             resume_pause(work, a.resume_paused)
             resume_pause(output, a.resume_paused)
             freeze_original_rpo_scoring(work, a.original_rpo_reference, output,
-                                        metric_profile='four',
+                                        metric_profile=a.metric_profile,
                                         metric_weights=read(a.metric_weights) if a.metric_weights is not None else None)
         return
     if a.command == 'ingest':
@@ -1179,7 +1204,7 @@ def main(argv=None):
         scoring = read(a.scoring)
         report = checked_report(a.report)
         algorithm = scoring.get('benchmark', {}).get('ppo_algorithm')
-        if (scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD
+        if (scoring.get('method') not in ACTIVE_ORIGINAL_RPO_METHODS
                 or algorithm not in EXPERT_PRIOR_ALGORITHMS or report.get('ppo_algorithm') != algorithm):
             raise ValueError('The measurement and four-metric scoring must use the same expert-prior PPO algorithm')
         reference_root = (ORIGINAL_RPO_ARCHIVE if algorithm == NATIVE_PPO_ALGORITHM
@@ -1188,7 +1213,8 @@ def main(argv=None):
         weights = {task:{name:row['weight'] for name,row in items.items()}
                    for task,items in scoring['metrics'].items()}
         expected = original_rpo_scoring(reference, source, scoring['benchmark'], scoring['measurement_panel'],
-                                        report['conditions'], metric_weights=weights)
+                                        report['conditions'], metric_profile=profile_for_method(scoring['method']),
+                                        metric_weights=weights, motor_prices=scoring.get('motor_prices_cny'))
         if expected != scoring:
             raise ValueError('Scoring differs from the measured original-RPO normalization')
         print(json.dumps(objective(report, scoring), indent=2, allow_nan=False))
@@ -1216,8 +1242,8 @@ def main(argv=None):
         default_scoring = a.root/'bo'/'scoring_original_rpo_four_metrics_pcgrad_ppo200_fixed_all_std'/'scoring.json'
         a.scoring = (a.scoring or default_scoring).resolve()
         scoring = read(a.scoring)
-        if scoring.get('method') != ORIGINAL_RPO_FOUR_METRIC_METHOD:
-            raise ValueError('Continuous BO requires the four-metric original-RPO ratio scoring; historical scores are read-only')
+        if scoring.get('method') not in ACTIVE_ORIGINAL_RPO_METHODS:
+            raise ValueError('Continuous BO requires current four- or five-metric original-RPO ratio scoring; historical scores are read-only')
         if (scoring.get('benchmark', {}).get('ppo_algorithm') != CURRENT_PPO_ALGORITHM or
                 scoring['benchmark'].get('native_ppo_settings') != CURRENT_PPO_SETTINGS or
                 scoring['benchmark'].get('updates') != DEFAULT_BO_UPDATES):

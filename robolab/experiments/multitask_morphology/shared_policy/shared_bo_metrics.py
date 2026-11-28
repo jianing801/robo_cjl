@@ -20,11 +20,20 @@ METRICS = {task: ('cot', 'forward_rmse_mps',
 # by the former task-specific score.
 FOUR_METRICS = {task: ('cot', 'forward_rmse_mps', 'roll_pitch_rms_rad_s',
                        'knee_ankle_max_rated_ratio') for task in TASKS}
+PRICE_METRIC = 'motor_total_price_cny'
+FIVE_METRICS = {task: (*names, PRICE_METRIC) for task, names in FOUR_METRICS.items()}
+ORIGINAL_PRICE_KEY = (.25, .30, 'DM-J10010L-2EC', 'DM-J4340P-2EC')
+MOTOR_PRICE_IDS = {
+    'knee': {'RS04', 'DM-J10010L-2EC', 'DM-J10010-2EC', 'DM-J6248P-2EC', 'DM-J10422P-2EC'},
+    'ankle': {'RS06', 'DM-J4340P-2EC', 'DM-J8009P-2EC-V1.1', 'DM-J4340P-2EC-V1.1-48V', 'DM-J6216P-2EC'},
+}
 TRIAL_VERSION = 'rpo_three_task_mechanical_positive_v1'
 REPORT_VERSION = 'rpo_three_task_bo_evaluation_v1'
 SCORING_VERSION = 'rpo_three_task_bo_scoring_v1'
 FOUR_METRIC_SCORING_VERSION = 'rpo_three_task_bo_scoring_v2'
 FOUR_METRIC_SCORING_METHOD = 'post_finetune_original_rpo_four_metrics'
+FIVE_METRIC_SCORING_VERSION = 'rpo_three_task_bo_scoring_v3'
+FIVE_METRIC_SCORING_METHOD = 'post_finetune_original_rpo_five_metrics'
 DT = .02
 PHYSICS_DT = .005
 POSITIVE_COT_BASIS = 'positive_mechanical'
@@ -55,6 +64,38 @@ def validate_four_metric_weights(value):
             raise ValueError(f'Invalid {task} four-metric weights: exact metrics, nonnegative finite values, sum one required')
         result[task] = {name: row[name] for name in names}
     return result
+
+
+def validate_five_metric_weights(value):
+    if not isinstance(value, dict) or set(value) != set(TASKS):
+        raise ValueError('Five-metric weights require exactly three tasks')
+    for task, names in FIVE_METRICS.items():
+        row = value[task]
+        if (not isinstance(row, dict) or set(row) != set(names)
+                or any(type(w) not in (int, float) or not math.isfinite(w) or w < 0 for w in row.values())
+                or not math.isclose(math.fsum(row.values()), 1., rel_tol=0., abs_tol=1e-12)):
+            raise ValueError(f'Invalid {task} five-metric weights')
+    return {task: {name: value[task][name] for name in names} for task, names in FIVE_METRICS.items()}
+
+
+def validate_motor_prices(prices):
+    if not isinstance(prices, dict) or set(prices) != set(MOTOR_PRICE_IDS):
+        raise ValueError('Invalid motor price catalog')
+    for group, ids in MOTOR_PRICE_IDS.items():
+        row = prices[group]
+        if (not isinstance(row, dict) or set(row) != ids
+                or any(type(v) is not int or v <= 0 for v in row.values())):
+            raise ValueError(f'Invalid {group} motor price catalog')
+    return {group: dict(row) for group, row in prices.items()}
+
+
+def motor_total_price(key, prices):
+    if not isinstance(key, (tuple, list)) or len(key) != 4:
+        raise ValueError('Invalid motor structure key')
+    try:
+        return 2 * prices['knee'][key[2]] + 4 * prices['ankle'][key[3]]
+    except (KeyError, TypeError) as exc:
+        raise ValueError('Unknown motor in price catalog') from exc
 
 
 def read_conditions(path):
@@ -211,8 +252,10 @@ def trial_metric(trial, name, cot_basis, *, metric_profile='three'):
 
 
 def validate_scoring(value, report):
+    five = value.get('method') == FIVE_METRIC_SCORING_METHOD
     four = value.get('method') == FOUR_METRIC_SCORING_METHOD
-    version = FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION
+    ratio = four or five
+    version = FIVE_METRIC_SCORING_VERSION if five else FOUR_METRIC_SCORING_VERSION if four else SCORING_VERSION
     if (value.get('kind') != version or value.get('domain') != report.get('domain')
             or value.get('conditions_sha256') != report.get('conditions_sha256')):
         raise ValueError('Scoring and evaluation must have the same domain and conditions')
@@ -223,12 +266,17 @@ def validate_scoring(value, report):
     if not weights(value['task_weights'], TASKS) or set(value['metrics']) != set(TASKS):
         raise ValueError('Task weights must be nonnegative and sum to one')
     cot_basis = scoring_cot_basis(value)
-    if four and (value.get('domain') != 'simulation' or cot_basis != ABSOLUTE_COT_BASIS
+    if ratio and (value.get('domain') != 'simulation' or cot_basis != ABSOLUTE_COT_BASIS
                  or value['task_weights'] != FORMAL_TASK_WEIGHTS):
         raise ValueError('Four-metric Original RPO scoring requires absolute mechanical CoT and 0.4/0.3/0.3 task weights')
-    if four:
-        validate_four_metric_weights({task: {name: row['weight'] for name, row in items.items()}
-                                      for task, items in value['metrics'].items()})
+    if ratio:
+        (validate_five_metric_weights if five else validate_four_metric_weights)(
+            {task: {name: row['weight'] for name, row in items.items()} for task, items in value['metrics'].items()})
+    if five:
+        prices = validate_motor_prices(value.get('motor_prices_cny'))
+        base_price = motor_total_price(ORIGINAL_PRICE_KEY, prices)
+        if any(items[PRICE_METRIC]['baseline'] != base_price for items in value['metrics'].values()):
+            raise ValueError('Original RPO motor price baseline differs from frozen catalog')
     if cot_basis == ABSOLUTE_COT_BASIS:
         if 'conditions' in report and report['conditions'].get('measurement_dt_s') != PHYSICS_DT:
             raise ValueError('Absolute mechanical CoT scoring requires 200 Hz measurements')
@@ -236,12 +284,12 @@ def validate_scoring(value, report):
             raise ValueError('Formal 200 Hz scoring requires 0.4/0.3/0.3 task weights')
     for task, items in value['metrics'].items():
         task_weights = {k: row['weight'] for k, row in items.items()}
-        names = FOUR_METRICS[task] if four else METRICS[task]
+        names = FIVE_METRICS[task] if five else FOUR_METRICS[task] if four else METRICS[task]
         if not weights(task_weights, names):
             raise ValueError(f'Invalid {task} metric weights')
         for row in items.values():
             baseline, scale = row['baseline'], row.get('scale')
-            if four and (not positive(baseline) or scale is not None):
+            if ratio and (not positive(baseline) or scale is not None):
                 raise ValueError('Four-metric Original RPO scoring requires positive fixed ratio denominators')
             if (type(baseline) not in (int, float) or not math.isfinite(baseline) or baseline < 0
                     or (scale is None and not positive(baseline)) or (scale is not None and not positive(scale))):
@@ -254,17 +302,23 @@ def objective(report, scoring):
         raise ValueError('Cannot mix BO observations from different PPO algorithms')
     validate_scoring(scoring, report)
     cot_basis = scoring_cot_basis(scoring)
-    metric_profile = 'four' if scoring.get('method') == FOUR_METRIC_SCORING_METHOD else 'three'
+    five = scoring.get('method') == FIVE_METRIC_SCORING_METHOD
+    metric_profile = 'four' if five or scoring.get('method') == FOUR_METRIC_SCORING_METHOD else 'three'
+    price = motor_total_price(report.get('candidate', {}).get('structure_key'),
+                              scoring['motor_prices_cny']) if five else None
     observations = []
     for pair in report['pairs']:
         feasible = pair['feasible']
         if feasible is None:
             continue
         result = dict(seed=pair['seed'], replica=pair['replica'], feasible=feasible, objective=None)
+        if five:
+            result[PRICE_METRIC] = price
         if feasible:
             normalized = {}
             for task, specs in scoring['metrics'].items():
-                raw = {key: trial_metric(pair['tasks'][task], key, cot_basis, metric_profile=metric_profile)
+                raw = {key: price if five and key == PRICE_METRIC else
+                       trial_metric(pair['tasks'][task], key, cot_basis, metric_profile=metric_profile)
                        for key in specs}
                 if any(value is None for value in raw.values()):
                     continue

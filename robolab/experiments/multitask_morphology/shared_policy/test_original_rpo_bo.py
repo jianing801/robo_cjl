@@ -334,3 +334,68 @@ def test_search_refuses_a_different_evaluation_protocol(original_rpo_panel):
     changed = dict(conditions, seeds=[42])
     with pytest.raises(ValueError):
         bo.read_search_benchmark(scoring_path, bo.read(scoring_path), changed)
+
+def test_five_metric_price_profile_freezes_and_reuses_same_measurements(original_rpo_panel):
+    panel, reference, output, conditions, _, reports, baseline = original_rpo_panel
+    before = {p: bo.sha(p) for p in panel.rglob('*.json')}
+    four = output.with_name('four')
+    bo.freeze_original_rpo_scoring(panel, reference, four)
+    old = bo.sha(four/'scoring.json')
+    bo.main(['freeze-scoring', '--measurements-root', str(panel),
+             '--original-rpo-reference', str(reference), '--output', str(output),
+             '--metric-profile', 'five'])
+    scoring = bo.read(output/'scoring.json')
+    assert scoring['method'] == 'post_finetune_original_rpo_five_metrics'
+    assert scoring['task_weights'] == {'stairs': .4, 'backpack': .3, 'run': .3}
+    expected = {
+        'stairs': (.25, .25, .35, .10, .05),
+        'backpack': (.35, .25, .20, .15, .05),
+        'run': (.25, .35, .15, .20, .05),
+    }
+    fields = ('cot','forward_rmse_mps','roll_pitch_rms_rad_s',
+              'knee_ankle_max_rated_ratio','motor_total_price_cny')
+    for task, weights in expected.items():
+        assert {name: row['weight'] for name,row in scoring['metrics'][task].items()} == dict(zip(fields,weights))
+        assert scoring['metrics'][task]['motor_total_price_cny']['baseline'] == 5900
+    orig = bo.objective(baseline, scoring)
+    assert orig['mean_objective'] == pytest.approx(1.)
+    assert orig['observations'][0]['task_objectives'] == pytest.approx(dict.fromkeys(bo.TASKS,1.))
+    expensive = deepcopy(baseline)
+    expensive['candidate']['structure_key'] = [.4,.45,'DM-J10010-2EC','DM-J8009P-2EC-V1.1']
+    score = bo.objective(expensive,scoring)
+    assert score['mean_objective'] == pytest.approx(.95 + .05 * 10800/5900)
+    assert score['observations'][0]['motor_total_price_cny'] == 10800
+    assert bo.objective(reports[-1],scoring)['mean_objective'] is None
+    assert bo.read_search_benchmark(output/'scoring.json',scoring,conditions)[0] == panel
+    assert bo.sha(four/'scoring.json') == old
+    assert all(bo.sha(p)==h for p,h in before.items())
+    invalid = deepcopy(expensive)
+    invalid['candidate']['structure_key'][3] = 'unknown'
+    with pytest.raises(ValueError,match='motor'):
+        bo.objective(invalid,scoring)
+    changed = deepcopy(scoring)
+    changed['metrics']['stairs']['motor_total_price_cny']['baseline'] = 6000
+    with pytest.raises(ValueError,match='price'):
+        bo.objective(expensive,changed)
+
+def test_five_metric_prices_are_frozen_and_continuous_protocol_accepts_them(original_rpo_panel, monkeypatch):
+    panel, reference, output, conditions, _, reports, _ = original_rpo_panel
+    bo.freeze_original_rpo_scoring(panel, reference, output, metric_profile='five')
+    path = output/'scoring.json'
+    scoring = bo.read(path)
+    from bo_continuous import scoring_protocol
+    scoring_protocol(bo, scoring, conditions)
+    prices = deepcopy(scoring['motor_prices_cny'])
+    prices['knee']['DM-J10010L-2EC'] += 100
+    next_catalog = output.with_name('future_prices.json')
+    bo.freeze(next_catalog, prices)
+    monkeypatch.setattr(bo, 'MOTOR_PRICES_PATH', next_catalog)
+    assert bo.read_search_benchmark(path, scoring, conditions)[0] == panel
+    invalid = deepcopy(scoring)
+    invalid['motor_prices_cny']['ankle'].pop('RS06')
+    with pytest.raises(ValueError,match='motor price'):
+        bo.objective(reports[0],invalid)
+    changed = deepcopy(scoring)
+    changed['metrics']['run']['motor_total_price_cny']['weight'] = .1
+    with pytest.raises(ValueError,match='weights'):
+        bo.objective(reports[0],changed)
