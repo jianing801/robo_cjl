@@ -88,6 +88,25 @@ class PhaseTests(unittest.TestCase):
         for group in range(2):
             self.assertEqual(set(runner.env.initial_ages[group::2].tolist()), set(range(6)))
 
+    def test_independent_timer_mixes_all_terrain_types(self):
+        from episode_phases import assign_initial_episode_ages
+        torch.manual_seed(42)
+        age = torch.zeros(4096, dtype=torch.long)
+        groups = torch.zeros_like(age)
+        assign_initial_episode_ages(age, groups, 1000, independent=True)
+        terrain = torch.arange(4096) * 20 // 4096
+        table = torch.bincount(terrain*20 + age*20//1000, minlength=400).reshape(20,20)
+        self.assertTrue(torch.all((table>0).sum(1)>=18))
+        self.assertTrue(torch.all((age>=0)&(age<1000)))
+
+    def test_independent_warmup_excludes_partial_episodes(self):
+        runner=self.make_runner()
+        audit=warm_up_episode_phases(runner, independent=True)
+        self.assertEqual(audit['phase_randomization'],'per_environment_iid_uniform')
+        self.assertEqual(audit['provisional_episodes_excluded'],12)
+        self.assertEqual(set(runner.logger.rewbuffer),{12.0})
+        self.assertEqual(set(runner.logger.lenbuffer),{6.0})
+
     def test_counts_amp_task_style_and_total_separately(self):
         runner = self.make_runner(amp=True)
         warm_up_episode_phases(runner)

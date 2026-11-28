@@ -7,7 +7,28 @@ import time
 import torch
 
 
-def warm_up_episode_phases(runner, pause_marker=None):
+def assign_initial_episode_ages(age, groups, horizon, *, independent=False):
+    if independent:
+        # 原生 PPO 的逐环境独立随机计时：避免地形编号与回合相位绑定。
+        age.copy_(torch.randint_like(age, high=horizon))
+        return
+    # 每个结构内部均匀分配起始回合步数，再加独立的随机相位。
+    _, membership, sizes = torch.unique(groups, return_inverse=True, return_counts=True)
+    order = torch.argsort(membership)
+    sorted_groups = membership[order]
+    starts = sizes.cumsum(0) - sizes
+    ranks = torch.arange(age.numel(), device=age.device) - starts[sorted_groups]
+    shifts = torch.randint(horizon, sizes.shape, device=age.device)
+    age[order] = (ranks * horizon // sizes[sorted_groups] + shifts[sorted_groups]) % horizon
+
+
+def phase_terrain_distribution(age, terrain_type, horizon):
+    bins = (age.long().reshape(-1) * 20 // horizon).clamp(0, 19)
+    types = terrain_type.to(age.device).long().reshape(-1)
+    return torch.bincount(types*20+bins, minlength=(int(types.max())+1)*20).reshape(-1,20).cpu().tolist()
+
+
+def warm_up_episode_phases(runner, pause_marker=None, *, independent=False):
     if runner.alg_cfg.get("rnd_cfg") or runner.alg.policy.is_recurrent or getattr(runner, "is_distributed", False):
         raise ValueError("错开回合入口支持单卡、前馈策略和无 RND 的原生专家配置。")
 
@@ -38,14 +59,12 @@ def warm_up_episode_phases(runner, pause_marker=None):
             counter.zero_()
         logger.ep_extras.clear()
 
-        # 每个结构内部均匀分配起始回合步数，再加独立的随机相位。
-        _, membership, sizes = torch.unique(groups, return_inverse=True, return_counts=True)
-        order = torch.argsort(membership)
-        sorted_groups = membership[order]
-        starts = sizes.cumsum(0) - sizes
-        ranks = torch.arange(num_envs, device=age.device) - starts[sorted_groups]
-        shifts = torch.randint(horizon, sizes.shape, device=age.device)
-        age[order] = (ranks * horizon // sizes[sorted_groups] + shifts[sorted_groups]) % horizon
+        assign_initial_episode_ages(age, groups, horizon, independent=independent)
+        initial_age_histogram = torch.histc(age.float(), bins=20, min=0, max=float(horizon)).int().cpu().tolist()
+        terrain = getattr(getattr(getattr(env, 'unwrapped', None), 'scene', None), 'terrain', None)
+        terrain_types = getattr(terrain, 'terrain_types', None)
+        initial_phase_terrain_counts = (phase_terrain_distribution(age, terrain_types, horizon)
+                                        if isinstance(terrain_types, torch.Tensor) else None)
 
         reset_once = torch.zeros(num_envs, dtype=torch.bool, device=runner.device)
         valid_episodes = torch.zeros((), dtype=torch.long, device=runner.device)
@@ -99,6 +118,9 @@ def warm_up_episode_phases(runner, pause_marker=None):
         window_episodes=len(logger.rewbuffer),
         warmup_seconds=time.monotonic() - started,
         ppo_collection_during_warmup=False,
+        phase_randomization="per_environment_iid_uniform" if independent else "group_ordered_shift",
+        initial_age_histogram=initial_age_histogram,
+        initial_phase_terrain_counts=initial_phase_terrain_counts,
     )
     print("EPISODE_PHASE_WARMUP_COMPLETE " + json.dumps(info), flush=True)
     return info

@@ -191,9 +191,11 @@ def verify_native(a,task,task_root,receipt):
 
 
 def summarize_training(task_root,budget):
-    rows={}; attempted_seconds=0.; segments=[]
+    rows={}; attempted_seconds=0.; segments=[]; warmup_seconds=0.
     for path in sorted(task_root.glob('attempts/*/result/native_mean_reward.csv')):
         times=0.; updates=[]
+        warmup=path.parent/'warmup_receipt.json'
+        if warmup.is_file(): warmup_seconds+=float(read(warmup)['warmup_seconds'])
         with path.open(newline='',encoding='utf8') as stream:
             for row in csv.DictReader(stream):
                 step=int(row['update']); duration=float(row['collect_seconds'])+float(row['learn_seconds'])
@@ -211,7 +213,8 @@ def summarize_training(task_root,budget):
     for seg in segments[1:]: ax.axvline(seg['first'],color='gray',ls='--',lw=.6)
     ax.grid(alpha=.2);fig.tight_layout();fig.savefig(task_root/'mean_reward.png',dpi=150);plt.close(fig)
     publish(task_root/'timing.json',dict(training_seconds=attempted_seconds,
-            committed_update_compute_seconds=sum(float(r['collect_seconds'])+float(r['learn_seconds']) for r in ordered),segments=segments))
+            committed_update_compute_seconds=sum(float(r['collect_seconds'])+float(r['learn_seconds']) for r in ordered),
+            warmup_seconds=warmup_seconds,segments=segments))
 
 
 def train_one(a,task,plan):
@@ -241,6 +244,9 @@ def train_one(a,task,plan):
                  '--asset-cache',task_root/'cache','--singleton-root',root,'--headless','--device','cuda:0']
         if task=='run': command+=['--reference-library',spec['reference_library']]
         if receipt: command+=['--resume-checkpoint',receipt['checkpoint']]
+        if receipt and task=='stairs':
+            # Only change resume startup; keep the frozen native tree/plan untouched.
+            command.insert(3,HERE/'staggered/singleton_resume_warmup.py')
         try:
             choices=wait_gpu(root,a.gpu,12800)
             with gpu_lease(choices,HERE.parents[1]/'logs/rpo_rough_multimorph/gpu_locks') as gpu:
